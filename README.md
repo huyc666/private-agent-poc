@@ -45,6 +45,8 @@
 
 ## 架构
 
+![架构图](architecture.png)
+
 ```
 浏览器 (web/index.html, 零 CDN 依赖，可断网运行)
    │  SSE 流式
