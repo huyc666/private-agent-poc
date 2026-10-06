@@ -1,0 +1,15 @@
+# core-utils 平台包：跨领域通用基础能力（时间、计算）
+# platform: true 标记这是平台包——始终加载，对话中不可禁用（领域包让路于它），
+# 管理员要下线只能在部署层移除该目录。
+name: core-utils
+version: 1.0.0
+description: 平台通用基础能力：当前时间查询、安全数学计算（各领域通用）
+core_version: ">=0.12.0"
+platform: true
+
+requires_env: []
+
+tools:
+  - tools/get_current_time.py
+  - tools/calculator.py
+signature: "hmac-sha256:c93c31b9f896195f45a092e740e92ec8a3e312165a7fcbc2084192ef6f046648"

@@ -1,0 +1,143 @@
+# Langfuse v3 观测栈（可选）：追踪每次 Agent 调用的工具链、耗时、token 消耗
+# 用法：docker compose -f docker-compose.langfuse.yml up -d
+# 首次启动 ClickHouse 迁移较慢（1~2 分钟），web 就绪后访问 http://localhost:3000
+#
+# 已预置 LANGFUSE_INIT_*：首次启动自动创建组织/项目/密钥，
+# 密钥 pk-lf-local / sk-lf-local 与 .env.example 默认值对应，开箱即用。
+# 生产部署务必修改所有 CHANGEME 密钥。
+services:
+  langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: poc-langfuse-web
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/postgres
+      DIRECT_URL: postgresql://postgres:postgres@db:5432/postgres
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: redis
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-CHANGEME-nextauth-secret}
+      SALT: ${SALT:-CHANGEME-salt}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-CHANGEME00000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: "false"
+      # 初始化组织/项目/密钥（仅首次启动生效）
+      LANGFUSE_INIT_ORG_ID: poc-org
+      LANGFUSE_INIT_ORG_NAME: POC
+      LANGFUSE_INIT_PROJECT_ID: poc-project
+      LANGFUSE_INIT_PROJECT_NAME: agent-poc
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-local
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-local
+      LANGFUSE_INIT_USER_EMAIL: admin@poc.local
+      LANGFUSE_INIT_USER_NAME: admin
+      LANGFUSE_INIT_USER_PASSWORD: admin1234
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: poc-langfuse-worker
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/postgres
+      DIRECT_URL: postgresql://postgres:postgres@db:5432/postgres
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: redis
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-CHANGEME-nextauth-secret}
+      SALT: ${SALT:-CHANGEME-salt}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-CHANGEME00000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: "false"
+
+  db:
+    image: postgres:16-alpine
+    container_name: poc-langfuse-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - langfuse_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12
+    container_name: poc-langfuse-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - langfuse_clickhouse:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: poc-langfuse-redis
+    restart: unless-stopped
+    command: redis-server --requirepass redis --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: poc-langfuse-minio
+    restart: unless-stopped
+    entrypoint: sh
+    command: -c "mkdir -p /data/langfuse && minio server /data --console-address ':9001'"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    volumes:
+      - langfuse_minio:/data
+    ports:
+      - "9090:9000"   # S3 API
+      - "9091:9001"   # 控制台
+
+volumes:
+  langfuse_postgres:
+  langfuse_clickhouse:
+  langfuse_minio:

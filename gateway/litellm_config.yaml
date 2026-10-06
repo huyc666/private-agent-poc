@@ -1,0 +1,39 @@
+# LiteLLM gateway config: unified LLM entry (rate limit / audit / fallback).
+# NOTE: keep this file pure ASCII - litellm reads YAML with the OS default
+# encoding, and non-ASCII bytes break startup on zh-CN Windows (GBK).
+#
+# Docker:        docker compose -f docker-compose.gateway.yml up -d
+# No Docker:     pip install "litellm[proxy]" && \
+#                DEEPSEEK_API_KEY=sk-... litellm --config gateway/litellm_config.yaml --port 4000
+# Agent .env:    LLM_BASE_URL=http://127.0.0.1:4000/v1
+#                LLM_API_KEY=sk-poc-gateway     # gateway master key (change in production)
+#                MODEL_NAME=qwen-27b            # logical name unchanged; fallback is transparent
+#
+# Fallback: when qwen-27b (vLLM) is unreachable the router switches to
+# deepseek-chat automatically; the Agent side notices nothing.
+# Audit: every request passes the gateway log (ship it to your log stack).
+
+model_list:
+  # Primary: self-hosted vLLM (see deploy step 1)
+  - model_name: qwen-27b
+    litellm_params:
+      model: openai/qwen-27b            # openai/ prefix = any OpenAI-compatible endpoint
+      api_base: http://127.0.0.1:8000/v1   # point to http://<GPU-host>:8000/v1 when remote
+      api_key: EMPTY
+      rpm: 120                          # requests-per-minute limit
+  # Fallback: DeepSeek cloud (dev only; remove for production deployment,
+  # or replace with a second vLLM / smaller quantized model)
+  - model_name: deepseek-chat
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: os.environ/DEEPSEEK_API_KEY
+      rpm: 30
+
+router_settings:
+  fallbacks: [{"qwen-27b": ["deepseek-chat"]}]   # primary down -> backup
+  allowed_fails: 1                                # fallback after 1 primary failure
+  num_retries: 1
+  timeout: 120
+
+general_settings:
+  master_key: sk-poc-gateway            # POC default; change in production (sync LLM_API_KEY)

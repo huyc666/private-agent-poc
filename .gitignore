@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+models/
+server.log
+server.pid
+# 运行时 SQLite 数据（会话/审批/计量，勿入库）
+state.db
+state.db-wal
+state.db-shm
+usage.db
+usage.db-wal
+usage.db-shm

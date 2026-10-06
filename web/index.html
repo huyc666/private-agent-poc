@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Private Agent POC</title>
+<!-- 全部样式与脚本内联，无任何外部 CDN 依赖，可在断网内网环境运行 -->
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #262b36;
+    --text: #e6e9ef; --dim: #8b93a3; --accent: #4f8cff; --tool: #b082f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: "Segoe UI", "Microsoft YaHei", sans-serif; height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 14px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 17px; font-weight: 600; }
+  .badge { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--dim); }
+  .badge.live { color: #4ade80; border-color: #1d4d33; }
+  .badge.mock { color: #fbbf24; border-color: #5a4517; }
+  .badge.online { color: #4ade80; border-color: #1d4d33; }
+  .badge.online::before { content: "● "; }
+  .badge.offline { color: #f87171; border-color: #5a2020; animation: pulse 1.2s infinite; }
+  .badge.offline::before { content: "● "; }
+  @keyframes pulse { 50% { opacity: .45; } }
+  #chat { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+  .msg { max-width: 78%; padding: 12px 16px; border-radius: 12px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; font-size: 14.5px; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .tool-chip { align-self: flex-start; font-size: 12.5px; color: var(--tool); background: rgba(176,130,247,.08); border: 1px solid rgba(176,130,247,.3); padding: 5px 12px; border-radius: 8px; }
+  .tool-chip .result { color: var(--dim); }
+  .approval-card { align-self: flex-start; background: rgba(248,113,113,.07); border: 1px solid rgba(248,113,113,.45); border-radius: 10px; padding: 12px 16px; font-size: 13.5px; max-width: 78%; }
+  .approval-card .title { color: #f87171; font-weight: 600; margin-bottom: 6px; }
+  .approval-card .detail { color: var(--dim); margin: 3px 0; word-break: break-all; }
+  .approval-card .detail code { color: var(--text); background: rgba(255,255,255,.06); padding: 1px 6px; border-radius: 4px; }
+  .approval-card .btns { margin-top: 10px; display: flex; gap: 10px; align-items: center; }
+  .approve-btn { background: #166534; color: #fff; border: none; border-radius: 8px; padding: 6px 18px; cursor: pointer; }
+  .reject-btn { background: #7f1d1d; color: #fff; border: none; border-radius: 8px; padding: 6px 18px; cursor: pointer; }
+  .approve-btn:disabled, .reject-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .approval-status { color: var(--dim); font-size: 12.5px; }
+  #composer { display: flex; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--border); }
+  #input { flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; color: var(--text); font-size: 14.5px; outline: none; resize: none; font-family: inherit; }
+  #input:focus { border-color: var(--accent); }
+  #send { background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 0 22px; font-size: 14.5px; cursor: pointer; }
+  #send:disabled { opacity: .45; cursor: not-allowed; }
+  .hint { color: var(--dim); font-size: 12.5px; text-align: center; padding: 6px; }
+  .usage-note { color: var(--dim); font-size: 12px; padding: 0 24px 4px 48px; }
+  #userBadge { cursor: pointer; }
+  .nav-btn { cursor: pointer; }
+  .divider { align-self: center; color: var(--dim); font-size: 12.5px; padding: 4px 0; }
+  #panel { position: fixed; top: 0; right: -360px; width: 340px; height: 100vh; background: var(--panel); border-left: 1px solid var(--border); transition: right .2s; z-index: 10; display: flex; flex-direction: column; }
+  #panel.open { right: 0; }
+  #panel .panel-head { display: flex; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border); align-items: center; }
+  #panel .tab { font-size: 13px; padding: 4px 12px; border-radius: 8px; border: 1px solid var(--border); color: var(--dim); cursor: pointer; }
+  #panel .tab.active { color: var(--text); border-color: var(--accent); }
+  #panel .close { margin-left: auto; color: var(--dim); cursor: pointer; font-size: 16px; }
+  #panel .panel-body { flex: 1; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .sess-item { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; cursor: pointer; font-size: 13px; }
+  .sess-item:hover { border-color: var(--accent); }
+  .sess-item.current { border-color: var(--accent); background: rgba(79,140,255,.08); }
+  .sess-item .meta { color: var(--dim); font-size: 11.5px; margin-top: 3px; }
+  .appr-item { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; }
+  .appr-item .meta { color: var(--dim); font-size: 11.5px; margin-top: 3px; word-break: break-all; }
+  .appr-item.pending { border-color: rgba(251,191,36,.5); }
+  .appr-item .btns { margin-top: 6px; display: flex; gap: 8px; align-items: center; }
+  .appr-item .approve-btn, .appr-item .reject-btn { padding: 3px 12px; font-size: 12px; border-radius: 6px; }
+  .appr-item .note { color: var(--dim); font-size: 11px; margin-top: 4px; }
+  #newSessBtn { width: 100%; background: none; border: 1px dashed var(--border); color: var(--dim); border-radius: 8px; padding: 8px; cursor: pointer; font-size: 13px; }
+  #newSessBtn:hover { color: var(--text); border-color: var(--accent); }
+  /* ---- 登录框（v0.15.0 账号密码登录）---- */
+  #loginMask { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: center; justify-content: center; z-index: 20; }
+  #loginMask.open { display: flex; }
+  #loginBox { width: 340px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 22px 24px; }
+  #loginBox h2 { font-size: 16px; margin-bottom: 14px; }
+  #loginBox label { display: block; font-size: 12.5px; color: var(--dim); margin: 10px 0 4px; }
+  #loginBox input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; color: var(--text); font-size: 14px; outline: none; }
+  #loginBox input:focus { border-color: var(--accent); }
+  #loginBox .login-btn { width: 100%; margin-top: 14px; background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 10px; font-size: 14px; cursor: pointer; }
+  #loginBox .login-btn:disabled { opacity: .45; cursor: not-allowed; }
+  #loginBox .divider-line { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: 12px; margin: 16px 0 4px; }
+  #loginBox .divider-line::before, #loginBox .divider-line::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
+  #loginErr { color: #f87171; font-size: 12.5px; margin-top: 10px; min-height: 16px; }
+  #logoutBtn { width: 100%; margin-top: 8px; background: none; border: 1px solid var(--border); color: var(--dim); border-radius: 8px; padding: 8px; cursor: pointer; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🤖 Private Agent POC</h1>
+  <span class="badge" id="statusBadge">连接中…</span>
+  <span class="badge" id="modeBadge"></span>
+  <span class="badge" id="obsBadge"></span>
+  <span class="badge" id="userBadge" title="点击切换用户标识（token 计量维度）"></span>
+  <span class="badge" id="toolBadge"></span>
+  <span class="badge nav-btn" id="panelBtn" title="会话与审批记录">☰ 记录</span>
+</header>
+
+<div id="panel">
+  <div class="panel-head">
+    <span class="tab active" id="tabSessions">会话</span>
+    <span class="tab" id="tabApprovals">审批记录</span>
+    <span class="close" id="panelClose">✕</span>
+  </div>
+  <div class="panel-body" id="panelBody"></div>
+</div>
+
+<div id="loginMask">
+  <div id="loginBox">
+    <h2>🔏 登录 Private Agent POC</h2>
+    <label>用户名</label>
+    <input id="loginUser" autocomplete="username">
+    <label>密码</label>
+    <input id="loginPass" type="password" autocomplete="current-password">
+    <button class="login-btn" id="loginBtn">登录</button>
+    <div class="divider-line">或使用 API Key</div>
+    <input id="loginKey" placeholder="pak- 开头的 API Key">
+    <button class="login-btn" id="keyBtn" style="background:#2a2f3a">用 Key 进入</button>
+    <div id="loginErr"></div>
+    <button id="logoutBtn" style="display:none">注销当前登录</button>
+  </div>
+</div>
+
+<div id="chat"></div>
+<div class="hint">Mock 模式试试：「现在几点」｜「北京天气怎么样」｜「用 MCP 查北京天气」｜「删除文件 test.txt」（审批流）｜「有哪些技能」「创建一个技能」（Skills）｜「创建一个工具」（审批后免重启生效）｜「调研北京上海成都天气对比」（多 Agent）</div>
+<div id="composer">
+  <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+  <button id="send">发送</button>
+</div>
+
+<script>
+const chat = document.getElementById('chat');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+let sessionId = localStorage.getItem('poc_session') || null;  // 页面刷新/重启后恢复同一会话
+
+// 用户标识（token 计量维度）：URL ?user=xxx 优先，否则 localStorage，缺省 anonymous
+let userId = new URLSearchParams(location.search).get('user')
+  || localStorage.getItem('poc_user') || 'anonymous';
+const userBadge = document.getElementById('userBadge');
+// ---- API 认证（AUTH_ENABLED=true 时生效）----
+// Key 存 localStorage，所有请求带 Bearer；身份以服务端解析为准
+let apiKey = localStorage.getItem('poc_key') || '';
+let authMode = false;
+function authHdr(extra) {
+  const h = Object.assign({}, extra || {});
+  if (apiKey) h['Authorization'] = 'Bearer ' + apiKey;
+  return h;
+}
+// ---- 登录框（账号密码 → pat- 令牌；或直接粘贴 pak- API Key）----
+const loginMask = document.getElementById('loginMask');
+function showLogin(msg) {
+  document.getElementById('loginErr').textContent = msg || '';
+  document.getElementById('logoutBtn').style.display =
+    (authMode && apiKey.startsWith('pat-')) ? '' : 'none';
+  loginMask.classList.add('open');
+  setTimeout(() => document.getElementById('loginUser').focus(), 50);
+}
+function hideLogin() { loginMask.classList.remove('open'); }
+function useCredential(v) {
+  apiKey = v;
+  localStorage.setItem('poc_key', apiKey);
+  hideLogin();
+  checkHealth();
+}
+async function doLogin() {
+  const u = document.getElementById('loginUser').value.trim();
+  const p = document.getElementById('loginPass').value;
+  const err = document.getElementById('loginErr');
+  if (!u || !p) { err.textContent = '请输入用户名和密码'; return; }
+  const btn = document.getElementById('loginBtn');
+  btn.disabled = true; err.textContent = '';
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: u, password: p })
+    });
+    if (!r.ok) { err.textContent = r.status === 401 ? '用户名或密码错误' : '登录失败（' + r.status + '）'; return; }
+    const d = await r.json();
+    document.getElementById('loginPass').value = '';
+    useCredential(d.token);
+  } catch (e) { err.textContent = '网络错误，请稍后再试'; }
+  finally { btn.disabled = false; }
+}
+document.getElementById('loginBtn').onclick = doLogin;
+document.getElementById('loginPass').onkeydown = e => { if (e.key === 'Enter') doLogin(); };
+document.getElementById('keyBtn').onclick = () => {
+  const v = document.getElementById('loginKey').value.trim();
+  if (v) useCredential(v);
+};
+document.getElementById('logoutBtn').onclick = async () => {
+  try { await fetch('/api/auth/logout', { method: 'POST', headers: authHdr() }); } catch (e) { /* 离线也继续本地注销 */ }
+  localStorage.removeItem('poc_key'); apiKey = '';
+  showLogin('已注销，请重新登录');
+};
+function renderUserBadge() {
+  userBadge.textContent = '👤 ' + userId + (authMode ? ' 🔏' : '');
+}
+renderUserBadge();
+userBadge.onclick = () => {
+  if (authMode) { showLogin(''); return; }
+  const v = prompt('输入用户标识（用于按用户统计 token 消耗）：', userId);
+  if (v && v.trim()) {
+    userId = v.trim().slice(0, 64);
+    localStorage.setItem('poc_user', userId);
+    renderUserBadge();
+  }
+};
+
+function addUsageNote(usage) {
+  const run = (usage && usage.run) || {};
+  const sess = (usage && usage.session) || {};
+  if (!run.total_tokens) return;  // 提供方未返回 usage 时不展示
+  const div = document.createElement('div');
+  div.className = 'usage-note';
+  div.textContent = `🔢 本次 ${run.total_tokens.toLocaleString()} tokens`
+    + `（输入 ${run.prompt_tokens.toLocaleString()} / 输出 ${run.completion_tokens.toLocaleString()}）`
+    + (sess.total_tokens ? ` · 本会话累计 ${sess.total_tokens.toLocaleString()}` : '');
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+let serverOnline = false;
+
+async function checkHealth() {
+  const status = document.getElementById('statusBadge');
+  try {
+    const r = await fetch('/api/health', { cache: 'no-store', headers: authHdr() });
+    if (!r.ok) throw new Error(r.status);
+    const h = await r.json();
+    // 认证模式但未持有效 Key：health 只回 {status, auth_enabled}，引导输入 Key
+    if (h.auth_enabled && !h.identity) {
+      authMode = true;
+      serverOnline = false;
+      status.textContent = '需要登录';
+      status.className = 'badge offline';
+      sendBtn.disabled = true;
+      input.disabled = true;
+      if (!apiKey) setTimeout(() => showLogin(), 300);
+      else { localStorage.removeItem('poc_key'); apiKey = ''; setTimeout(() => showLogin('凭据无效、已吊销或已过期，请重新登录'), 300); }
+      return;
+    }
+    if (h.auth_enabled && h.identity) {
+      authMode = true;
+      hideLogin();
+      userId = h.identity.username + '（' + h.identity.role + '）';
+      renderUserBadge();
+    }
+    serverOnline = true;
+    status.textContent = '服务在线';
+    status.className = 'badge online';
+    const badge = document.getElementById('modeBadge');
+    badge.textContent = h.mode === 'mock' ? 'Mock 模式' : `已连接 ${h.model}`;
+    badge.className = 'badge ' + h.mode;
+    const obs = document.getElementById('obsBadge');
+    if (h.langfuse_connected) { obs.textContent = '📊 Langfuse 已连接'; obs.className = 'badge online'; }
+    else if (h.langfuse_enabled) { obs.textContent = '📊 Langfuse 不可达（观测停用）'; obs.className = 'badge offline'; }
+    else { obs.textContent = '📊 观测未启用'; obs.className = 'badge'; }
+    document.getElementById('toolBadge').textContent = '工具: ' + (h.tools.join(', ') || '无');
+    sendBtn.disabled = false;
+    input.disabled = false;
+  } catch (e) {
+    serverOnline = false;
+    status.textContent = '服务离线，每 5 秒自动重连';
+    status.className = 'badge offline';
+    sendBtn.disabled = true;
+    input.disabled = true;
+  }
+}
+
+checkHealth();
+setInterval(checkHealth, 5000);
+
+function addMsg(role, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+function addToolChip(ev) {
+  const div = document.createElement('div');
+  div.className = 'tool-chip';
+  div.textContent = ev.status === 'start'
+    ? `⚙️ 调用工具 ${ev.name} …`
+    : `✅ 工具 ${ev.name} 返回`;
+  if (ev.result) {
+    const span = document.createElement('span');
+    span.className = 'result';
+    span.textContent = ' → ' + ev.result.slice(0, 120);
+    div.appendChild(span);
+  }
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function addApprovalCard(ev) {
+  const div = document.createElement('div');
+  div.className = 'approval-card';
+  const title = document.createElement('div');
+  title.className = 'title';
+  title.textContent = '⚠️ 危险操作审批';
+  const d1 = document.createElement('div');
+  d1.className = 'detail';
+  d1.innerHTML = '工具：<code></code>';
+  d1.querySelector('code').textContent = ev.tool;
+  const d2 = document.createElement('div');
+  d2.className = 'detail';
+  d2.innerHTML = '参数：<code></code>';
+  d2.querySelector('code').textContent = JSON.stringify(ev.args);
+  const btns = document.createElement('div');
+  btns.className = 'btns';
+  const okBtn = document.createElement('button');
+  okBtn.className = 'approve-btn';
+  okBtn.textContent = '批准';
+  const noBtn = document.createElement('button');
+  noBtn.className = 'reject-btn';
+  noBtn.textContent = '拒绝';
+  const status = document.createElement('span');
+  status.className = 'approval-status';
+  const submit = async (approve) => {
+    okBtn.disabled = noBtn.disabled = true;
+    status.textContent = '提交中…';
+    try {
+      const r = await fetch('/api/approve', {
+        method: 'POST',
+        headers: authHdr({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ approval_id: ev.approval_id, approve })
+      });
+      const d = await r.json();
+      status.textContent = d.ok
+        ? (approve ? '已批准 ✓，执行中…' : '已拒绝 ✗')
+        : (d.error === 'forbidden' ? '无权限决议该审批（需 approver/admin 或创建人本人）'
+           : '审批已失效（可能已超时）');
+    } catch (e) {
+      status.textContent = '提交失败: ' + e.message;
+    }
+  };
+  okBtn.onclick = () => submit(true);
+  noBtn.onclick = () => submit(false);
+  btns.append(okBtn, noBtn, status);
+  div.append(title, d1, d2, btns);
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+async function send() {
+  const text = input.value.trim();
+  if (!text) return;
+  if (!serverOnline) {
+    addMsg('assistant', '⚠️ 后端服务当前离线，正在自动重连，恢复后即可发送。');
+    checkHealth();
+    return;
+  }
+  input.value = '';
+  sendBtn.disabled = true;
+  addMsg('user', text);
+  let bubble = null;  // 延迟到首个 token 再创建，保证工具调用标签显示在回答之前
+  const getBubble = () => bubble || (bubble = addMsg('assistant', ''));
+
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: authHdr({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ message: text, session_id: sessionId, user_id: userId })
+    });
+    if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const ev = JSON.parse(line.slice(6));
+        if (ev.type === 'session') { sessionId = ev.session_id; localStorage.setItem('poc_session', sessionId); }
+        else if (ev.type === 'token') { getBubble().textContent += ev.content; chat.scrollTop = chat.scrollHeight; }
+        else if (ev.type === 'tool') addToolChip(ev);
+        else if (ev.type === 'approval_required') addApprovalCard(ev);
+        else if (ev.type === 'done') addUsageNote(ev.usage);
+        else if (ev.type === 'error') getBubble().textContent += '\n\n⚠️ ' + ev.content;
+      }
+    }
+  } catch (e) {
+    getBubble().textContent += '\n\n⚠️ 请求失败: ' + e.message + '（已切换到离线状态，自动重连中）';
+    checkHealth();  // 立刻刷新状态灯
+  }
+  sendBtn.disabled = !serverOnline;
+  input.focus();
+}
+
+sendBtn.onclick = send;
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+// ---------------------------------------------------------------- 会话历史恢复与记录面板
+
+function fmtTime(ts) {
+  try { return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }); }
+  catch { return ''; }
+}
+
+function addDivider(text) {
+  const div = document.createElement('div');
+  div.className = 'divider';
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+// 页面加载时恢复上次会话的历史消息（记录存于服务端 SQLite，重启不丢）
+async function loadHistory() {
+  if (!sessionId) return;
+  try {
+    const r = await fetch(`/api/sessions/${sessionId}/history`, { cache: 'no-store', headers: authHdr() });
+    if (!r.ok) return;
+    const d = await r.json();
+    const msgs = d.messages || [];
+    if (!msgs.length) return;
+    addDivider(`—— 已恢复 ${msgs.length} 条历史消息（会话 ${sessionId}）——`);
+    for (const m of msgs) addMsg(m.role === 'user' ? 'user' : 'assistant', m.content);
+  } catch (e) { /* 历史恢复失败不影响正常使用 */ }
+}
+loadHistory();
+
+// 页面加载时检查是否有遗留的待审批（如刷新前未决议），有则在对话区提醒去面板处理
+async function checkPendingApprovals() {
+  try {
+    const r = await fetch('/api/approvals', { cache: 'no-store', headers: authHdr() });
+    if (!r.ok) return;
+    const d = await r.json();
+    const n = (d.approvals || []).filter(a => a.status === 'pending').length;
+    if (n > 0) addDivider(`—— 有 ${n} 条待审批的危险操作，点击右上角「☰ 记录 → 审批记录」决议 ——`);
+  } catch (e) { /* 提醒失败不影响正常使用 */ }
+}
+checkPendingApprovals();
+
+const panel = document.getElementById('panel');
+const panelBody = document.getElementById('panelBody');
+let panelTab = 'sessions';
+
+document.getElementById('panelBtn').onclick = () => {
+  panel.classList.toggle('open');
+  if (panel.classList.contains('open')) renderPanel();
+};
+document.getElementById('panelClose').onclick = () => panel.classList.remove('open');
+document.getElementById('tabSessions').onclick = () => { panelTab = 'sessions'; renderPanel(); };
+document.getElementById('tabApprovals').onclick = () => { panelTab = 'approvals'; renderPanel(); };
+
+function switchSession(id) {
+  sessionId = id;
+  if (id) localStorage.setItem('poc_session', id);
+  else localStorage.removeItem('poc_session');
+  chat.innerHTML = '';
+  panel.classList.remove('open');
+  if (id) loadHistory();
+  input.focus();
+}
+
+function panelHint(text) {
+  const div = document.createElement('div');
+  div.className = 'divider';
+  div.textContent = text;
+  panelBody.appendChild(div);
+}
+
+async function renderPanel() {
+  document.getElementById('tabSessions').classList.toggle('active', panelTab === 'sessions');
+  document.getElementById('tabApprovals').classList.toggle('active', panelTab === 'approvals');
+  panelBody.innerHTML = '';
+  if (panelTab === 'sessions') {
+    const btn = document.createElement('button');
+    btn.id = 'newSessBtn';
+    btn.textContent = '＋ 新会话';
+    btn.onclick = () => switchSession(null);
+    panelBody.appendChild(btn);
+    try {
+      const r = await fetch('/api/sessions', { cache: 'no-store', headers: authHdr() });
+      const d = await r.json();
+      const list = d.sessions || [];
+      if (!list.length) panelHint('暂无历史会话');
+      for (const s of list) {
+        const item = document.createElement('div');
+        item.className = 'sess-item' + (s.session_id === sessionId ? ' current' : '');
+        const title = document.createElement('div');
+        title.textContent = (s.first_message || '（空会话）').slice(0, 30);
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = `${s.session_id} · ${s.messages} 条 · ${s.user_id} · ${fmtTime(s.last_active)}`;
+        item.append(title, meta);
+        item.onclick = () => switchSession(s.session_id);
+        panelBody.appendChild(item);
+      }
+    } catch (e) {
+      panelHint('会话列表加载失败: ' + e.message);
+    }
+  } else {
+    const emoji = { pending: '⏳ 待审批', approved: '✅ 已批准', rejected: '❌ 已拒绝', expired: '⏱ 已过期', abandoned: '⚠️ 已弃置' };
+    try {
+      const r = await fetch('/api/approvals', { cache: 'no-store', headers: authHdr() });
+      const d = await r.json();
+      const list = d.approvals || [];
+      if (!list.length) panelHint('暂无审批记录');
+      for (const a of list) {
+        const item = document.createElement('div');
+        item.className = 'appr-item' + (a.status === 'pending' ? ' pending' : '');
+        const title = document.createElement('div');
+        title.textContent = `${emoji[a.status] || a.status} · ${a.tool}`;
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        const who = (a.user_id ? ` · 创建人 ${a.user_id}` : '')
+          + (a.decided_by ? ` · 决议人 ${a.decided_by}` : '')
+          + (a.worker_id ? ` · 发起进程 ${a.worker_id}` : '')
+          + (a.executed_at ? ` · 已执行 ${fmtTime(a.executed_at)}` : '');
+        meta.textContent = `${fmtTime(a.created)}${who} · ${(a.args || '').slice(0, 80)}`;
+        item.append(title, meta);
+        if (a.status === 'pending') {
+          // 待决议入口：刷新/换会话后仍可在此批准或拒绝。
+          // 注意 fail-closed 语义：若原对话已断开（等待协程消亡），
+          // 决议只是关闭记录，危险操作不会补执行。
+          const btns = document.createElement('div');
+          btns.className = 'btns';
+          const okBtn = document.createElement('button');
+          okBtn.className = 'approve-btn';
+          okBtn.textContent = '批准';
+          const noBtn = document.createElement('button');
+          noBtn.className = 'reject-btn';
+          noBtn.textContent = '拒绝';
+          const st = document.createElement('span');
+          st.className = 'approval-status';
+          const submit = async (approve) => {
+            okBtn.disabled = noBtn.disabled = true;
+            st.textContent = '提交中…';
+            try {
+              const r = await fetch('/api/approve', {
+                method: 'POST',
+                headers: authHdr({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ approval_id: a.aid, approve })
+              });
+              const d = await r.json();
+              st.textContent = d.ok ? (approve ? '已批准 ✓' : '已拒绝 ✗')
+                : (d.error === 'forbidden' ? '无权限决议' : '审批已失效');
+              setTimeout(renderPanel, 600);
+            } catch (e) {
+              st.textContent = '提交失败: ' + e.message;
+              okBtn.disabled = noBtn.disabled = false;
+            }
+          };
+          okBtn.onclick = () => submit(true);
+          noBtn.onclick = () => submit(false);
+          btns.append(okBtn, noBtn, st);
+          const note = document.createElement('div');
+          note.className = 'note';
+          note.textContent = '若原对话已断开，决议仅关闭记录，操作不会补执行（fail-closed）';
+          item.append(btns, note);
+        }
+        panelBody.appendChild(item);
+      }
+    } catch (e) {
+      panelHint('审批记录加载失败: ' + e.message);
+    }
+  }
+}
+</script>
+</body>
+</html>

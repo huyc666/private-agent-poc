@@ -1,0 +1,15 @@
+# kb-demo 领域包：HR 知识库检索（知识库接入参考实现样例）
+name: kb-demo
+version: 1.0.0
+description: HR 领域知识库样例包：请假/考勤制度检索工具与领域提示词（知识库接入参考实现）
+core_version: ">=0.12.0"
+
+requires_env: []
+requires_modules: []
+
+permissions:
+  - "读取 HR 知识库（kb/hr，只读）"
+
+tools:
+  - tools/search_hr_knowledge.py
+prompt: prompt.md

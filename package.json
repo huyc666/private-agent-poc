@@ -1,0 +1,9 @@
+{
+  "name": "private-agent-poc",
+  "private": true,
+  "version": "0.17.1",
+  "description": "私有化 Agent 开发运行框架 POC：vLLM + LangGraph + MCP + Skills + 审批流 + 沙箱 + Langfuse 观测",
+  "scripts": {
+    "dev": ".venv\\Scripts\\python.exe server\\main.py"
+  }
+}

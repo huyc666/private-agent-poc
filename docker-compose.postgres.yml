@@ -1,0 +1,26 @@
+# PostgreSQL：checkpointer 持久化（会话记忆与审批中断现场，重启不丢）
+# 用法：docker compose -f docker-compose.postgres.yml up -d
+# 然后在 .env 配置：
+#   CHECKPOINTER=postgres
+#   DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/agent_poc
+# 首次启动时 Agent 会自动建表（PostgresSaver.setup()，幂等）。
+services:
+  postgres:
+    image: postgres:16
+    container_name: poc-postgres
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"   # 仅本机 Agent 服务可达
+    environment:
+      POSTGRES_PASSWORD: postgres   # POC 默认值，生产必改（同步改 DATABASE_URL）
+      POSTGRES_DB: agent_poc
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agent_poc"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

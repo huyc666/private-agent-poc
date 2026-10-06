@@ -1,0 +1,19 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+openai>=1.40
+langchain-core>=0.3
+langchain-openai>=0.2
+langgraph>=0.2.60
+langchain-mcp-adapters>=0.1.0
+fastmcp>=2.3
+python-dotenv>=1.0
+langchain>=0.3
+langfuse>=4,<5
+langgraph-checkpoint-postgres>=2.0
+psycopg[binary,pool]>=3.1
+mcp>=1.10,<2          # 锁定 1.x：litellm[proxy] 会拉入 mcp 2.x，与 fastmcp 3.x 不兼容
+# 网关（可选）：无 Docker 的开发机本机起 LiteLLM 网关时安装
+# litellm[proxy]
+
+# 领域包清单解析（server/packs.py，v0.8.0）
+pyyaml>=6.0,<7

@@ -1,0 +1,16 @@
+# core-knowledge 平台包：公司通用知识库检索（跨领域共用）
+name: core-knowledge
+version: 1.0.0
+description: 平台包：公司通用制度知识库检索工具（信息安全、行政流程等全员适用知识）
+core_version: ">=0.12.0"
+platform: true
+
+requires_env: []
+requires_modules: []
+
+permissions:
+  - "读取公司通用知识库（kb/common，只读）"
+
+tools:
+  - tools/search_common_knowledge.py
+prompt: prompt.md

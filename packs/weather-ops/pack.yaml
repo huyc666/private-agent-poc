@@ -1,0 +1,17 @@
+# weather-ops 领域包：气象领域能力（工具 + 技能 + 提示词）
+# 该文件由 server/packs.py 使用 pyyaml 解析，支持中文。
+name: weather-ops
+version: 1.0.0
+description: 气象领域包：提供当前天气查询工具、天气报告技能与领域提示词
+core_version: ">=0.8.0"   # 要求的内核最低版本
+
+# 该包依赖的环境变量（缺失则整个包标为 unavailable 不加载）
+requires_env: []
+
+# 包内能力声明（相对包目录的路径；加载器按此逐项挂载）
+tools:
+  - tools/get_current_weather.py
+skills:
+  - skills/weather-report
+prompt: prompt.md
+signature: "hmac-sha256:c015efa310bf328715a3cbc0f46c29c10f2f39bb182d2c991deeb1846bc46dc4"
