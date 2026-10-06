@@ -11,7 +11,8 @@
 #   - CPU / 内存 / 进程数限额
 #   - 服务以非 root 沙箱用户运行
 #   - 共享令牌鉴权（SANDBOX_AUTH_TOKEN，Agent 与沙箱必须配置同一个值；
-#     未配置时保持开放以兼容既有部署，但生产必须配置）
+#     v0.17.4 起未配置令牌时 /run、/run_tool 默认拒绝执行（fail-closed），
+#     生产必须配置；仅兼容存量部署可显式 SANDBOX_OPEN_MODE=true 临时放开）
 #
 # 注 1：不要改用 internal 网络——Docker 的 internal 网络与主机端口发布
 # 不兼容（docker-proxy 无法桥接，127.0.0.1:9001 不会监听；Docker Desktop 已实测），
@@ -43,8 +44,11 @@ services:
       SANDBOX_RUN_TIMEOUT: "15"
       SANDBOX_TOOLS_DIR: /tools
       SANDBOX_PACKS_DIR: /packs
-      # Agent 侧 .env 配置同一个 SANDBOX_AUTH_TOKEN 才启用鉴权（未配置 = 开放，兼容既有部署）
+      # Agent 侧 .env 配置同一个 SANDBOX_AUTH_TOKEN 才启用鉴权。
+      # v0.17.4 起未配置令牌 = 拒绝执行（fail-closed），生产必须配置；
+      # 兼容存量未鉴权部署需显式设 SANDBOX_OPEN_MODE=true
       SANDBOX_AUTH_TOKEN: "${SANDBOX_AUTH_TOKEN:-}"
+      SANDBOX_OPEN_MODE: "${SANDBOX_OPEN_MODE:-false}"
     volumes:
       # 已审批的自定义工具以只读卷挂入沙箱，/run_tool 端点在隔离子进程中执行它们
       - ./custom_tools:/tools:ro

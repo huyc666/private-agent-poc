@@ -92,9 +92,15 @@ AUTH_BOOTSTRAP_ADMIN = os.environ.get("AUTH_BOOTSTRAP_ADMIN", "")
 AUTH_TOKEN_TTL_HOURS = float(os.environ.get("AUTH_TOKEN_TTL_HOURS", "12"))
 # SSO 钩子（v0.16.0）：反向代理身份头模式。配置后（如 X-Forwarded-User），
 # 请求带该头即信任其用户名（认证由上游企业网关/IdP 完成），角色仍查本地用户表。
-# ⚠️ 仅在 Agent 位于受信反向代理之后、且代理会剥离客户端自报同名头时启用，
-#    否则任何人都能伪造身份头直连端口。
+# ⚠️ v0.17.4（安全审计 F2）：身份头必须配合 AUTH_PROXY_ALLOWED_IPS 受信代理
+#    白名单一起使用——仅来源 IP 在白名单内的请求才信任身份头，否则忽略并
+#    fail-closed（任何人直连 Agent 端口都无法伪造身份头冒充他人）。
+#    代理需负责剥离客户端自报的同名头。
 AUTH_IDENTITY_HEADER = os.environ.get("AUTH_IDENTITY_HEADER", "")
+# 受信反向代理来源 IP 白名单（逗号分隔，支持单个 IP 或 CIDR，如
+# "127.0.0.1,10.0.0.0/8"）。留空 = 不信任任何身份头（fail-closed 默认）。
+# 仅配置了 AUTH_IDENTITY_HEADER 且来源命中此白名单时，SSO 身份头才生效。
+AUTH_PROXY_ALLOWED_IPS = os.environ.get("AUTH_PROXY_ALLOWED_IPS", "")
 
 SYSTEM_PROMPT = os.environ.get(
     "SYSTEM_PROMPT",

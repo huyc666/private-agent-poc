@@ -1,10 +1,14 @@
 # Private Agent POC — 私有化 Agent 开发运行框架
 
-**版本：v0.17.2**（2026-10-06）
+**版本：v0.17.4**（2026-10-06）
 
 最小可运行的私有化 Agent 框架：**vLLM（Qwen 27B）+ LangGraph（Agent 循环 + 多 Agent 编排）+ MCP（工具协议）+ Skills（技能系统）+ 对话式自定义工具 + 人工审批流 + 代码沙箱 + Langfuse 观测 + FastAPI（SSE 流式接口）+ 离线聊天前端**。
 
 ## 版本记录
+
+- **v0.17.4**：安全审计修复（F1/F2/F3）——① **F1 敏感信息防外泄**：`read_text_file` 双防护——`.env` 及变体（`.env.*`）与运行时 SQLite 库（`*.db`/`*-wal`/`*-shm`）一律拒绝读取，其余内容按行掩码密钥值（键名含 token/key/secret/password 等敏感词的键值行值统一脱敏），工具代码/配置文件里的硬编码密钥不再外泄到对话；② **F2 SSO 身份头伪造封堵**：身份头新增来源校验——配置 `AUTH_PROXY_ALLOWED_IPS` 受信代理 IP/CIDR 白名单，仅来源命中白名单的请求才信任身份头（否则忽略并记日志，fail-closed），任何人直连 Agent 端口都无法伪造身份头冒充 admin 等既有用户；启动时若配置了 `AUTH_IDENTITY_HEADER` 却未配白名单，明确 WARNING 提示身份头不生效；③ **F3 沙箱令牌 fail-closed**：沙箱未配置 `SANDBOX_AUTH_TOKEN` 时 `/run`、`/run_tool` 默认拒绝执行（503），不再静默开放——生产必须配置令牌，仅兼容存量未鉴权部署可显式 `SANDBOX_OPEN_MODE=true` 临时放开（compose/.env.example 同步说明）
+
+- **v0.17.3**：低危级体检修复——① **周期扫描异常容错**：审批 abandoned 周期扫描单次失败只记日志继续（后台任务不再可能静默死亡，兜底永久失效）；② **登录限流表容量上限**：内存限流表加 10k 容量控制，随机用户名刷失败记录不再无限增长内存（极端超限时清空重计，PBKDF2 仍兜底暴力破解）；③ **租约心跳丢失日志**：会话租约被接管时打印日志供诊断（本进程可能仍在推进对话）；④ 启动清理日志文案同步（pending→expired 与 approved 未执行→abandoned 一并统计）
 
 - **v0.17.2**：架构评审中危项修复——① **审批执行连续性追踪**：`approvals` 表新增 `worker_id`（发起进程 hostname:pid）与 `executed_at`（完成 resume 的时间，旧库自动迁移）；Agent 把批准决议带进图并完成 resume 后标记 executed，启动/周期扫描把「已批准但从未执行」的记录转为 `abandoned` 状态（审计可见「已批准但执行丢失」，fail-closed 绝不补执行），审批列表与前端展示新状态及执行信息；② **领域包 env 注入防静默覆盖**：跨包声明同名 env 键时加载即 WARNING 点名两包与值并注明生效方（进程 env 只有一份，setdefault 先到先得）；③ **登录失败限流**：连续失败 5 次锁定账号 30s（内存级按用户名，锁定期内一律拒绝，返回仍与失败同路径的模糊响应，防枚举语义不变）；④ **部署文档**：DEPLOY_RUNBOOK 注明手工向 `packs/` 放包**不会热生效**（扫描有内存缓存），须重启或走对话式创建流程；⑤ **SQLite 共享存储措辞收紧**：WAL + busy_timeout 只保证**同机多进程**共享同一库文件，跨机多副本须替换为 Postgres——README/config/sessions/approval/.env.example/PRODUCTION 同步澄清
 

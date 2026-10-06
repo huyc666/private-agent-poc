@@ -114,7 +114,10 @@ class SessionLease:
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
                 ok = await asyncio.to_thread(renew, self.session_id, self.owner)
                 if not ok:
-                    break  # 租约已被接管（持有者身份丢失），停止续租
+                    # 租约已被他人接管（本进程持有的身份丢失，心跳再发无意义）。
+                    # 记录日志供诊断：本进程可能仍在推进对话，需人工/超时兜底。
+                    print(f"[session_lock] 租约已被接管，心跳停止: {self.session_id}")
+                    break
         except asyncio.CancelledError:
             pass
 

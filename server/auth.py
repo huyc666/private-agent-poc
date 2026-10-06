@@ -16,6 +16,7 @@ AUTH_ENABLED=false（默认）= 开放模式，行为与认证引入前完全一
 """
 import hashlib
 import hmac
+import ipaddress
 import secrets
 import sqlite3
 import threading
@@ -27,6 +28,17 @@ from . import config
 ROLES = ("user", "approver", "admin")
 _lock = threading.Lock()
 
+# 受信反向代理来源 IP 白名单（v0.17.4 安全审计 F2）：身份头来源校验。
+# 留空 = 不信任任何身份头（fail-closed）；命中白名单才允许 SSO 身份头生效。
+_allowed_proxy_nets: list = []
+if config.AUTH_PROXY_ALLOWED_IPS:
+    try:
+        _allowed_proxy_nets = [
+            ipaddress.ip_network(tok.strip(), strict=False)
+            for tok in config.AUTH_PROXY_ALLOWED_IPS.split(",") if tok.strip()]
+    except ValueError:
+        _allowed_proxy_nets = []  # 非法白名单配置 → 按未配置处理（fail-closed）
+
 # 密码散列参数（PBKDF2-HMAC-SHA256；格式 pbkdf2$<迭代数>$<盐hex>$<散列hex>）
 _PBKDF2_ITERATIONS = 200_000
 MIN_PASSWORD_LEN = 8
@@ -36,6 +48,7 @@ MIN_PASSWORD_LEN = 8
 # 返回仍与成功同路径的模糊响应（None），不泄露「锁定中」以外的信息（防枚举）。
 LOGIN_MAX_FAILS = 5         # 连续失败达到该次数 → 锁定
 LOGIN_LOCK_SECONDS = 30     # 锁定时长（秒），到期自动解锁（计数清零）
+_LOGIN_FAILS_MAX = 10_000   # 限流表容量上限（v0.17.3）：防随机用户名灌爆进程内存
 _login_fails: dict[str, tuple[int, float]] = {}  # username -> (失败计数, 锁定截止时间)
 
 
@@ -182,6 +195,15 @@ def login(username: str, password: str) -> dict | None:
         return None
     with _lock:
         now = time.time()
+        # 限流表容量控制（v0.17.3）：攻击者可用海量随机用户名刷失败记录，
+        # 若无上限内存会无限增长。先清已解锁的旧条目；极端情况（超上限且
+        # 均为活跃条目）整体清空保底——限流临时降级，PBKDF2 仍兜底暴力破解。
+        if len(_login_fails) >= _LOGIN_FAILS_MAX:
+            stale = [u for u, (_, until) in _login_fails.items() if until <= now]
+            for u in stale:
+                del _login_fails[u]
+            if len(_login_fails) >= _LOGIN_FAILS_MAX:
+                _login_fails.clear()
         fails, lock_until = _login_fails.get(username, (0, 0.0))
         if lock_until > now:
             # 锁定中：仍返回模糊 None（与密码错误不可区分），仅记日志供排障
@@ -266,6 +288,20 @@ def user_by_name(username: str) -> dict | None:
             conn.close()
 
 
+def proxy_ip_allowed(remote_host: str | None) -> bool:
+    """身份头来源校验（v0.17.4 安全审计 F2）：仅当请求来源 IP 命中
+    AUTH_PROXY_ALLOWED_IPS 受信代理白名单时，中间件才允许身份头生效。
+    未配置白名单 / 来源不命中 → False（fail-closed：任何人直连 Agent
+    端口都无法伪造身份头冒充他人）。"""
+    if not _allowed_proxy_nets or not remote_host:
+        return False
+    try:
+        ip = ipaddress.ip_address(remote_host)
+    except ValueError:
+        return False
+    return any(ip in net for net in _allowed_proxy_nets)
+
+
 def resolve_identity(bearer_token: str, header_user: str = "") -> dict | None:
     """SSO 钩子（v0.16.0）：身份解析的唯一入口，企业接入时替换/扩展此函数。
 
@@ -274,6 +310,9 @@ def resolve_identity(bearer_token: str, header_user: str = "") -> dict | None:
        认证由上游企业网关/IdP（oauth2-proxy、Keycloak 等）完成，
        本层只信任头中的用户名，角色仍查本地用户表（认证在外、授权在内）。
        用户不存在或已吊销 → None（fail-closed）。
+       ⚠️ v0.17.4（安全审计 F2）：身份头是否被信任由 main.auth_middleware
+       依据 proxy_ip_allowed() 判定（来源须命中 AUTH_PROXY_ALLOWED_IPS 白名单），
+       本函数只负责把已获信任的头映射到本地用户——直连端口伪造头不会到达此处。
     2. Bearer 凭据（pak- API Key / pat- 登录令牌）。
 
     扩展其他身份源（OIDC JWT 等）时在此加分支即可，下游角色判断、

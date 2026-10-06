@@ -25,17 +25,25 @@ MAX_OUTPUT = 8000
 TOOLS_DIR = os.environ.get("SANDBOX_TOOLS_DIR", "/tools")
 PACKS_DIR = os.environ.get("SANDBOX_PACKS_DIR", "/packs")
 # 共享令牌（Agent 侧 SANDBOX_AUTH_TOKEN 配置同一个值才启用鉴权）。
-# 配置后 /run 与 /run_tool 必须携带匹配的 X-Sandbox-Token 头，否则 401（fail-closed）。
+# 未配置令牌时默认拒绝执行（fail-closed，v0.17.4 安全审计 F3）：
+# 仅显式设置 SANDBOX_OPEN_MODE=true 才放行，兼容未启用鉴权的既有部署。
 SANDBOX_AUTH_TOKEN = os.environ.get("SANDBOX_AUTH_TOKEN", "")
+SANDBOX_OPEN_MODE = os.environ.get("SANDBOX_OPEN_MODE", "false").lower() in ("1", "true", "yes")
 _TOOL_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,49}$")
 _PACK_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,49}$")
 
 
 def check_token(x_sandbox_token: str = Header(default="")):
-    """共享令牌鉴权：沙箱配置了 SANDBOX_AUTH_TOKEN 时强制校验；
-    未配置则放行（兼容既有部署）。"""
-    if SANDBOX_AUTH_TOKEN and x_sandbox_token != SANDBOX_AUTH_TOKEN:
-        raise HTTPException(status_code=401, detail="unauthorized")
+    """共享令牌鉴权（fail-closed）：
+    1) 配置了 SANDBOX_AUTH_TOKEN → 强制校验 X-Sandbox-Token，不匹配 401；
+    2) 未配置令牌 → 默认拒绝（503），仅 SANDBOX_OPEN_MODE=true 时放行
+       （兼容既有未启用鉴权的部署）。"""
+    if SANDBOX_AUTH_TOKEN:
+        if x_sandbox_token != SANDBOX_AUTH_TOKEN:
+            raise HTTPException(status_code=401, detail="unauthorized")
+        return
+    if not SANDBOX_OPEN_MODE:
+        raise HTTPException(status_code=503, detail="sandbox auth token not configured")
 
 # 在隔离子进程里加载工具文件并调用同名函数，结果以标记行输出
 # argv: name, 工具文件所在目录, args_json

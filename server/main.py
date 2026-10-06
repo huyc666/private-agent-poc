@@ -37,20 +37,33 @@ APPROVAL_SCAN_INTERVAL = 300.0  # 周期扫描间隔（秒）：已批准但未�
 async def _approval_scan_loop():
     """后台周期任务：把「已批准但从未执行」的审批标记为 abandoned。
     等待协程可能在进程存活时死亡（如客户端断开被取消），仅靠启动扫描
-    捕捉不到，需周期兜底（v0.17.2）。单条 UPDATE，开销可忽略。"""
+    捕捉不到，需周期兜底（v0.17.2）。单条 UPDATE，开销可忽略。
+    v0.17.3：循环体异常容错——单次扫描失败只记日志继续，后台任务不会
+    静默死亡（否则兜底永久失效且无人知晓）。"""
     while True:
         await asyncio.sleep(APPROVAL_SCAN_INTERVAL)
-        n = await asyncio.to_thread(approval.mark_abandoned)
-        if n:
-            print(f"[approval] 周期扫描：{n} 条「已批准但执行丢失」标记为 abandoned")
+        try:
+            n = await asyncio.to_thread(approval.mark_abandoned)
+            if n:
+                print(f"[approval] 周期扫描：{n} 条「已批准但执行丢失」标记为 abandoned")
+        except Exception as e:
+            # 单次失败不终止任务：DB 短暂锁竞争/瞬时错误恢复后下一轮自动重试
+            print(f"[approval] 周期扫描失败（下轮重试）: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    expired = approval.cleanup_stale()  # 上次进程残留的待审批一律过期（fail-closed）
-    if expired:
-        print(f"[approval] 启动清理：{expired} 条残留待审批已标记过期")
+    cleaned = approval.cleanup_stale()  # 残留 pending→expired；approved 未执行→abandoned
+    if cleaned:
+        print(f"[approval] 启动清理：{cleaned} 条残留审批已处理"
+              "（pending→expired，approved 未执行→abandoned）")
     auth.bootstrap_admin()  # 认证模式首启：创建引导 admin 并打印一次性 Key
+    # v0.17.4（安全审计 F2）：SSO 身份头必须配合受信代理白名单才生效；
+    # 配置了身份头却没配白名单 = 身份头永远不生效（fail-closed），启动时明确告警
+    if auth.enabled() and config.AUTH_IDENTITY_HEADER and not config.AUTH_PROXY_ALLOWED_IPS:
+        print("[auth] WARNING: 已配置 AUTH_IDENTITY_HEADER 但未配置"
+              " AUTH_PROXY_ALLOWED_IPS——身份头将被忽略（fail-closed，防伪造）。"
+              "请在 .env 配置受信代理来源 IP 白名单后重启，SSO 身份头才会生效。")
     await agent.build_agent()
     scan_task = asyncio.create_task(_approval_scan_loop())
     yield
@@ -72,10 +85,17 @@ async def auth_middleware(request: Request, call_next):
     if not auth.enabled():
         return await call_next(request)
     token = _bearer_token(request)
-    # SSO 钩子：身份解析唯一入口（身份头模式优先，其次 Bearer 凭据）；
+    # SSO 钩子：身份解析唯一入口（身份头模式优先，其次 Bearer 凭据）。
+    # v0.17.4（安全审计 F2）：身份头必须来自受信代理白名单才生效——
+    # 未命中白名单/未配置白名单一律忽略（fail-closed），直连端口伪造头无效。
+    header_user = ""
+    if config.AUTH_IDENTITY_HEADER:
+        if auth.proxy_ip_allowed(request.client.host if request.client else None):
+            header_user = request.headers.get(config.AUTH_IDENTITY_HEADER, "")
+        elif request.headers.get(config.AUTH_IDENTITY_HEADER):
+            print("[auth] 身份头来自非受信来源（不在 AUTH_PROXY_ALLOWED_IPS 白名单），"
+                  "已忽略（防伪造冒充）")
     # 解析涉及 SQLite 同步调用，挪到线程池避免阻塞事件循环（v0.16.1）
-    header_user = request.headers.get(config.AUTH_IDENTITY_HEADER, "") \
-        if config.AUTH_IDENTITY_HEADER else ""
     request.state.user = await asyncio.to_thread(
         auth.resolve_identity, token, header_user)
     path = request.url.path
