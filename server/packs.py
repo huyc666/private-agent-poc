@@ -31,7 +31,7 @@ _disabled: set[str] = set()
 _scan_cache: list[dict] | None = None
 
 # 内核版本：领域包清单里的 core_version（如 ">=0.8.0"）与此比对，不满足则整包不加载
-CORE_VERSION = "0.17.4"
+CORE_VERSION = "0.17.5"
 
 
 def _version_tuple(v: str) -> tuple:

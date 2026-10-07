@@ -80,7 +80,7 @@ def run_python_code(code: str) -> str:
 
 def do_delete(path: str) -> str:
     """删除的实际执行逻辑（审批通过后才会走到这里；Mock 演示剧本也复用）。
-    v0.17.4 架构评审 P2：与 read_text_file 对称的敏感文件拦截（F1）——
+    v0.17.5 架构评审 P2：与 read_text_file 对称的敏感文件拦截（F1）——
     .env 承载部署密钥、state.db 承载会话/审批/租约锁，误删破坏并发控制与
     部署配置；删除此类文件属运维操作，一律不走对话路径（即使批准也拒绝）。"""
     try:

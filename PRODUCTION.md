@@ -1,4 +1,4 @@
-# 生产部署清单 — 私有化 Agent 框架（v0.17.4）
+# 生产部署清单 — 私有化 Agent 框架（v0.17.5）
 
 面向 GPU+Docker 机器的正式上机清单。基础部署细节见 [DEPLOYMENT.md](DEPLOYMENT.md)，
 本清单聚焦**生产化差异项**与**逐项验收**。逐项打勾，全部通过即上线。
@@ -10,7 +10,7 @@
 - [ ] Docker + docker compose 可用
 - [ ] 模型权重已下载到机器本地（如 `./models/Qwen3-27B`，私有化不走 HuggingFace 在线拉取）
 - [ ] Python 3.11+（建 venv 用）；内网 pip 源可用
-- [ ] 已拿到 `private-agent-poc-v0.17.4.zip` 并解压
+- [ ] 已拿到 `private-agent-poc-v0.17.5.zip` 并解压
 
 ## 一、密钥生成（生产必做，逐项替换 POC 默认值）
 

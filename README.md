@@ -1,10 +1,12 @@
 # Private Agent POC — 私有化 Agent 开发运行框架
 
-**版本：v0.17.4**（2026-10-06）
+**版本：v0.17.5**（2026-10-07）
 
 最小可运行的私有化 Agent 框架：**vLLM（Qwen 27B）+ LangGraph（Agent 循环 + 多 Agent 编排）+ MCP（工具协议）+ Skills（技能系统）+ 对话式自定义工具 + 人工审批流 + 代码沙箱 + Langfuse 观测 + FastAPI（SSE 流式接口）+ 离线聊天前端**。
 
 ## 版本记录
+
+- **v0.17.5**：架构评审修复（2×P1 + 2×P2，评审报告见 SECURITY.md 对应验收项）——① **审批 abandoned 宽限期**：周期扫描/启动清理只把决议时间超过宽限（审批超时 + 扫描间隔）的「已批准未执行」记录转 abandoned，刚批准正在 resume 执行的长任务不再被误标（误标后 mark_executed 静默失效、审计失真）；② **沙箱令牌不下发子进程**：`_run_isolated` 子进程环境剔除 `SANDBOX_AUTH_TOKEN`/`SANDBOX_OPEN_MODE`，沙箱内执行的不可信代码无法读走令牌伪造合法调用方；③ **删除敏感文件拦截**：`do_delete` 与 `read_text_file` 对称——`.env` 及变体、运行时 SQLite 库（state.db 承载会话/审批/租约锁）即使审批通过也拒绝删除，误删破坏并发控制与部署配置的路径关闭；④ **租约接管中止本轮流**：会话租约心跳发现被其他进程接管时，chat 流立即发 error 事件中止本轮（此前仅记日志继续跑，等于跨进程互斥失效、回到 checkpointer 写冲突场景），部分回复落库并标注「租约被接管」
 
 - **v0.17.4**：安全审计修复（F1/F2/F3）——① **F1 敏感信息防外泄**：`read_text_file` 双防护——`.env` 及变体（`.env.*`）与运行时 SQLite 库（`*.db`/`*-wal`/`*-shm`）一律拒绝读取，其余内容按行掩码密钥值（键名含 token/key/secret/password 等敏感词的键值行值统一脱敏），工具代码/配置文件里的硬编码密钥不再外泄到对话；② **F2 SSO 身份头伪造封堵**：身份头新增来源校验——配置 `AUTH_PROXY_ALLOWED_IPS` 受信代理 IP/CIDR 白名单，仅来源命中白名单的请求才信任身份头（否则忽略并记日志，fail-closed），任何人直连 Agent 端口都无法伪造身份头冒充 admin 等既有用户；启动时若配置了 `AUTH_IDENTITY_HEADER` 却未配白名单，明确 WARNING 提示身份头不生效；③ **F3 沙箱令牌 fail-closed**：沙箱未配置 `SANDBOX_AUTH_TOKEN` 时 `/run`、`/run_tool` 默认拒绝执行（503），不再静默开放——生产必须配置令牌，仅兼容存量未鉴权部署可显式 `SANDBOX_OPEN_MODE=true` 临时放开（compose/.env.example 同步说明）
 
