@@ -39,11 +39,15 @@ async def _approval_scan_loop():
     等待协程可能在进程存活时死亡（如客户端断开被取消），仅靠启动扫描
     捕捉不到，需周期兜底（v0.17.2）。单条 UPDATE，开销可忽略。
     v0.17.3：循环体异常容错——单次扫描失败只记日志继续，后台任务不会
-    静默死亡（否则兜底永久失效且无人知晓）。"""
+    静默死亡（否则兜底永久失效且无人知晓）。
+    架构评审 P1 修复：宽限期——刚批准正在 resume 执行的记录处于「approved 且未
+    标记 executed」的正常中间态，扫描跳过决议时间距今不足 grace 的记录，
+    避免误标正在执行的长任务（grace 覆盖审批等待上限 + 扫描间隔）。"""
+    grace = approval.APPROVAL_TIMEOUT + APPROVAL_SCAN_INTERVAL
     while True:
         await asyncio.sleep(APPROVAL_SCAN_INTERVAL)
         try:
-            n = await asyncio.to_thread(approval.mark_abandoned)
+            n = await asyncio.to_thread(approval.mark_abandoned, grace)
             if n:
                 print(f"[approval] 周期扫描：{n} 条「已批准但执行丢失」标记为 abandoned")
         except Exception as e:
@@ -53,7 +57,10 @@ async def _approval_scan_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    cleaned = approval.cleanup_stale()  # 残留 pending→expired；approved 未执行→abandoned
+    # 启动清理带宽限期：同机多进程共享 STATE_DB 时，其他进程可能有在途
+    # resume（approved 尚未 mark_executed），刚决议的记录不判为丢失
+    cleaned = approval.cleanup_stale(
+        grace=approval.APPROVAL_TIMEOUT + APPROVAL_SCAN_INTERVAL)
     if cleaned:
         print(f"[approval] 启动清理：{cleaned} 条残留审批已处理"
               "（pending→expired，approved 未执行→abandoned）")

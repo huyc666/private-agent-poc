@@ -194,25 +194,34 @@ def mark_executed(aid: str) -> None:
         (time.time(), aid))
 
 
-def mark_abandoned() -> int:
+def mark_abandoned(grace: float = 0.0) -> int:
     """把「已批准但从未执行」的记录标记为 abandoned（审计可见执行丢失）。
-    触发点：服务启动（cleanup_stale 内）与周期扫描（main.py 后台任务）。
-    approved 且 executed_at 为空即判定未执行——fail-closed：无法证明执行过
-    就不算执行过，绝不补执行。"""
+    触发点：服务启动（cleanup_stale 内）与周期扫描（main.py 后台任务），
+    两者都传 grace>0——共享 STATE_DB 时可能有其他进程/协程的在途 resume。
+
+    grace（秒）：只清理决议时间早于 now-grace 的记录。用户刚批准 → resume
+    图执行中 → 跑完才 mark_executed，这条链路上记录天然处于「approved 且
+    executed_at 为空」；周期扫描若无宽限会误伤正在执行的长任务（误标后
+    mark_executed 静默失效，审计反而失真）。决议在 grace 窗口内的记录留给
+    下一轮扫描判定。fail-closed 不变：无法证明执行过就不算执行过。"""
     return _execute(
         "UPDATE approvals SET status = 'abandoned', decided = ?"
-        " WHERE status = 'approved' AND executed_at IS NULL", (time.time(),))
+        " WHERE status = 'approved' AND executed_at IS NULL"
+        " AND (decided IS NULL OR decided <= ?)",
+        (time.time(), time.time() - grace))
 
 
-def cleanup_stale() -> int:
+def cleanup_stale(grace: float = 0.0) -> int:
     """服务启动时调用：
     1) 残留 pending（等待方已随进程消亡）→ expired；
     2) approved 但从未执行（等待协程先死 / resume 未发生）→ abandoned，
-       审计可见「已批准但执行丢失」（v0.17.2）。"""
+       审计可见「已批准但执行丢失」（v0.17.2）。
+    grace 透传给 mark_abandoned：同机多进程共享 STATE_DB 时，本进程启动
+    不代表其他进程没有在途 resume，调用方应传宽限期（main.py lifespan）。"""
     n = _execute(
         "UPDATE approvals SET status = 'expired', decided = ?"
         " WHERE status = 'pending'", (time.time(),))
-    return n + mark_abandoned()
+    return n + mark_abandoned(grace)
 
 
 def list_recent(limit: int = 50, user_id: str = "") -> list[dict]:

@@ -82,18 +82,22 @@ def health():
 
 
 def _run_isolated(argv: list[str], extra_env: dict | None = None) -> dict:
-    """把脚本写入临时文件后在 -I 隔离子进程中执行。extra_env 为附加环境变量。"""
+    """把脚本写入临时文件后在 -I 隔离子进程中执行。extra_env 为附加环境变量。
+    子进程环境剔除沙箱自身的鉴权配置（SANDBOX_AUTH_TOKEN 等）——执行的是
+    不可信代码，令牌只应留在服务进程，不能让代码读走后伪造合法调用方。"""
     path = None
     try:
         with tempfile.NamedTemporaryFile(
                 "w", suffix=".py", delete=False, encoding="utf-8") as f:
             f.write(argv["code"])
             path = f.name
+        child_env = {k: v for k, v in os.environ.items()
+                     if k not in ("SANDBOX_AUTH_TOKEN", "SANDBOX_OPEN_MODE")}
         proc = subprocess.run(
             [sys.executable, "-I", path] + argv.get("extra", []),
             capture_output=True, text=True, timeout=RUN_TIMEOUT,
             cwd=tempfile.gettempdir(),
-            env={**os.environ, **(extra_env or {})},
+            env={**child_env, **(extra_env or {})},
         )
         output = (proc.stdout + proc.stderr)[-MAX_OUTPUT:]
         return {"output": output, "returncode": proc.returncode}
