@@ -78,24 +78,34 @@ agent-poc/
 │   ├── custom_tools.py    # 自定义工具注册中心（校验/落盘/热加载；含沙箱/本地构建器，领域包复用）
 │   ├── skills.py          # Skills 注册中心（内核 skills/ + 领域包 skills 多源合并）
 │   ├── sessions.py        # 会话历史持久化（SQLite/STATE_DB，重启不丢，v0.13.0）
+│   ├── session_lock.py    # 跨进程会话租约锁（STATE_DB 后端，多副本同会话串行化，v0.17.1）
 │   ├── approval.py        # 审批中心（DB 持久化 + 状态机 + 审批门 require_approval，v0.13.0）
+│   ├── auth.py            # API 认证与多用户（双轨凭据/角色/ACL/SSO 身份头，v0.14.0–v0.16.0）
 │   ├── usage.py           # Token 计量（LangChain 回调采集 + SQLite 存储聚合，v0.11.0）
 │   ├── weather.py         # 天气多数据源降级链（MCP 示例服务器共用）
 │   └── config.py          # 全部配置走环境变量
 ├── packs/                 # 包目录（可插拔能力：平台包 + 领域包）
 │   ├── core-utils/        # 平台包（platform: true，不可禁用）：时间/计算等通用能力
+│   ├── core-knowledge/    # 平台包：公司通用知识库检索（RAG as a Tool，v0.17.0）
+│   ├── kb-demo/           # 领域包样例：HR 制度知识库检索（v0.17.0）
 │   └── weather-ops/       # 领域包示例：气象领域
 │       ├── pack.yaml      #   清单（名称/版本/依赖/能力声明）
 │       ├── prompt.md      #   领域提示词片段（注入系统提示词）
 │       ├── tools/         #   领域工具（get_current_weather）
 │       └── skills/        #   领域技能（weather-report）
 ├── custom_tools/          # 对话式创建的自定义工具（.py 即工具，免重启生效）
+├── kb/                    # 知识库源文档（common/ + hr/，tools/build_kb.py 建索引，v0.17.0）
 ├── tools/
 │   ├── local_tools_server.py  # 示例 MCP Server（stdio）：目录列举、字数统计、MCP 天气
+│   ├── build_kb.py        # 知识库建索引 CLI（纯 Python BM25，零第三方依赖，v0.17.0）
+│   ├── manage_users.py    # 用户管理 CLI（签发/轮换/吊销 Key、passwd，v0.14.0）
+│   ├── load_test.py       # 并发压测（health/chat/session 场景，v0.16.1）
 │   └── sign_pack.py       # 管理员 CLI：包签名（v0.13.0）
+├── sandbox/               # 代码执行沙箱服务（server.py + Dockerfile + entrypoint.sh 出网封锁，v0.17.1）
 ├── web/
 │   └── index.html         # 聊天前端（内联样式脚本，内网离线可用）
 ├── docker-compose.yml     # vLLM 推理服务（GPU）
+├── docker-compose.sandbox.yml   # 沙箱服务（含出网封锁与令牌鉴权）
 ├── requirements.txt
 ├── .env.example           # 复制为 .env 后按需修改
 └── package.json           # npm run dev 快捷启动
@@ -285,6 +295,16 @@ MODEL_NAME=deepseek-chat        # 或 deepseek-reasoner（R1 推理模型）
 | `WEATHER_ITBOY_CITY_URL` / `WEATHER_ITBOY_API_URL` | itboy 官方地址 | 兜底源城市编码表与查询接口 |
 | `SKILLS_DIR` | `./skills` | 技能目录（SKILL.md 渐进式披露） |
 | `CUSTOM_TOOLS_DIR` | `./custom_tools` | 自定义工具目录（对话式创建，热加载） |
+| `PACKS_DIR` | `./packs` | 领域包目录 |
+| `ENABLED_PACKS` | 空（全部加载） | 包名白名单（逗号分隔），重启后以它为准 |
+| `PACK_SIGNING_KEY` | 空（开放模式） | 配置后进入强制模式：未签名/篡改整包不加载（v0.13.0） |
+| `SANDBOX_URL` | 空（拒绝执行） | 沙箱服务地址；未配置时 `run_python_code` fail-closed |
+| `SANDBOX_AUTH_TOKEN` | 空 | Agent↔沙箱共享令牌（`X-Sandbox-Token`，v0.17.1）；沙箱侧未配置令牌时默认拒绝执行，仅 `SANDBOX_OPEN_MODE=true` 显式放开（v0.17.4 F3） |
+| `STATE_DB` | `./state.db` | 会话/审批/租约锁 SQLite 库（v0.13.0；跨机多副本须换 Postgres） |
+| `USAGE_DB` | `./usage.db` | Token 计量 SQLite 库（v0.11.0） |
+| `CHECKPOINTER` | `memory` | `postgres` 可切换持久化（Windows 开发机仅支持 memory） |
+| `AUTH_ENABLED` | `false` | API 认证开关（v0.14.0）；true 时 Bearer 凭据 + 三级角色 |
+| `AUTH_IDENTITY_HEADER` | 空 | SSO 身份头（如 `X-Forwarded-User`，v0.16.0）；须配合 `AUTH_PROXY_ALLOWED_IPS` 白名单才生效（v0.17.4 F2） |
 | `SYSTEM_PROMPT` | 见 config.py | 系统提示词 |
 
 ## 如何扩展一个业务工具
@@ -347,7 +367,7 @@ Mock 模式可直接演示：「有哪些技能」/「创建一个技能」/「�
 - **展示**：前端每条回答下方显示「本次 X tokens（输入/输出）· 本会话累计 Y」；
   头部 👤 徽标点击可切换用户标识（或 URL 加 `?user=xxx`）
 
-> API 认证（第四期规划）落地后，user_id 将改由认证中间件注入，无需调用方传参。
+> API 认证（v0.14.0 起）启用后，user_id 由认证中间件解析注入，请求体自报的 user_id 被忽略。
 
 ## 调用链观测（Langfuse，可选）
 
@@ -373,7 +393,7 @@ docker compose -f docker-compose.langfuse.yml up -d
 
 ## 已验证项（POC 交付状态）
 
-- ✅ `/api/health` 返回模式、模型与 9 个工具（内置 6 个 + MCP 3 个）
+- ✅ `/api/health` 返回模式、模型、工具清单与各领域包状态（内置 16 个 + MCP 3 个 + 平台包/领域包工具）
 - ✅ `/api/chat` SSE 流式输出：token 增量、工具 start/end 事件、会话记忆
 - ✅ 浏览器端全链路：提问 → 工具调用标签 → 流式回答渲染
 - ✅ 天气工具双实现：内置版 `get_current_weather` + MCP 版 `get_city_weather`，共用 `server/weather.py` 多数据源降级链（Open-Meteo 主源 → itboy 兜底源，均免 key；两条链路均已实测拿到真实数据）
@@ -408,7 +428,9 @@ docker compose -f docker-compose.langfuse.yml up -d
 9. ~~包级配置~~：第三期已交付 ✅（pack.yaml `env` 默认值注入 + `requires_modules` 依赖声明，fail-closed；沙箱模式 env 透传隔离子进程）
 10. ~~平台包~~：第四期已交付 ✅（能力分层：内核只留运行时管理工具，跨领域通用能力为 `platform: true` 平台包（始终启用、不可禁用、优先加载），领域包对话式插拔；时间/计算已迁为 `core-utils` 示范）
 11. ~~Token 计量~~：已交付 ✅（用户/任务/会话三维度，SQLite 存储 + `/api/usage` 聚合 + 前端展示）
+12. ~~API 认证与多用户~~：已交付 ✅（v0.14.0–v0.16.0：pak- API Key + pat- 登录令牌双轨凭据、三级角色 user/approver/admin、资源级 ACL、SSO 身份头 + 受信代理校验）
+13. ~~服务无状态化~~：已交付 ✅（v0.13.0 会话/审批迁 SQLite 重启不丢；v0.17.1 跨进程会话租约锁，多副本同会话真正串行化）
+14. ~~包签名/来源校验~~：已交付 ✅（v0.13.0 HMAC-SHA256 内容签名，`PACK_SIGNING_KEY` 强制模式下未签名/篡改整包 fail-closed 不加载）
 
-领域包第五期（候选方向）：服务无状态化 + API 认证（多用户/多副本前提）、
-包签名/来源校验（防篡改分发）、包市场（内网私有索引 + 一键安装）、
+领域包第五期（候选方向，剩余）：包市场（内网私有索引 + 一键安装）、
 包级 RBAC（按角色限制可用包）、沙箱镜像按包依赖自动构建。
