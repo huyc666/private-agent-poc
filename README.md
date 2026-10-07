@@ -408,7 +408,7 @@ docker compose -f docker-compose.langfuse.yml up -d
 - ✅ 领域包配置注入（端到端实测通过）：对话式创建带 `env: DEMO_REGION=cn-south` + `requires_modules: [yaml]` 的包 → 新会话调用包工具返回 `cn-south`（.env/系统环境中均无此变量，证明值来自包级默认值注入）；声明不存在模块的包整包 `unavailable`（fail-closed），health 可见原因
 - ✅ Token 计量（端到端实测通过）：alice/bob 双用户对话 → `/api/usage` 按用户/会话/任务正确聚合（alice 17,133 + bob 5,274 = 总量 22,407）；多 Agent 调研单次运行 12 次模型调用 17,274 tokens，其中 worker 10,529 单独标记；浏览器实测回答下方展示「本次/本会话累计」
 - ✅ 平台包（端到端实测通过）：时间/计算工具迁为平台包 `core-utils` 后问时间/计算仍正常命中（calculator 56088、get_current_time 实时值）；要求禁用 core-utils 时模型读到工具说明主动拒绝（平台包始终启用），底层 `disable_pack` 亦有拒绝文案兜底；health 中 `platform: true` 正确标注
-- ✅ LLM 网关：Agent 走 LiteLLM 网关请求逻辑模型 `qwen-27b`，vLLM 宕机时自动 fallback 到 DeepSeek，Agent 零感知（实测通过）；RPM 限流与统一审计在网关层配置
+- ✅ LLM 网关：Docker Desktop 实测通过——Agent 以真实模式走网关（逻辑模型 `qwen-27b`），vLLM 不可达时网关自动 fallback 到 DeepSeek 且 Agent 零感知（端到端对话正常、Langfuse trace 记录 model=qwen-27b、Token 计量正常落账 3,394）；无 Key/错 Key 请求被网关拒绝（fail-closed）；RPM 限流与统一审计在网关层配置（ghcr 拉取慢可经 ghcr.m.daocloud.io 镜像源）
 - ✅ 前端零外部依赖，断网内网环境可用；服务掉线红灯 + 自动重连
 - ✅ 观测接入：Langfuse 关闭/不可达时主链路不受影响（已验证）；观测栈 Docker Desktop 实测通过——`/api/health` 返回 `langfuse_connected: true`，Mock 对话后 Langfuse 可见 `mock-chat` trace 与 `tool:get_current_weather` 工具 span（含输入输出）
 - ✅ PostgresSaver 持久化：Docker Desktop 实测通过——`setup()` 自动建表（checkpoints/blobs/writes/migrations），跨连接 checkpoint 往返读回成功；Windows 开发机按文档 fail-fast 提示（psycopg 异步与 ProactorEventLoop 不兼容，保持 memory 即可）
