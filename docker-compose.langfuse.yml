@@ -1,6 +1,8 @@
 # Langfuse v3 观测栈（可选）：追踪每次 Agent 调用的工具链、耗时、token 消耗
 # 用法：docker compose -f docker-compose.langfuse.yml up -d
 # 首次启动 ClickHouse 迁移较慢（1~2 分钟），web 就绪后访问 http://localhost:3000
+# 端口被占用时可改宿主端口：LANGFUSE_WEB_PORT=3100 docker compose ... up -d
+# （Agent 侧 .env 同步设 LANGFUSE_HOST=http://localhost:3100；NEXTAUTH_URL 已随该参数联动）
 #
 # 已预置 LANGFUSE_INIT_*：首次启动自动创建组织/项目/密钥，
 # 密钥 pk-lf-local / sk-lf-local 与 .env.example 默认值对应，开箱即用。
@@ -15,7 +17,7 @@ services:
       clickhouse: { condition: service_healthy }
       redis: { condition: service_healthy }
     ports:
-      - "3000:3000"
+      - "${LANGFUSE_WEB_PORT:-3000}:3000"
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/postgres
       DIRECT_URL: postgresql://postgres:postgres@db:5432/postgres
@@ -23,6 +25,8 @@ services:
       CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
       CLICKHOUSE_USER: default
       CLICKHOUSE_PASSWORD: clickhouse
+      # 单机 ClickHouse：禁用集群模式迁移（ON CLUSTER default），否则首次启动失败
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_AUTH: redis
@@ -33,10 +37,11 @@ services:
       LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
       LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
-      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_URL: http://localhost:${LANGFUSE_WEB_PORT:-3000}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-CHANGEME-nextauth-secret}
       SALT: ${SALT:-CHANGEME-salt}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-CHANGEME00000000000000000000000000000000000000000000000000000000000000}
+      # 必须是 64 位十六进制（openssl rand -hex 32），POC 占位值，生产必改
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
       TELEMETRY_ENABLED: "false"
       # 初始化组织/项目/密钥（仅首次启动生效）
       LANGFUSE_INIT_ORG_ID: poc-org
@@ -64,6 +69,7 @@ services:
       CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
       CLICKHOUSE_USER: default
       CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_AUTH: redis
@@ -76,7 +82,7 @@ services:
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-CHANGEME-nextauth-secret}
       SALT: ${SALT:-CHANGEME-salt}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-CHANGEME00000000000000000000000000000000000000000000000000000000000000}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
       TELEMETRY_ENABLED: "false"
 
   db:

@@ -410,7 +410,8 @@ docker compose -f docker-compose.langfuse.yml up -d
 - ✅ 平台包（端到端实测通过）：时间/计算工具迁为平台包 `core-utils` 后问时间/计算仍正常命中（calculator 56088、get_current_time 实时值）；要求禁用 core-utils 时模型读到工具说明主动拒绝（平台包始终启用），底层 `disable_pack` 亦有拒绝文案兜底；health 中 `platform: true` 正确标注
 - ✅ LLM 网关：Agent 走 LiteLLM 网关请求逻辑模型 `qwen-27b`，vLLM 宕机时自动 fallback 到 DeepSeek，Agent 零感知（实测通过）；RPM 限流与统一审计在网关层配置
 - ✅ 前端零外部依赖，断网内网环境可用；服务掉线红灯 + 自动重连
-- ✅ 观测接入：Langfuse 关闭/不可达时主链路不受影响（已验证）；观测栈部署后自动上报
+- ✅ 观测接入：Langfuse 关闭/不可达时主链路不受影响（已验证）；观测栈 Docker Desktop 实测通过——`/api/health` 返回 `langfuse_connected: true`，Mock 对话后 Langfuse 可见 `mock-chat` trace 与 `tool:get_current_weather` 工具 span（含输入输出）
+- ✅ PostgresSaver 持久化：Docker Desktop 实测通过——`setup()` 自动建表（checkpoints/blobs/writes/migrations），跨连接 checkpoint 往返读回成功；Windows 开发机按文档 fail-fast 提示（psycopg 异步与 ProactorEventLoop 不兼容，保持 memory 即可）
 - ✅ 真实模型链路（DeepSeek deepseek-chat 云端实测通过）：模型自主工具调用、interrupt 审批中断→批准→恢复执行→落盘生效、Skills 自主选择加载、天气多数据源降级链（Open-Meteo 直达与 itboy 兜底均实测通过）
 
 **新机器部署请直接看 [DEPLOYMENT.md](DEPLOYMENT.md)（POC 部署手册）。** 生产上机另有 [PRODUCTION.md](PRODUCTION.md)（生产部署清单 + 验收用例）。
@@ -419,8 +420,8 @@ docker compose -f docker-compose.langfuse.yml up -d
 
 1. ~~沙箱~~：代码执行沙箱已交付 ✅（docker-compose.sandbox.yml，fail-closed）
 2. ~~审批流~~：危险操作人工审批已交付 ✅（SSE 审批卡片 + fail-closed）
-3. ~~观测~~：Langfuse 已接入 ✅（待在有 Docker 的机器上启动观测栈验收）
-4. ~~持久化~~：checkpointer 可切换 PostgresSaver ✅（docker-compose.postgres.yml，重启不丢会话/审批现场；待 Docker 机器验收，Windows 开发机仅支持 memory）
+3. ~~观测~~：Langfuse 已接入 ✅（Docker Desktop 观测栈实测通过：health 连接标志 + mock-chat trace/工具 span 上报）
+4. ~~持久化~~：checkpointer 可切换 PostgresSaver ✅（docker-compose.postgres.yml，Docker Desktop 实测建表与跨连接读回通过；Windows 开发机保持 memory——psycopg 异步与 ProactorEventLoop 不兼容，启动时 fail-fast 明确提示）
 5. ~~多 Agent~~：orchestrator-worker 子图已交付 ✅（`research_topic` 工具：拆题 → Send 并行调研 → 汇总；worker 只持安全工具子集，中间 token 经标签过滤不进主流）
 6. ~~网关~~：LiteLLM 网关已交付 ✅（docker-compose.gateway.yml：fallback/限流/审计；vLLM 宕机自动切 DeepSeek 实测通过）
 7. ~~领域包架构~~：第一期已交付 ✅（packs/ 可插拔领域能力：工具+技能+提示词一个目录打包，运行时启停免重启；示例包 weather-ops）
