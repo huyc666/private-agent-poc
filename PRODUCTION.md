@@ -1,4 +1,4 @@
-# 生产部署清单 — 私有化 Agent 框架（v0.17.0）
+# 生产部署清单 — 私有化 Agent 框架（v0.17.4）
 
 面向 GPU+Docker 机器的正式上机清单。基础部署细节见 [DEPLOYMENT.md](DEPLOYMENT.md)，
 本清单聚焦**生产化差异项**与**逐项验收**。逐项打勾，全部通过即上线。
@@ -10,12 +10,12 @@
 - [ ] Docker + docker compose 可用
 - [ ] 模型权重已下载到机器本地（如 `./models/Qwen3-27B`，私有化不走 HuggingFace 在线拉取）
 - [ ] Python 3.11+（建 venv 用）；内网 pip 源可用
-- [ ] 已拿到 `private-agent-poc-v0.17.0.zip` 并解压
+- [ ] 已拿到 `private-agent-poc-v0.17.4.zip` 并解压
 
 ## 一、密钥生成（生产必做，逐项替换 POC 默认值）
 
 ```bash
-python -c "import secrets; print(secrets.token_hex(32))"   # 生成 3 个不同的密钥
+python -c "import secrets; print(secrets.token_hex(32))"   # 生成 4 个不同的密钥
 ```
 
 - [ ] `PACK_SIGNING_KEY`（包签名密钥，强制信任模式的根）
@@ -23,6 +23,9 @@ python -c "import secrets; print(secrets.token_hex(32))"   # 生成 3 个不同�
       `master_key` + `.env` 的 `LLM_API_KEY`（两处一致）
 - [ ] PostgreSQL 密码（替换 `postgres`）：改 `docker-compose.postgres.yml` 的
       `POSTGRES_PASSWORD` + `.env` 的 `DATABASE_URL`（两处一致）
+- [ ] `SANDBOX_AUTH_TOKEN`（沙箱调用令牌，v0.17.4 起 fail-closed）：`.env` 与
+      `docker-compose.sandbox.yml` 读取同一个值（compose 用 `${SANDBOX_AUTH_TOKEN}`
+      自动从 `.env` 注入）；未配置时沙箱 `/run`、`/run_tool` 一律拒绝（503）
 
 ## 一·五、API 认证（v0.14.0，多用户必做）
 
@@ -35,10 +38,12 @@ python -c "import secrets; print(secrets.token_hex(32))"   # 生成 3 个不同�
       设置密码后，前端登录框输入账号密码即可（签发 12 小时 pat- 令牌，
       `AUTH_TOKEN_TTL_HOURS` 可调）；Key 留给脚本/服务调用
 - [ ] 验收：无 Key 访问 `/api/chat` 返回 401；持 user Key 决议他人审批返回 403；
-      错误密码登录返回 401 且不区分「用户不存在/密码错误」
+      错误密码登录返回 401 且不区分「用户不存在/密码错误」；同一账号连错 5 次
+      锁定 30 秒（v0.17.2 登录限流）
 - [ ] （可选，接企业 SSO）Agent 置于受信反向代理之后，`.env` 配置
-      `AUTH_IDENTITY_HEADER=X-Forwarded-User`（或网关实际注入的身份头）；
-      确认网关会剥离客户端自报的同名头、Agent 端口不对内网直连开放；
+      `AUTH_IDENTITY_HEADER=X-Forwarded-User`（或网关实际注入的身份头），并配置
+      `AUTH_PROXY_ALLOWED_IPS=<代理IP/CIDR，逗号分隔>`（v0.17.4 起身份头只信任白名单
+      来源，未配白名单身份头不生效——fail-closed）；
       本地仍需用 `manage_users.py add` 建同名用户以分配角色（认证在外、授权在内）
 
 ## 二、移除开发期残留
@@ -54,8 +59,8 @@ python -c "import secrets; print(secrets.token_hex(32))"   # 生成 3 个不同�
   验收：`curl http://127.0.0.1:8000/v1/models` 返回 `qwen-27b`
 - [ ] **PostgreSQL**：`docker compose -f docker-compose.postgres.yml up -d`
   验收：healthcheck 通过（`docker compose -f docker-compose.postgres.yml ps` 显示 healthy）
-- [ ] **沙箱**：`docker compose -f docker-compose.sandbox.yml up -d`
-  验收：`curl http://127.0.0.1:9001/health` 返回 200
+- [ ] **沙箱**：`.env` 已配 `SANDBOX_AUTH_TOKEN` 后 `docker compose -f docker-compose.sandbox.yml up -d`
+  验收：`curl http://127.0.0.1:9001/health` 返回 200；不带令牌调 `/run` 返回 401（fail-closed 生效）
 - [ ] **网关**：`docker compose -f docker-compose.gateway.yml up -d`
   验收：`curl http://127.0.0.1:4000/health/liveliness` 返回 200
 - [ ] **包签名**：`.env` 写入 `PACK_SIGNING_KEY` 后执行
@@ -74,6 +79,7 @@ MODEL_NAME=qwen-27b
 CHECKPOINTER=postgres
 DATABASE_URL=postgresql://postgres:<密码>@127.0.0.1:5432/agent_poc
 SANDBOX_URL=http://127.0.0.1:9001
+SANDBOX_AUTH_TOKEN=<沙箱令牌>       # v0.17.4 起必填，未配置沙箱拒绝执行
 CUSTOM_TOOLS_EXEC=sandbox        # 强制沙箱执行自定义代码（不可达则 fail-closed）
 PACK_SIGNING_KEY=<包签名密钥>     # 强制信任模式
 STATE_DB=./state.db              # 会话/审批持久化；同机多进程可共享，跨机须换 Postgres

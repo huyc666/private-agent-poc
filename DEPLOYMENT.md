@@ -1,7 +1,8 @@
-# POC 部署手册 — 私有化 Agent 开发运行框架（v0.12.0）
+# POC 部署手册 — 私有化 Agent 开发运行框架（v0.12.0 首版，持续更新至 v0.17.4）
 
 > 生产上机（GPU+Docker 机器）请先看 [PRODUCTION.md](PRODUCTION.md)（生产部署清单：密钥、强制签名、验收用例）；
-> 本手册为各组件的详细部署步骤，v0.13.0 同样适用（新增配置项见 .env.example）。
+> 本手册为各组件的详细部署步骤，v0.13.0–v0.17.4 同样适用（新增配置项见 .env.example：
+> 认证 AUTH_*、沙箱令牌 SANDBOX_AUTH_TOKEN、受信代理 AUTH_PROXY_ALLOWED_IPS 等）。
 
 > 目标读者：运维 / 部署工程师。按顺序照做即可，每步都有验证命令。
 > 全程离线内网可完成（Docker 镜像与 pip 包需提前通过内网镜像仓库/代理准备）。
@@ -12,9 +13,9 @@
 |---|---|---|---|
 | vLLM 推理服务 | 加载 Qwen 27B，提供 OpenAI 兼容接口 | 必需（真实模式；无 GPU 时可临时用 DeepSeek 云端，见步骤 2 附注） | 8000 |
 | Agent 服务 | 对话界面 + Agent 运行时 + 工具系统 + Skills + 自定义工具热加载 | 必需 | 7100 |
-| 代码沙箱 | 隔离执行 Python 代码与自定义工具 | 可选（不部署则 `run_python_code` 禁用、自定义工具回退本地执行） | 127.0.0.1:9001 |
+| 代码沙箱 | 隔离执行 Python 代码与自定义工具 | 可选（不部署则 `run_python_code` 禁用、自定义工具回退本地执行）；v0.17.4 起需配 `SANDBOX_AUTH_TOKEN`，未配置默认拒绝执行（fail-closed） | 127.0.0.1:9001 |
 | PostgreSQL | checkpointer 持久化（会话/审批现场重启不丢） | 可选（默认 memory 模式） | 127.0.0.1:5432 |
-| Langfuse 观测栈 | 调用链追踪（6 容器） | 可选 | 3000, 9090-9091 |
+| Langfuse 观测栈 | 调用链追踪（6 容器） | 可选 | 3000（可用 `LANGFUSE_WEB_PORT` 改宿主端口）, 9090-9091 |
 
 功能一览（全部已在 DeepSeek deepseek-chat 真实链路实测通过）：
 
@@ -138,7 +139,9 @@ requirements.txt 已锁定 `mcp>=1.10,<2`，如被冲掉请重装该约束）。
 ### 步骤 3（可选）：部署代码执行沙箱
 
 ```bash
-docker compose -f docker-compose.sandbox.yml up -d
+# 先生成沙箱令牌（Agent 与沙箱必须一致；v0.17.4 起未配置令牌 = 拒绝执行）
+python3 -c "import secrets; print(secrets.token_hex(32))"
+SANDBOX_AUTH_TOKEN=<上面生成的令牌> docker compose -f docker-compose.sandbox.yml up -d
 curl http://127.0.0.1:9001/health   # {"status":"ok","tools_dir":"/tools",...}
 ```
 
@@ -146,7 +149,12 @@ curl http://127.0.0.1:9001/health   # {"status":"ok","tools_dir":"/tools",...}
 
 ```
 SANDBOX_URL=http://127.0.0.1:9001
+SANDBOX_AUTH_TOKEN=<同一个令牌>
 ```
+
+> v0.17.4 起沙箱鉴权 fail-closed：`/run`、`/run_tool` 校验 `X-Sandbox-Token`，
+> 未配置令牌时默认拒绝执行（503）。仅兼容存量未鉴权部署可显式
+> `SANDBOX_OPEN_MODE=true` 临时放开（不建议生产使用）。
 
 部署后两个变化：
 
@@ -175,6 +183,10 @@ docker compose -f docker-compose.langfuse.yml up -d
 # 首次启动 ClickHouse 迁移需 1~2 分钟
 curl http://localhost:3000/api/public/health   # {"status":"OK",...}
 ```
+
+> 3000 端口被占用时改宿主端口：`LANGFUSE_WEB_PORT=3100 docker compose ... up -d`
+> （Agent 侧 `.env` 同步设 `LANGFUSE_HOST=http://localhost:3100`；NEXTAUTH_URL 已随该参数联动）。
+> 国内网络拉镜像慢时，可把 compose 中镜像名加镜像源前缀（如 `ghcr.m.daocloud.io/...`）。
 
 控制台 http://localhost:3000 ，预置账号 `admin@poc.local` / `admin1234`
 （组织/项目/密钥已由 LANGFUSE_INIT_* 自动创建：pk-lf-local / sk-lf-local）。

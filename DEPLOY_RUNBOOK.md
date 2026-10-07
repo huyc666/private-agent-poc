@@ -1,4 +1,4 @@
-# 分步部署执行手册 — GPU + Docker 生产机（v0.16.2）
+# 分步部署执行手册 — GPU + Docker 生产机（v0.17.4）
 
 目标：在一台 Linux GPU 机器上把框架从 zip 包部署到「上线验收通过」。
 每步给出**可复制命令**与**验收点**，任一步验收不过即停下排查，不要带错继续。
@@ -24,7 +24,7 @@ python3 --version               # ≥ 3.11
 ## Step 1 · 解压与依赖
 
 ```bash
-unzip private-agent-poc-v0.16.2.zip -d agent-poc && cd agent-poc
+unzip private-agent-poc-v0.17.4.zip -d agent-poc && cd agent-poc
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt    # 内网环境指向内部 pip 源
 ```
@@ -33,17 +33,18 @@ python3 -m venv .venv
 
 ---
 
-## Step 2 · 生成三套密钥
+## Step 2 · 生成四套密钥
 
 ```bash
-python3 -c "import secrets; print(secrets.token_hex(32))"   # 执行 3 次，得 K1/K2/K3
+python3 -c "import secrets; print(secrets.token_hex(32))"   # 执行 4 次，得 K1/K2/K3/K4
 ```
 
 - K1 → `PACK_SIGNING_KEY`（包签名根密钥）
 - K2 → 网关 master key（替换 `sk-poc-gateway`）
 - K3 → PostgreSQL 密码（替换 `postgres`）
+- K4 → `SANDBOX_AUTH_TOKEN`（沙箱调用令牌，Agent 与沙箱容器必须一致；v0.17.4 起未配置则沙箱拒绝执行）
 
-**验收点**：三个值各不相同，已记入企业密码保管库（不要写进聊天/邮件）。
+**验收点**：四个值各不相同，已记入企业密码保管库（不要写进聊天/邮件）。
 
 ---
 
@@ -59,6 +60,7 @@ MODEL_NAME=qwen-27b
 CHECKPOINTER=postgres
 DATABASE_URL=postgresql://postgres:<K3>@127.0.0.1:5432/agent_poc
 SANDBOX_URL=http://127.0.0.1:9001
+SANDBOX_AUTH_TOKEN=<K4>
 CUSTOM_TOOLS_EXEC=sandbox
 PACK_SIGNING_KEY=<K1>
 AUTH_ENABLED=true
@@ -105,7 +107,7 @@ curl http://127.0.0.1:8000/v1/models
 
 ```bash
 docker compose -f docker-compose.postgres.yml up -d
-docker compose -f docker-compose.sandbox.yml  up -d
+docker compose -f docker-compose.sandbox.yml  up -d   # 自动读 .env 的 SANDBOX_AUTH_TOKEN 注入容器
 docker compose -f docker-compose.gateway.yml  up -d
 ```
 
@@ -114,6 +116,8 @@ docker compose -f docker-compose.gateway.yml  up -d
 ```bash
 docker compose -f docker-compose.postgres.yml ps    # healthy
 curl http://127.0.0.1:9001/health                   # 沙箱 200
+curl -X POST http://127.0.0.1:9001/run -H 'Content-Type: application/json' \
+  -d '{"code":"print(1)"}'                           # 无令牌 → 401/503 拒绝（fail-closed 生效）
 curl http://127.0.0.1:4000/health/liveliness        # 网关 200
 ```
 
