@@ -202,8 +202,9 @@ async def chat(req: ChatRequest, request: Request):
         # 2) STATE_DB 分布式租约（SessionLease）承担跨进程互斥——
         #    多副本指向同一 STATE_DB 时，同一 session 的并发请求在此排队，
         #    避免 checkpointer 状态写冲突与对话记录交错；不同会话互不干扰。
+        lease = session_lock.SessionLease(session_id, owner)
         async with agent.session_lock(session_id):
-            async with session_lock.SessionLease(session_id, owner):
+            async with lease:
                 # SQLite 写为同步调用，挪到线程池避免阻塞事件循环（v0.16.1）
                 await asyncio.to_thread(sessions.append, session_id, user_id,
                                         "user", req.message)
@@ -211,17 +212,25 @@ async def chat(req: ChatRequest, request: Request):
                     yield f"data: {json.dumps({'type': 'session', 'session_id': session_id, 'run_id': run_id}, ensure_ascii=False)}\n\n"
                     async for ev in agent.stream_reply(new_message, session_id=session_id,
                                                        user_id=user_id, run_id=run_id):
+                        if lease.lost:
+                            # 租约被其他进程接管（心跳续租失败）：继续推进
+                            # 等于两进程同时写同一会话，互斥已失效——立即中止
+                            # 本轮并让已产出部分按「不完整」落库（架构评审 P2）
+                            yield f"data: {json.dumps({'type': 'error', 'content': '会话租约已被其他进程接管，本轮回复已中止，请重新发送消息'}, ensure_ascii=False)}\n\n"
+                            break
                         if ev["type"] == "token":
                             collected.append(ev["content"])
                         yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
-                    finished = True
+                    else:
+                        finished = True
                 finally:
                     # 客户端中途断连时生成器被 aclose()：已产出的部分回复也要落库，
                     # 保证对话记录成对（user 消息已先于流写入），并标注不完整供审计识别
                     if collected:
                         text = "".join(collected)
                         if not finished:
-                            text += "\n\n（连接中断，回复不完整）"
+                            text += ("\n\n（会话租约被其他进程接管，回复中止）"
+                                     if lease.lost else "\n\n（连接中断，回复不完整）")
                         await asyncio.to_thread(
                             sessions.append, session_id, user_id, "assistant", text)
 

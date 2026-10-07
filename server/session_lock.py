@@ -97,6 +97,7 @@ class SessionLease:
         self.owner = owner
         self.ttl = ttl
         self.acquired = False
+        self.lost = False  # 心跳发现租约被他人接管 → 调用方应中止本轮对话
         self._hb: asyncio.Task | None = None
 
     async def __aenter__(self):
@@ -115,8 +116,11 @@ class SessionLease:
                 ok = await asyncio.to_thread(renew, self.session_id, self.owner)
                 if not ok:
                     # 租约已被他人接管（本进程持有的身份丢失，心跳再发无意义）。
-                    # 记录日志供诊断：本进程可能仍在推进对话，需人工/超时兜底。
-                    print(f"[session_lock] 租约已被接管，心跳停止: {self.session_id}")
+                    # 置 lost 标志供调用方中止对话：继续跑意味着两个进程同时
+                    # 推进同一会话——正是本模块要防的 checkpointer 写冲突场景，
+                    # 只记日志继续跑等于互斥失效（架构评审 P2 修复）。
+                    self.lost = True
+                    print(f"[session_lock] 租约已被接管，中止本轮对话: {self.session_id}")
                     break
         except asyncio.CancelledError:
             pass
