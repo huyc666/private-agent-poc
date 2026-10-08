@@ -51,9 +51,9 @@ def _rebuild_graph():
     tools += pack_tool_list
     STATE.pack_tools = {t.name: t for t in pack_tool_list}
     STATE.tool_names = [t.name for t in tools]
-    # 签名同时包含沙箱可达性与领域包状态：任一变化都会触发重绑
+    # 签名同时包含沙箱可达性/领域包状态/技能文件：任一变化都会触发重绑
     STATE.custom_sig = (custom_tools.signature(), custom_tools._sandbox_up(),
-                        packs.packs_signature())
+                        packs.packs_signature(), skills.signature())
 
     # 技能索引 = 内核 skills/ + 当前启用领域包的 skills/（禁用包后其技能随之消失）
     skills.reset_extra_dirs()
@@ -66,16 +66,23 @@ def _rebuild_graph():
 
     # checkpointer 是 interrupt 审批流的前提（中断现场需要落盘才能恢复）
     # 技能索引 + 领域包提示词片段注入系统提示词（渐进式披露：模型按需调用 load_skill 拉取完整指令）
-    system = config.SYSTEM_PROMPT + skills.skill_index_prompt()
+    system = config.SYSTEM_PROMPT + skills.skill_index_prompt() + config.UPLOAD_PROMPT
     fragments = packs.prompt_fragments()
     if fragments:
         system += "\n\n" + fragments
     STATE.agent = create_react_agent(STATE.llm, tools, prompt=system,
-                                     checkpointer=STATE.checkpointer)
+                                     checkpointer=STATE.checkpointer,
+                                     pre_model_hook=_pre_model_hook)
 
 
 async def build_agent():
     """在应用启动时调用一次。Mock 模式下只登记工具名。"""
+    # 启动即打印压缩配置（评审 P3：阈值配错/忘配时在日志一眼可见，不必等触发）
+    if config.CONTEXT_COMPACT_ENABLED:
+        print(f"[agent] 上下文压缩：触发线 "
+              f"{int(config.CONTEXT_MAX_TOKENS * config.CONTEXT_COMPACT_RATIO):,} tokens"
+              f"（窗口 {config.CONTEXT_MAX_TOKENS:,} × {config.CONTEXT_COMPACT_RATIO:g}），"
+              f"近窗 {config.CONTEXT_RECENT_TOKENS:,}")
     STATE.mcp_tool_list = []
     if config.MCP_ENABLED:
         STATE.mcp_tool_list = await load_mcp_tools()
@@ -86,9 +93,30 @@ async def build_agent():
         print("[agent] MOCK_LLM=true，使用 Mock 模式（不连接模型）")
         return
 
+    from langchain_core.messages import AIMessageChunk
     from langchain_openai import ChatOpenAI
 
-    STATE.llm = ChatOpenAI(
+    class _ReasoningChatOpenAI(ChatOpenAI):
+        """ChatOpenAI + DeepSeek 风格思维链透传（v0.17.7）。
+        langchain-openai 的通用转换器会丢弃 delta.reasoning_content（其文档明示
+        「reasoning 字段不提取，请用 provider 专属子类」），而思维链是前端
+        「💭 思考过程」展示的数据来源。这里以最小侵入把该字段挂回
+        AIMessageChunk.additional_kwargs，供 agent 流式管线透出 reasoning 事件。
+        覆盖的是私有转换方法：升级 langchain-openai 后需复核签名。"""
+
+        def _convert_chunk_to_generation_chunk(self, chunk, default_chunk_class,
+                                               base_generation_info):
+            gen = super()._convert_chunk_to_generation_chunk(
+                chunk, default_chunk_class, base_generation_info)
+            if gen is not None and isinstance(gen.message, AIMessageChunk):
+                choices = chunk.get("choices") or []
+                delta = (choices[0].get("delta") or {}) if choices else {}
+                rc = delta.get("reasoning_content")
+                if rc:
+                    gen.message.additional_kwargs["reasoning_content"] = rc
+            return gen
+
+    STATE.llm = _ReasoningChatOpenAI(
         model=config.MODEL_NAME,
         base_url=config.LLM_BASE_URL,
         api_key=config.LLM_API_KEY,
@@ -144,13 +172,13 @@ _reload_lock = threading.Lock()
 
 
 def maybe_reload_custom_tools():
-    """自定义工具/领域包/沙箱可达性有变化时重建图（每轮对话开头检查，开销可忽略）。
+    """自定义工具/领域包/沙箱可达性/技能文件有变化时重建图（每轮对话开头检查，开销可忽略）。
     加锁串行化：并发会话同时检测到变化时只重建一次；调用方应经
     asyncio.to_thread 调用（沙箱探测是同步网络 IO，不能阻塞事件循环）。"""
     with _reload_lock:
         if (custom_tools.signature(), custom_tools._sandbox_up(),
-                packs.packs_signature()) != STATE.custom_sig:
-            print("[agent] 检测到自定义工具/领域包/沙箱状态变化，重新绑定工具")
+                packs.packs_signature(), skills.signature()) != STATE.custom_sig:
+            print("[agent] 检测到自定义工具/领域包/沙箱/技能变化，重新绑定工具")
             _rebuild_graph()
 
 
@@ -184,6 +212,145 @@ def session_lock(session_id: str) -> asyncio.Lock:
     return _session_locks.setdefault(session_id, asyncio.Lock())
 
 
+# ---------------------------------------------------------------- 上下文压缩
+# v0.17.7：历史超阈值时「窗口外旧消息 → 滚动摘要」，只改模型视野（pre_model_hook
+# 产出 llm_input_messages），checkpointer 原始历史完整保留（界面恢复/审计不受影响）。
+# 触发条件按 token 估算而非轮数（纯聊天一轮几百 token，读一次文档就是几千，方差太大）。
+
+_compact_cache: dict[str, dict] = {}   # session_id -> {"summary": 摘要文本, "count": 已摘要消息数}
+_COMPACT_CACHE_MAX = 1000              # 摘要缓存上限（摘要可随时重算，超限丢弃最早的）
+
+_SUMMARY_TMPL = (
+    "你是会话上下文压缩器。下面是同一会话的「已有摘要」和「新落入窗口外的消息记录」。"
+    "把它们合并为一份工作摘要（600 字以内），必须保留：① 用户的任务目标；② 已完成的"
+    "工作与产物（文件名/下载链接/技能/工具/包名原样保留）；③ 关键决策与用户明确约定；"
+    "④ 未完成事项与待办；⑤ 涉及的文档与数据要点。用简洁的条目式中文，不要评论，"
+    "不要编造记录里没有的信息。\n\n"
+    "【已有摘要】\n{old}\n\n【新落入窗口外的消息】\n{transcript}\n\n直接输出摘要："
+)
+
+
+def _msg_text(msg) -> str:
+    c = getattr(msg, "content", "")
+    if isinstance(c, list):
+        c = " ".join(str(p) for p in c)
+    return str(c)
+
+
+def _est_tokens(msg) -> int:
+    """粗估单条消息 token：中日韩字符 ≈1 token/字，其余 ≈4 字符/token，加 8 壳开销。
+    推理模型的思维链（additional_kwargs.reasoning_content）同样占用窗口，一并计入，
+    否则推理型会话会低估触发时机。混合文本误差 ±30% 级别——触发线留了 40% 余量。"""
+    c = _msg_text(msg)
+    rc = str((getattr(msg, "additional_kwargs", None) or {}).get("reasoning_content", "") or "")
+    text = c + rc
+    if not text:
+        return 8
+    combined = text
+    cjk = sum(1 for ch in combined if "\u4e00" <= ch <= "\u9fff")
+    return cjk + (len(combined) - cjk) // 4 + 8
+
+
+def _find_cut(msgs: list, budget_tokens: int) -> int:
+    """从尾部向前保留 budget 内的消息，返回切割下标。
+    成对完整性：切割点落在 ToolMessage 上时前移（避免工具结果悬空、其父
+    AIMessage(tool_calls) 被裁掉导致 API 400）。"""
+    total, i = 0, len(msgs)
+    while i > 0:
+        t = _est_tokens(msgs[i - 1])
+        if total + t > budget_tokens and i < len(msgs):
+            break
+        total += t
+        i -= 1
+    while i < len(msgs) and getattr(msgs[i], "type", "") == "tool":
+        i += 1
+    return i
+
+
+async def prepare_compaction(session_id: str) -> None:
+    """轮前压缩：历史估算超阈值时，把窗口外新增消息滚动摘要进缓存。
+    独立 LLM 调用（在主图事件流之外，不会向 SSE 漏事件/不产生假消息）；
+    失败只回退纯窗口模式，不影响本轮对话。"""
+    if not config.CONTEXT_COMPACT_ENABLED or STATE.agent is None or STATE.llm is None:
+        return
+    try:
+        snap = await STATE.agent.aget_state({"configurable": {"thread_id": session_id}})
+        msgs = snap.values.get("messages") or []
+        if len(msgs) < 6:   # 过短没有压缩价值
+            return
+        total = sum(_est_tokens(m) for m in msgs)
+        trigger = int(config.CONTEXT_MAX_TOKENS * config.CONTEXT_COMPACT_RATIO)
+        if total <= trigger:
+            return
+        cache = _compact_cache.get(session_id) or {}
+        already = int(cache.get("count", 0))
+        cut = _find_cut(msgs, config.CONTEXT_RECENT_TOKENS)
+        if cut <= already:
+            return
+        seg_tokens = sum(_est_tokens(m) for m in msgs[already:cut])
+        # 滞回：已有摘要且新增段不大时沿用旧摘要（避免每轮都烧一次摘要调用）
+        if cache.get("summary") and seg_tokens < config.CONTEXT_SUMMARY_HYSTERESIS_TOKENS:
+            return
+        parts = []
+        for m in msgs[already:cut]:
+            role = getattr(m, "type", "?")
+            text = _msg_text(m).strip()
+            if getattr(m, "tool_calls", None):
+                calls = ", ".join(c.get("name", "?") for c in m.tool_calls)
+                parts.append(f"{role}: [调用工具 {calls}]")
+            elif text:
+                parts.append(f"{role}: {text[:300]}")
+        transcript = "\n".join(parts) or "（无文本内容）"
+        resp = await STATE.llm.ainvoke(_SUMMARY_TMPL.format(
+            old=cache.get("summary") or "（无）", transcript=transcript))
+        text = _msg_text(resp).strip()
+        if text:
+            if len(_compact_cache) >= _COMPACT_CACHE_MAX:
+                for k in list(_compact_cache)[:_COMPACT_CACHE_MAX // 2]:
+                    _compact_cache.pop(k, None)
+            _compact_cache[session_id] = {"summary": text, "count": cut}
+            print(f"[agent] 会话 {session_id} 上下文压缩：估算 {total} tokens 超阈值 "
+                  f"{trigger}，已摘要前 {cut} 条消息（原始历史仍完整保留）", flush=True)
+    except Exception as e:
+        print(f"[agent] 上下文压缩失败（本轮回退纯窗口模式）: {e}", flush=True)
+
+
+async def _pre_model_hook(state: dict, config=None):   # 参数名须为 config（RunnableCallable 按名注入）
+    """pre_model_hook：每轮模型调用前改写模型视野。
+    ① 命中摘要缓存时裁掉已摘要前缀、注入摘要 SystemMessage（尾部超触发线才裁）；
+    ② 无摘要时总量超触发线才裁到近期窗口（否则全量保留）；
+    ③ 切割点成对完整性同 _find_cut。
+    返回 {"llm_input_messages": ...}——state 历史不动，只影响本次模型输入。"""
+    from langchain_core.messages import SystemMessage
+
+    from . import config as _cfg   # 局部别名：形参 config 会遮蔽模块名
+    msgs = state.get("messages") or []
+    sid = ""
+    try:
+        sid = (config or {}).get("configurable", {}).get("thread_id", "")
+    except Exception:
+        pass
+    trigger = int(_cfg.CONTEXT_MAX_TOKENS * _cfg.CONTEXT_COMPACT_RATIO)
+    view = list(msgs)
+    cache = _compact_cache.get(sid)
+    if cache and cache.get("summary"):
+        # 摘要分支：裁掉已摘要前缀注入摘要；尾部只在超过触发线时裁
+        # （预算用触发线而非近期窗口——尾部是摘要未覆盖的新内容，误裁会丢）
+        n = min(int(cache["count"]), len(msgs))
+        view = [SystemMessage(content=(
+            "[会话早期工作摘要（原始消息已归档；以下摘要用于延续上下文）]\n"
+            + cache["summary"]))] + view[n:]
+        tail = _find_cut(view[1:], trigger)
+        view = [view[0]] + view[1 + tail:]
+    else:
+        # 无摘要分支：总量仍在模型窗口内（≤触发线）就全量保留——
+        # 此前无条件裁到近期窗口，导致 8k~触发线 区间的历史既无摘要又被裁丢
+        total = sum(_est_tokens(m) for m in view)
+        if total > trigger:
+            view = view[_find_cut(view, _cfg.CONTEXT_RECENT_TOKENS):]
+    return {"llm_input_messages": view}
+
+
 async def stream_reply(messages: list[dict], session_id: str = "default",
                        user_id: str = "anonymous", run_id: str = "") -> AsyncIterator[dict]:
     """yield SSE 事件 dict：
@@ -212,6 +379,9 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
         "callbacks": telemetry.langchain_callbacks(),
     }
     payload = {"messages": messages}
+    # 上下文压缩（v0.17.7）：轮前检查历史是否超阈值，超则滚动摘要（独立调用，
+    # 不进主流事件流）；模型视野由 _pre_model_hook 在每次模型调用前裁剪
+    await prepare_compaction(session_id)
     # 上一轮带批准决议 resume 的 aid：本轮跑完（未抛错）后标记 executed_at，
     # 供审计区分「已批准已执行」与「已批准但执行丢失」（后者由启动/周期扫描转 abandoned）
     resuming_aid = ""
@@ -226,6 +396,12 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
                     if any(t == "ma_worker" for t in event.get("tags", [])):
                         continue
                     chunk = event["data"]["chunk"]
+                    # 推理模型的思维链（deepseek-reasoner/v4 类返回
+                    # reasoning_content）：透出为 reasoning 事件供前端展示
+                    # 参考；不落库正文（落库仍只收 token）
+                    rc = (chunk.additional_kwargs or {}).get("reasoning_content")
+                    if rc:
+                        yield {"type": "reasoning", "content": rc}
                     if chunk.content:
                         yield {"type": "token", "content": chunk.content}
                 elif kind == "on_tool_start":

@@ -12,9 +12,11 @@
 import asyncio
 import json
 import os
+import re
 import sys
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -23,7 +25,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from server import (agent, approval, auth, config, custom_tools, packs,
-                    session_lock, sessions, telemetry, usage)
+                    session_lock, sessions, skills, telemetry, usage)
 
 
 def _bearer_token(request: Request) -> str:
@@ -65,6 +67,9 @@ async def lifespan(app: FastAPI):
         print(f"[approval] 启动清理：{cleaned} 条残留审批已处理"
               "（pending→expired，approved 未执行→abandoned）")
     auth.bootstrap_admin()  # 认证模式首启：创建引导 admin 并打印一次性 Key
+    # 多用户文件分域（v0.17.7 评审）：旧版单目录 uploads/outputs 的存量文件
+    # 迁入 shared/ 域，保证升级后旧文件仍可按 shared 寻址（不迁则分域后找不到）
+    await asyncio.to_thread(_migrate_legacy_file_dirs)
     # v0.17.4（安全审计 F2）：SSO 身份头必须配合受信代理白名单才生效；
     # 配置了身份头却没配白名单 = 身份头永远不生效（fail-closed），启动时明确告警
     if auth.enabled() and config.AUTH_IDENTITY_HEADER and not config.AUTH_PROXY_ALLOWED_IPS:
@@ -289,6 +294,297 @@ async def session_delete(request: Request, session_id: str):
     if ident and not _can_access_session(ident, session_id):
         return JSONResponse({"error": "forbidden"}, status_code=403)
     return {"deleted": sessions.delete_session(session_id)}
+
+
+# ---------------------------------------------------------------- 文档上传（v0.17.7）
+
+# 纯文本格式：字节原样落盘（白名单收敛至 config.FILE_TEXT_EXTS，与模型输出
+# save_output_file 共用）；.docx：标准库解包提取正文文本（零第三方依赖）。
+# PDF 无可靠零依赖提取方案 → 明确拒绝并引导转换（fail-closed，不假装能读）。
+_UPLOAD_DOC_EXTS = {".docx"}
+_UPLOAD_ALL_EXTS = config.FILE_TEXT_EXTS | _UPLOAD_DOC_EXTS
+# Windows 非法文件名字符（含控制字符）与保留设备名——防 write_text 抛错后
+# 异常文本携带服务器绝对路径外泄，同时避免保留名在 Windows 部署引发歧义
+_WIN_BAD_NAME = re.compile(r'[<>:"|?*\x00-\x1f]')
+_WIN_RESERVED = {"con", "prn", "aux", "nul",
+                 *(f"com{i}" for i in range(1, 10)),
+                 *(f"lpt{i}" for i in range(1, 10))}
+# docx 解包上限：word/document.xml 解压后字符数（防解压炸弹，10MB 压缩体
+# 理论可膨胀出 GB 级 XML）
+_DOCX_XML_MAX_CHARS = 20_000_000
+
+
+def _docx_to_text(data: bytes) -> str:
+    """从 .docx（zip 包）提取 word/document.xml 正文文本，去标签保留段落换行。
+    解压前校验条目声明大小（防解压炸弹）；非 zip/缺条目抛 ValueError（→400）。"""
+    import html as _html
+    import io
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            info = z.getinfo("word/document.xml")
+            if info.file_size > _DOCX_XML_MAX_CHARS:
+                raise ValueError("docx 正文过大，超出解析上限")
+            xml = z.read(info).decode("utf-8", errors="replace")[:_DOCX_XML_MAX_CHARS]
+    except (zipfile.BadZipFile, KeyError):
+        raise ValueError("不是有效的 docx 文件（缺少 word/document.xml）")
+    xml = re.sub(r"</w:p>", "\n", xml)          # 段落 → 换行
+    xml = re.sub(r"<[^>]+>", "", xml)           # 去其余标签
+    return _html.unescape(xml).strip()
+
+
+def _upload_safe_name(name: str) -> str:
+    """文件名清洗：只取 basename、限长、白名单后缀、拒绝 Windows 非法字符与
+    保留设备名、Unicode NFC 归一化；返回空串表示不合法。"""
+    import unicodedata
+    name = unicodedata.normalize("NFC", (name or "").strip()).replace("\\", "/")
+    name = name.rsplit("/", 1)[-1]              # 任何路径成分都剥掉
+    if not name or len(name) > 120 or name in {".", ".."}:
+        return ""
+    if _WIN_BAD_NAME.search(name):
+        return ""
+    if Path(name).stem.lower() in _WIN_RESERVED:
+        return ""
+    suffix = Path(name).suffix.lower()
+    return name if suffix in _UPLOAD_ALL_EXTS else ""
+
+
+def _scope_clean(username: str) -> str:
+    """身份 → 文件域目录名。清洗规则收敛在 config.scope_clean（v0.17.7 评审：
+    工具侧 tools_builtin 落盘与端点侧寻址必须同规则，避免两处实现漂移）。"""
+    return config.scope_clean(username)
+
+
+def _user_scope(request: Request) -> str:
+    """当前请求的文件域：开放模式/无身份 → shared（兼容旧版单目录）；
+    认证模式按用户名分域（uploads/outputs 多用户隔离，v0.17.7 评审修复）。"""
+    if not auth.enabled():
+        return "shared"
+    ident = request.state.user
+    return _scope_clean(ident["username"]) if ident else "shared"
+
+
+def _global_file_view(request: Request) -> bool:
+    """是否全局文件视图（列出/删除/下载任意域）：开放模式或 approver/admin。
+    user 角色只能访问自己的域（与 sessions/usage 资源级 ACL 同口径）。"""
+    if not auth.enabled():
+        return True
+    ident = request.state.user
+    return ident is None or ident["role"] in ("approver", "admin")
+
+
+def _safe_rel(rel: str) -> str:
+    """相对路径清洗：允许「<域>/<文件名>」两段式（清单/删除/下载接口统一用
+    相对名寻址），域段与文件段分别过清洗；含 .. 段或超过两段一律拒绝；
+    返回空串表示不合法。"""
+    rel = (rel or "").strip().replace("\\", "/")
+    parts = [p for p in rel.split("/") if p not in ("", ".")]
+    if not parts or ".." in parts:
+        return ""
+    if len(parts) == 2:
+        scope, fname = _scope_clean(parts[0]), _upload_safe_name(parts[1])
+        return f"{scope}/{fname}" if scope and fname else ""
+    if len(parts) == 1:
+        return _upload_safe_name(parts[0])
+    return ""
+
+
+def _check_body_limit(request: Request) -> JSONResponse | None:
+    """请求体大小预检：先看 Content-Length 头（无该头的 chunked 请求由调用方
+    读完后再兜底校验），超限直接 413，避免先全量读进内存。"""
+    cl = request.headers.get("content-length")
+    try:
+        if cl and int(cl) > config.UPLOAD_MAX_MB * 1024 * 1024:
+            return JSONResponse({"error": f"文件超过大小上限（{config.UPLOAD_MAX_MB}MB）"},
+                                status_code=413)
+    except ValueError:
+        return JSONResponse({"error": "非法 Content-Length"}, status_code=400)
+    return None
+
+
+def _scope_files(base: Path, scope: str | None) -> list[Path]:
+    """列出文件域目录下的文件。scope=None 表示全局视图（遍历所有用户域）。"""
+    if scope is not None:
+        d = base / scope
+        return [p for p in sorted(d.iterdir()) if p.is_file()] if d.is_dir() else []
+    out = []
+    if base.is_dir():
+        for d in sorted(base.iterdir()):
+            if d.is_dir():
+                out += [p for p in sorted(d.iterdir()) if p.is_file()]
+    return out
+
+
+def _migrate_legacy_file_dirs() -> None:
+    """旧版单目录文件迁入 shared/ 域（多用户隔离上线时一次性执行）。
+    重试 3 次：Windows 上「删除后立即重建同名路径」或杀软扫描新文件会出现
+    瞬时 sharing violation——静默跳过会导致旧文件失联，必须重试并告警。"""
+    import time
+    for base in (config.UPLOADS_DIR, config.OUTPUTS_DIR):
+        if not base.is_dir():
+            continue
+        for p in list(base.iterdir()):
+            if not p.is_file():
+                continue
+            dest = base / "shared" / p.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            for attempt in range(3):
+                try:
+                    p.rename(dest)
+                    break
+                except OSError as e:
+                    if attempt == 2:
+                        print(f"[startup] WARNING: 存量文件迁移失败（旧版文件将"
+                              f"无法按新分域寻址，请手动移动）: {p.name}: {e}")
+                    else:
+                        time.sleep(0.05)
+
+
+@app.post("/api/uploads")
+async def upload_doc(request: Request, name: str = ""):
+    """上传文档（raw body，免 python-multipart 依赖）：存 TOOL_WORKSPACE/uploads/
+    <用户域>/（落在 read_text_file 工作区边界内，模型直接可读分析）。.docx 解包
+    提取为文本落盘（<原名>.docx.md）。多用户按身份分域（开放模式 shared）。"""
+    safe = _upload_safe_name(name)
+    if not safe:
+        return JSONResponse({"error": f"不支持的文件类型，允许后缀："
+                             f"{', '.join(sorted(_UPLOAD_ALL_EXTS))}（PDF 请先转换为 docx/txt/md）"},
+                            status_code=400)
+    pre = _check_body_limit(request)
+    if pre:
+        return pre
+    data = await request.body()
+    if not data:
+        return JSONResponse({"error": "请求体为空"}, status_code=400)
+    if len(data) > config.UPLOAD_MAX_MB * 1024 * 1024:
+        return JSONResponse({"error": f"文件超过大小上限（{config.UPLOAD_MAX_MB}MB）"},
+                            status_code=413)
+    try:
+        if Path(safe).suffix.lower() in _UPLOAD_DOC_EXTS:
+            try:
+                text = _docx_to_text(data)
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            if not text:
+                return JSONResponse({"error": "docx 解析结果为空（可能是空文档或加密文档）"},
+                                    status_code=400)
+            safe = Path(safe).stem + ".docx.md"   # 提取出的文本以 .docx.md 落盘
+        else:
+            text = data.decode("utf-8", errors="replace")
+        scope = _user_scope(request)
+        scope_dir = config.UPLOADS_DIR / scope
+        scope_dir.mkdir(parents=True, exist_ok=True)
+        target = scope_dir / safe
+        if not target.resolve().is_relative_to(config.UPLOADS_DIR.resolve()):
+            return JSONResponse({"error": "非法文件名"}, status_code=400)
+        target.write_text(text, encoding="utf-8")
+        return {"name": f"{scope}/{safe}", "chars": len(text), "preview": text[:200]}
+    except OSError:
+        # 不拼 {e}：OSError 文本含完整服务器绝对路径，外泄部署布局
+        return JSONResponse({"error": "保存失败：文件名含非法字符或磁盘写入被拒绝"},
+                            status_code=500)
+    except Exception:
+        return JSONResponse({"error": "保存失败（服务器内部错误）"}, status_code=500)
+
+
+@app.get("/api/files/{name:path}")
+async def download_output_file(request: Request, name: str):
+    """下载模型输出的文件（仅限 OUTPUTS_DIR 目录内，即 save_output_file 落盘处；
+    不开放 uploads/ 与工作区其余路径——下载面只暴露模型主动产出的结果文件）。
+    多用户按身份分域：user 角色只能访问自己域的文件；approver/admin/开放模式
+    可带 <域>/ 前缀访问任意域；单段文件名按请求身份路由到本域。
+    认证由全局中间件强制（/api/*）。附件下载语义（Content-Disposition: attachment）。"""
+    rel = _safe_rel(name)
+    if not rel:
+        return JSONResponse({"error": "非法文件名"}, status_code=400)
+    if "/" not in rel:
+        # 单段名：按请求身份路由到本域（开放模式=shared；链接含域前缀时走显式域）。
+        # 旧版兼容：分域前的历史会话里链接不带域名，产出已迁入 shared/——
+        # 全局视图身份本域未命中时回退 shared（user 角色不回退，保持隔离）
+        scoped = f"{_user_scope(request)}/{rel}"
+        if (not (config.OUTPUTS_DIR / scoped).is_file()
+                and _global_file_view(request)
+                and (config.OUTPUTS_DIR / f"shared/{rel}").is_file()):
+            scoped = f"shared/{rel}"
+        rel = scoped
+    elif not _global_file_view(request):
+        rel = f"{_user_scope(request)}/{Path(rel).name}"   # user 角色强制本域
+    target = config.OUTPUTS_DIR / rel
+    if (not target.resolve().is_relative_to(config.OUTPUTS_DIR.resolve())
+            or not target.is_file()):
+        return JSONResponse({"error": "文件不存在"}, status_code=404)
+    fname = Path(rel).name
+    if fname.endswith(".docx"):
+        media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    elif fname.endswith(".docx.md"):
+        media = "application/octet-stream"
+    else:
+        media = "text/plain; charset=utf-8"
+    return FileResponse(target, media_type=media, filename=fname)
+
+
+@app.get("/api/uploads")
+async def uploads_list(request: Request):
+    """已上传文档清单（相对名/大小/修改时间）。user 角色只列自己域，
+    approver/admin/开放模式列全部域（相对名带 <域>/ 前缀）。"""
+    scope = None if _global_file_view(request) else _user_scope(request)
+    items = []
+    for p in _scope_files(config.UPLOADS_DIR, scope):
+        try:
+            st = p.stat()
+        except OSError:
+            continue    # 清单遍历与删除竞态：跳过已消失条目
+        rel = f"{p.parent.name}/{p.name}" if p.parent != config.UPLOADS_DIR else p.name
+        items.append({"name": rel, "size": st.st_size, "mtime": int(st.st_mtime)})
+    return {"uploads": items}
+
+
+@app.post("/api/skillpacks")
+async def upload_skillpack(request: Request, overwrite: bool = False):
+    """上传技能包 zip：服务端安全解包直接挂载到 skills/<name>/（多文件技能：
+    SKILL.md + references/ 等）。技能是全局资产（不按用户分域）。安全校验：
+    条目路径防穿越（zip-slip）、条目数与解压后总量上限（防 zip 炸弹）、扩展名
+    白名单；技能名取 SKILL.md frontmatter，与 create_skill 同一命名白名单与
+    冲突语义；覆盖导入先解包临时目录校验后原子换名（失败不损坏原技能）。
+    导入成功后重建图使技能立即可发现。"""
+    pre = _check_body_limit(request)
+    if pre:
+        return pre
+    body = await request.body()
+    if not body:
+        return JSONResponse({"error": "请求体为空"}, status_code=400)
+    if len(body) > config.UPLOAD_MAX_MB * 1024 * 1024:
+        return JSONResponse({"error": f"文件超过大小上限（{config.UPLOAD_MAX_MB}MB）"},
+                            status_code=413)
+    try:
+        result = await asyncio.to_thread(skills.import_skill_zip, body, overwrite)
+    except FileExistsError as e:
+        return JSONResponse({"error": str(e), "conflict": True}, status_code=409)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception:
+        return JSONResponse({"error": "导入失败（服务器内部错误）"}, status_code=500)
+    await asyncio.to_thread(agent.maybe_reload_custom_tools)  # 技能签名变化 → 重建图，立即可发现
+    result["files"] = result["files"][:50]
+    return result
+
+
+@app.delete("/api/uploads/{name:path}")
+async def upload_delete(request: Request, name: str):
+    """删除一个已上传文档（相对名寻址）。user 角色只能删除自己域的文档。"""
+    rel = _safe_rel(name)
+    if not rel:
+        return JSONResponse({"error": "非法文件名"}, status_code=400)
+    if "/" not in rel:
+        rel = f"{_user_scope(request)}/{rel}"   # 单段名按请求身份路由到本域
+    elif not _global_file_view(request):
+        rel = f"{_user_scope(request)}/{Path(rel).name}"   # user 角色强制本域
+    target = config.UPLOADS_DIR / rel
+    if (not target.resolve().is_relative_to(config.UPLOADS_DIR.resolve())
+            or not target.is_file()):
+        return JSONResponse({"error": "文件不存在"}, status_code=404)
+    target.unlink()
+    return {"deleted": rel}
 
 
 @app.get("/api/approvals")

@@ -1,10 +1,14 @@
 # Private Agent POC — 私有化 Agent 开发运行框架
 
-**版本：v0.17.6**（2026-10-08）
+**版本：v0.17.8**（2026-10-08）
 
 最小可运行的私有化 Agent 框架：**vLLM（Qwen 27B）+ LangGraph（Agent 循环 + 多 Agent 编排）+ MCP（工具协议）+ Skills（技能系统）+ 对话式自定义工具 + 人工审批流 + 代码沙箱 + Langfuse 观测 + FastAPI（SSE 流式接口）+ 离线聊天前端**。
 
 ## 版本记录
+
+- **v0.17.8**：全面架构与代码评审后的修复批次 + **上传/产出多用户隔离**——上传文档与 AI 产出文件按登录账号分目录存放：普通账号只能访问自己的文件，审批/管理角色可跨账号查阅，历史存量文件自动归入公共目录、旧下载链接继续可用；修复长会话在特定长度区间历史被静默裁剪的问题；技能包导入/技能创建的返回信息不再暴露服务器部署路径；文件名非法字符、保留设备名、超大文件、恶意构造的 Word/压缩包一律前置拒绝并给出可理解提示；技能包覆盖导入失败不再损坏原有技能，覆盖创建技能不再残留旧附属文件；技能连续快速更新后立即生效；上传/产出文件不再纳入版本库；另有若干稳定性小修。技术明细见 SECURITY.md（3.15-3.17、6.7、八）与 CODE_REVIEW.md 修复记录。
+
+- **v0.17.7**：文档上传与文档驱动开发——① **前端 📎 上传**：`POST /api/uploads`（raw body，文件名走查询参数，零新增依赖），文件落 `TOOL_WORKSPACE/uploads/`（读边界内，模型用既有 `read_text_file` 直接可读，无需新开读取通道）；② **`list_uploaded_docs` 内核工具**：列出已上传文档清单（主 Agent 与多 Agent worker 均可用），配合 `read_text_file` 构成模型侧文档访问通道；③ **系统提示词注入上传指引**（`config.UPLOAD_PROMPT`，装配时无条件追加，自定义 SYSTEM_PROMPT 不丢失）：分析严格基于文档实际内容，可按文档创建自定义工具/技能/领域包；④ **上传安全边界**：文件名清洗（剥路径成分 + 白名单后缀 + 120 字限长，`.env`/`*.db` 等敏感名天然被白名单挡下）、单文件上限 `UPLOAD_MAX_MB`（默认 10MB）、路径穿越拒绝、认证模式下接口鉴权；⑤ **格式支持**：md/txt/csv/json/yaml/代码等纯文本原样落盘，`.docx` 标准库解包提取正文（段落换行 + 实体还原，零第三方依赖，落盘为 `<原名>.docx.md`），PDF 明确 400 拒绝并引导转换（不假装能读）；⑥ **配套接口**：`GET /api/uploads` 清单、`DELETE /api/uploads/{name}` 删除（仅限 uploads/ 目录内）；⑦ **技能包 zip 上传**（`POST /api/skillpacks`）：目录型技能的标准传输形态——📎 识别 `.zip` 走服务端安全解包直接挂载 `skills/<name>/`（SKILL.md + references/ 等多文件结构），安全三件套：条目路径防穿越（zip-slip）、条目数 200/解压后 20MB 上限（防 zip 炸弹）、扩展名白名单（拒可执行二进制）；技能名取 SKILL.md frontmatter（与 create_skill 同一命名白名单），已存在走同一冲突语义（409，前端确认后 overwrite 覆盖整目录替换）；**技能签名纳入图重建检测**（`skills.signature`：全部 SKILL.md 相对路径+mtime）——技能包导入与模型 create_skill 后下一轮对话自动重绑生效，修复旧版「新技能要重启才被发现」缺口；⑧ **模型产出文件下载通道**：内核工具 `save_output_file(name, content)`（主 Agent 与 worker 同权）把整理/生成结果落盘 `TOOL_WORKSPACE/outputs/` 并返回 `/api/files/<名>` 下载链接（文件名与上传同规则：basename 剥离 + 白名单后缀 + 120 字限长，`.env`/`*.db` 敏感名天然被挡）；**Word 交付**：`as_docx=true` 时内置公文排版转换器（零第三方依赖手写最小 OOXML 包：标题居中二号方正小标宋、「一、」黑体三号、「（一）」楷体三号、正文仿宋三号、首行缩进 2 字符、固定行距 28 磅，XML 转义防注入）生成 `.docx`；`GET /api/files/{name}` 只暴露 outputs/ 目录（不开放 uploads/ 与工作区其余路径），认证由全局中间件强制，docx 返回标准 wordprocessingml 类型 + 附件下载语义；前端把回复中的 `/api/files/` 链接渲染为可点击下载（认证模式下带凭据 fetch + blob 触发，`<a href>` 直链不带 Bearer 头会 401）；配套首个应用技能 `gongwen-format`（生成符合公文格式的 Word 文档：读上传文稿 → GB/T 9704 风格整理 → as_docx 保存交付 + 链接，缺项提醒不编造）；⑨ **思维链展示与输入锁定**：推理模型（DeepSeek v4/reasoner 类）的思维链默认被 langchain-openai 通用转换器丢弃——自定义 `_ReasoningChatOpenAI` 最小子类把 `delta.reasoning_content` 挂回 `additional_kwargs`，流式管线透出 `reasoning` 事件，前端渲染为「💭 思考中…」折叠块（回答开始后自动收起，点击可展开回看），思考内容不落库；流式期间前端锁定输入框/发送/上传按钮（对话本质串行，防并发消息插队），完成后恢复；gongwen-format 技能交付规则强化——每次保存（含修订重存）后必须原样给纯文本下载链接，禁止代码块包裹/「见之前链接」/指导用户拼接 URL；⑩ **部署路径脱敏**：技能/自定义工具/领域包的创建、更新、删除返回值与冲突报错一律改用逻辑路径（`skills/<名>/SKILL.md`、`custom_tools/<名>.py`、`packs/<名>`），服务器绝对路径（盘符/用户目录/部署位置）不再进入对话与模型视野；系统提示词同步约束模型交流只讲逻辑路径（部署布局属内部信息）；工具返回展示改为预览+点击展开完整内容；⑪ **上下文压缩**：长会话按 token 而非轮数触发（历史估算超「模型窗口 × 60%」默认 76.8k 时）——`pre_model_hook` 只改**模型视野**：滑动窗口保底（近 `CONTEXT_RECENT_TOKENS` 8k token 永不裁、切割点成对完整性保护不悬空工具调用）+ 窗口外旧消息**滚动摘要**（独立 LLM 调用合并旧摘要与新增段，滞回 `CONTEXT_SUMMARY_HYSTERESIS_TOKENS` 4k 内不重摘防每轮烧 token），checkpointer 原始历史完整保留（界面恢复/审计/断点续跑不受影响），摘要失败自动回退纯窗口模式；E2E 实测：40 轮会话模型只能回忆窗口内编号，压缩后早期编号从摘要正确召回，界面历史无损
 
 - **v0.17.6**：架构评审遗留低危项（P3）修复 + 认证默认联动运行模式——① **沙箱令牌常数时间比较**：`check_token` 的 `!=` 改 `hmac.compare_digest`，比较耗时不再随前缀匹配长度变化，堵住计时侧信道逐字节猜令牌的的理论路径（与 Agent 侧 HMAC 校验口径统一）；② **观测失败可恢复**：Langfuse 连接失败不再「一次检查、永久停用」，改为 60s 冷却期后自动重试（`RETRY_COOLDOWN`）——观测服务后启动或临时宕机恢复后，埋点无需重启即可接回，冷却期内不重复探测、不阻塞主链路；③ **会话租约有界等待**：`SessionLease` 获取租约此前无上限轮询，同会话另一请求长时间持有（如审批 resume 挂起）时新请求无限挂起且用户零反馈——现按 `LEASE_ACQUIRE_TIMEOUT`（默认 120s）超时，向用户返回「租约被占用，请稍后重试」错误事件；④ **登录限流跨进程**：失败计数与锁定状态从进程内存迁到 STATE_DB `login_fails` 表（旧库自动建表），多副本轮转打不同进程不再能绕过 30 秒锁定，容量上限与保底清空语义不变（跨机多副本仍应由前置网关统一限流）；⑤ **认证默认联动运行模式**：`AUTH_ENABLED` 默认值不再固定 false——Mock 模式（`MOCK_LLM=true`）= 开发者模式默认免登录直接进入，真实 LLM 模式默认要求登录（生产链路必须认证），显式设置 `AUTH_ENABLED` 可覆盖（如真实模式本地调试免登录）；真实模式首次启动须配 `AUTH_BOOTSTRAP_ADMIN` 或用 manage_users.py 建用户，否则无人能登录
 
@@ -309,7 +313,11 @@ MODEL_NAME=deepseek-chat        # 或 deepseek-reasoner（R1 推理模型）
 | `CHECKPOINTER` | `memory` | `postgres` 可切换持久化（Windows 开发机仅支持 memory） |
 | `AUTH_ENABLED` | 联动 `MOCK_LLM`（v0.17.6） | Mock=开发者模式默认免登录；真实模式默认要求登录；显式设置可覆盖。true 时 Bearer 凭据 + 三级角色 |
 | `AUTH_IDENTITY_HEADER` | 空 | SSO 身份头（如 `X-Forwarded-User`，v0.16.0）；须配合 `AUTH_PROXY_ALLOWED_IPS` 白名单才生效（v0.17.4 F2） |
-| `SYSTEM_PROMPT` | 见 config.py | 系统提示词 |
+| `SYSTEM_PROMPT` | 见 config.py | 系统提示词（文档上传指引由 `config.UPLOAD_PROMPT` 装配时独立追加，不受覆盖影响） |
+| `UPLOAD_MAX_MB` | `10` | 文档上传/产出单文件大小上限（MB，v0.17.7）；文件按身份分域落 `TOOL_WORKSPACE/uploads/<域>/`、`outputs/<域>/`（v0.17.8），开放模式 shared/ |
+| `CONTEXT_COMPACT_ENABLED` | `true` | 上下文压缩开关（v0.17.7）：超触发线时窗口外旧消息滚动摘要，只改模型视野不动 checkpointer 历史 |
+| `CONTEXT_MAX_TOKENS` / `CONTEXT_COMPACT_RATIO` | `128000` / `0.6` | 模型窗口与触发比例（默认触发线 76.8k，按实际模型窗口调整；启动日志打印） |
+| `CONTEXT_RECENT_TOKENS` / `CONTEXT_SUMMARY_HYSTERESIS_TOKENS` | `8000` / `4000` | 永不裁的近期窗口 / 摘要重生成滞回（新增段不足不重摘） |
 
 ## 如何扩展一个业务工具
 

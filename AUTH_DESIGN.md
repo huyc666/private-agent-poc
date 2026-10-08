@@ -161,4 +161,5 @@ AUTH_BOOTSTRAP_ADMIN=       # 首次启动时若用户表为空，以此为用�
   企业接入时替换为解析反向代理注入的身份头（如 X-Forwarded-User）或 OIDC~~（**已落地**，v0.16.0：`auth.resolve_identity` 成为身份解析唯一入口，内置反向代理身份头模式（配置 `AUTH_IDENTITY_HEADER`，认证在外授权在内、用户不存在 fail-closed），扩展 OIDC 等只需在该函数加分支）
 - ~~**账号密码登录**：同一用户表加 password_hash 列即可平滑升级~~（**已落地**，v0.15.0：PBKDF2 加盐散列、POST /api/auth/login 签发 pat- 短期令牌（默认 12h，AUTH_TOKEN_TTL_HOURS 可调）、/api/auth/logout 注销、吊销用户同步清除令牌、前端登录框（账号密码 / API Key 双入口）、`passwd` CLI；登录失败不区分原因防用户名枚举）
 - ~~**资源级 ACL**：会话/审批的所有权过滤~~（**已落地**，v0.14.1：user 角色的会话列表/历史/删除、审批列表、用量统计均按本人过滤，越权 403）
+- ~~**文件域隔离**：上传文档与模型产出文件的所有权过滤~~（**已落地**，v0.17.8：`uploads/<域>/`、`outputs/<域>/` 按认证身份分目录（规则收敛 `config.scope_clean`，端点侧与工具侧 `usage.current_user` 同口径），user 角色的清单/下载/删除仅限本域，approver/admin 全局视图可带 `<域>/` 前缀跨域访问，单段文件名按请求身份路由、旧版链接由全局视图自动回退 `shared/`；开放模式落 `shared/`，升级时存量文件启动自动迁入，含重试与告警）
 - ~~**Key 轮换与过期**：加 expires_at 列 + 自动过期~~（**已落地**，v0.14.2：`--days` 签发限期 Key、`rotate` 换发新 Key 旧 Key 立即失效、过期 Key 一律 401、`list` 显示有效期与状态）

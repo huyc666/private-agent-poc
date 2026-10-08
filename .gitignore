@@ -12,3 +12,6 @@ state.db-shm
 usage.db
 usage.db-wal
 usage.db-shm
+# 运行时用户文件（v0.17.7 文档上传/模型产出，勿入库；多用户按域分目录）
+uploads/
+outputs/

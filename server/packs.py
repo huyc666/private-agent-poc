@@ -31,7 +31,7 @@ _disabled: set[str] = set()
 _scan_cache: list[dict] | None = None
 
 # 内核版本：领域包清单里的 core_version（如 ">=0.8.0"）与此比对，不满足则整包不加载
-CORE_VERSION = "0.17.6"
+CORE_VERSION = "0.17.7"
 
 
 def _version_tuple(v: str) -> tuple:
@@ -400,7 +400,8 @@ def create_pack(name: str, description: str, prompt: str = "",
         return "创建失败：包名只允许小写字母、数字、连字符（如 weather-ops）"
     pack_dir = _packs_dir() / name
     if pack_dir.exists():
-        return f"领域包「{name}」已存在：{pack_dir}"
+        # 只呈现逻辑路径（相对工作区），不暴露服务器部署布局（安全修复）
+        return f"领域包「{name}」已存在：packs/{name}"
     if not description.strip():
         return "创建失败：description 不能为空（展示给模型判断何时使用）"
 
@@ -473,7 +474,7 @@ def create_pack(name: str, description: str, prompt: str = "",
         sig = packsign.sign_pack_files(pack_dir)
         signed_note = "\n已自动签名（可信路径：内容经审批后落盘）。" if sig else \
             "\n⚠️ 强制模式已开启但签名失败（未配置 PACK_SIGNING_KEY？），包将不可用。"
-    return (f"领域包「{name}」已创建：{pack_dir}\n包含：{caps}{signed_note}\n"
+    return (f"领域包「{name}」已创建：packs/{name}\n包含：{caps}{signed_note}\n"
             "（无需重启，下一轮对话起挂载；可用 list_packs 查看，对话中说"
             "「禁用/启用该包」可即时切换能力边界）")
 
@@ -509,5 +510,5 @@ def delete_pack(name: str) -> str:
     _disabled.discard(name)
     shutil.rmtree(pack_dir)
     invalidate_scan_cache()
-    return (f"领域包「{name}」已删除：{pack_dir}\n"
+    return (f"领域包「{name}」已删除：packs/{name}\n"
             "（无需重启，下一轮对话起其工具/技能/提示词全部消失）")

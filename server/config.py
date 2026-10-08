@@ -1,5 +1,6 @@
 """配置：全部通过环境变量驱动，私有化部署友好。"""
 import os
+import re
 from pathlib import Path
 
 try:
@@ -27,6 +28,37 @@ MCP_SERVER_SCRIPT = PROJECT_ROOT / "tools" / "local_tools_server.py"
 
 # ---- 工具沙箱边界：read_text_file 只能读这个目录以内 ----
 TOOL_WORKSPACE = Path(os.environ.get("TOOL_WORKSPACE", str(PROJECT_ROOT))).resolve()
+# 文档上传目录（v0.17.7）：落在工作区内 → 模型用 read_text_file 直接可读，
+# 无需新开读取通道；read_text_file 的敏感文件拦截/路径越界校验同样覆盖
+UPLOADS_DIR = TOOL_WORKSPACE / "uploads"
+# 模型输出文件目录（v0.17.7）：save_output_file 工具落盘处，GET /api/files 下载
+OUTPUTS_DIR = TOOL_WORKSPACE / "outputs"
+
+
+def scope_clean(username: str) -> str:
+    """身份 → 文件域目录名（uploads/outputs 的用户子目录，多用户隔离 v0.17.7）。
+    非法字符归一为下划线、48 字限长、空值回退 shared。端点侧与工具侧
+    （tools_builtin 经 usage.current_user 取身份）共用同一规则，保证寻址一致。"""
+    s = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]", "_", (username or "").strip())
+    return s.strip("_")[:48] or "shared"
+
+# 单文件大小上限（MB），防超大文件灌爆内存/磁盘
+UPLOAD_MAX_MB = int(os.getenv("UPLOAD_MAX_MB", "10"))
+
+# ---- 上下文压缩（v0.17.7：滑动窗口 + 滚动摘要，只改模型视野不动历史）----
+# 历史估算 token 超过「模型窗口 × 比例」时触发：窗口外旧消息滚动摘要注入模型视野；
+# checkpointer 原始历史完整保留（界面恢复/审计不受影响）。按 token 而非轮数触发。
+CONTEXT_COMPACT_ENABLED = os.getenv("CONTEXT_COMPACT_ENABLED", "true").lower() in ("1", "true", "yes")
+CONTEXT_MAX_TOKENS = int(os.getenv("CONTEXT_MAX_TOKENS", "128000"))        # 模型上下文窗口
+CONTEXT_COMPACT_RATIO = float(os.getenv("CONTEXT_COMPACT_RATIO", "0.6"))   # 触发比例
+CONTEXT_RECENT_TOKENS = int(os.getenv("CONTEXT_RECENT_TOKENS", "8000"))    # 永不裁的近期窗口
+CONTEXT_SUMMARY_HYSTERESIS_TOKENS = int(os.getenv("CONTEXT_SUMMARY_HYSTERESIS_TOKENS", "4000"))  # 重摘滞回
+
+# 文本类文件白名单后缀（上传与模型输出共用）：可执行二进制一律不在名单内
+FILE_TEXT_EXTS = {".md", ".markdown", ".txt", ".csv", ".tsv", ".json",
+                  ".yaml", ".yml", ".xml", ".html", ".htm", ".py", ".js", ".ts",
+                  ".java", ".go", ".rs", ".sql", ".sh", ".bat",
+                  ".ini", ".cfg", ".conf", ".toml", ".log", ".rst"}
 
 # ---- 天气工具（Open-Meteo，免费无需 key；内网可改为内部代理地址）----
 WEATHER_GEOCODING_URL = os.environ.get(
@@ -110,4 +142,25 @@ SYSTEM_PROMPT = os.environ.get(
     "SYSTEM_PROMPT",
     "你是部署在企业内网的私有化 Agent 助手。你可以使用提供的工具来回答问题，"
     "涉及计算、时间、文件内容时优先调用工具，不要编造结果。回答使用简体中文。",
+)
+
+# 文档上传指引（v0.17.7）：与 SYSTEM_PROMPT 分开定义、由 agent 装配时无条件
+# 追加——用户自定义 SYSTEM_PROMPT 环境变量也不会丢失这段能力说明
+UPLOAD_PROMPT = (
+    "\n\n## 文档上传\n"
+    "用户可通过前端 📎 按钮上传文档（存放在 uploads/ 下、按用户域分目录）：\n"
+    "- 先用 list_uploaded_docs 查看已上传文档清单，再用 read_text_file 按"
+    "清单给出的逻辑路径（uploads/<域>/<文件名>）读取内容进行分析；\n"
+    "- 分析/总结严格基于文档实际内容，不要编造；\n"
+    "- 用户要求时，可基于文档内容创建自定义工具、技能或领域包"
+    "（工具代码中的路径、字段、参数名以文档实际内容为准）。\n"
+    "- 用户也可上传技能包 zip（📦，含 SKILL.md + references/ 等多文件）："
+    "服务端会直接安全解包挂载到 skills/<技能名>/ 目录并立即可发现；"
+    "导入成功后你应读取 skills/<技能名>/ 下的文件了解该技能内容。\n"
+    "- 需要给用户交付文件（如按格式整理后的文稿）时，用 save_output_file 保存"
+    "（Word 文档传 as_docx=true 并以 .docx 命名，会自动套用公文版式），"
+    "并在最终回复中附上工具返回的下载链接（/api/files/<域>/<文件名>）。\n"
+    "- 与用户交流时只使用逻辑路径（skills/…、packs/…、custom_tools/…、"
+    "uploads/…、outputs/…），绝不提及服务器文件系统的绝对路径"
+    "（如盘符/用户目录/项目部署位置）——部署布局属于内部信息。"
 )

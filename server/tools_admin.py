@@ -13,7 +13,8 @@
 """
 from . import approval, custom_tools, packs, skills
 from .state import STATE
-from .tools_builtin import delete_workspace_file, read_text_file, run_python_code
+from .tools_builtin import (delete_workspace_file, list_uploaded_docs,
+                            read_text_file, run_python_code, save_output_file)
 
 
 def _reload_graph():
@@ -38,9 +39,13 @@ def load_skill(name: str) -> str:
     return content if content is not None else f"技能「{name}」不存在，可用 list_skills_tool 查看全部技能"
 
 
-def create_skill(name: str, description: str, instructions: str) -> str:
-    """创建一个新技能。name 为小写字母/数字/连字符（如 weekly-report）；description 一句话说明何时使用；instructions 为完整 Markdown 指令。"""
-    return skills.create_skill(name, description, instructions)
+def create_skill(name: str, description: str, instructions: str,
+                 overwrite: bool = False) -> str:
+    """创建一个新技能，或在技能已存在时（overwrite=true）整体替换其指令内容。
+    name 为小写字母/数字/连字符（如 weekly-report）；description 一句话说明何时使用；
+    instructions 为完整 Markdown 指令。技能已存在且未显式传 overwrite=true 时会拒绝
+    （防止误覆盖）；更新场景请把 overwrite 设为 true 并在回复中说明将替换原内容。"""
+    return skills.create_skill(name, description, instructions, overwrite=overwrite)
 
 
 # ---------------------------------------------------------------- 自定义工具（对话式创建，免重启）
@@ -227,6 +232,12 @@ def _research_tools() -> list:
         StructuredTool.from_function(
             func=read_text_file, name="read_text_file",
             description=read_text_file.__doc__),
+        StructuredTool.from_function(
+            func=list_uploaded_docs, name="list_uploaded_docs",
+            description=list_uploaded_docs.__doc__),
+        StructuredTool.from_function(
+            func=save_output_file, name="save_output_file",
+            description=save_output_file.__doc__),
     ]
     # 平台包/领域包工具也授予 worker（与主 Agent 一致的能力边界，重名不重复添加；
     # 时间/计算等通用能力自 v0.12.0 起来自平台包 core-utils，经此路径进入）
@@ -256,7 +267,7 @@ async def research_topic(topic: str) -> str:
 
 # ---------------------------------------------------------------- 工具装配清单
 
-BUILTIN_TOOLS = [read_text_file,
+BUILTIN_TOOLS = [read_text_file, list_uploaded_docs, save_output_file,
                  run_python_code, delete_workspace_file,
                  list_skills_tool, load_skill, create_skill,
                  list_custom_tools, create_custom_tool, delete_custom_tool,
@@ -274,6 +285,12 @@ def builtin_langchain_tools():
         StructuredTool.from_function(
             func=read_text_file, name="read_text_file",
             description=read_text_file.__doc__),
+        StructuredTool.from_function(
+            func=list_uploaded_docs, name="list_uploaded_docs",
+            description=list_uploaded_docs.__doc__),
+        StructuredTool.from_function(
+            func=save_output_file, name="save_output_file",
+            description=save_output_file.__doc__),
         StructuredTool.from_function(
             func=run_python_code, name="run_python_code",
             description=run_python_code.__doc__),

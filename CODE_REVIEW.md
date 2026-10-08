@@ -126,3 +126,38 @@ if not target.is_relative_to(config.TOOL_WORKSPACE):
    `record()` / `_query()` 均已切换。实测落账、聚合查询正常，`PRAGMA journal_mode` 确认为 `wal`。
 
 冒烟测试：Mock 模式启动 → `/api/health` 200 → SSE 对话（时间工具调用）全链路正常。
+
+---
+
+## 修复记录（2026-10-08，v0.17.8 架构与代码评审批次闭环）
+
+v0.17.7 功能面（上下文压缩/文档上传/技能包/公文 Word/思维链）成型后的全面评审：
+**P1×3 + P2×6 + P3×8，外加「上传/产出多用户隔离」，全部修复**（49 项回归脚本 + E2E 验证）。
+
+**P1（正确性/安全）**
+
+1. **压缩视野误裁**：`pre_model_hook` 无摘要分支此前**无条件**裁到近期窗口（8k）——
+   历史总量处于 8k~76.8k 区间时既没摘要又被裁，静默丢失。改为超触发线才裁；
+   摘要分支尾部预算从「近期窗口」改为「触发线」（尾部是摘要未覆盖的新内容，误裁即丢）。
+2. **skillpack 绝对路径外泄**：`import_skill_zip` 返回值 `str(target)` 改逻辑路径 `skills/<名>`。
+3. **文件名非法字符 → OSError 泄露**：非法名落到 `write` 才抛错，异常文本携带服务器绝对路径。
+   上传/产出两侧前置拒绝（Windows 非法字符含控制字符、保留设备名 CON/NUL/COM1-9、NFC 归一化），
+   错误文案一律不拼 `{e}`。
+
+**P2（健壮性）**：上传 Content-Length 预检 413（超限不全量读内存）；docx 按
+`word/document.xml` 声明大小预检（20M 字符上限防解压炸弹）；坏 zip/docx 统一 400 文案；
+docx 转换器剥离 XML 非法控制字符（防 Word 打开报错）；技能包覆盖导入原子化
+（tmp 换名 + 失败回滚，原技能不损坏）；技能签名 `st_mtime` → `st_mtime_ns`
+（秒级 mtime 快速连续更新不变 → 图不重建新技能不生效）。
+
+**P3（8 项）**：zip 双 SKILL.md 取路径最浅者（根条目优先）；`create_skill` overwrite
+清旧附属文件；上传清单遍历与删除竞态跳过；启动打印压缩触发线/近窗配置；
+`_est_tokens` 计入 `reasoning_content`；`.gitignore` 补 `uploads/`/`outputs/` 等。
+
+**多用户文件分域（隔离增强）**：`uploads/<域>/`、`outputs/<域>/` 按认证身份分目录
+（规则收敛 `config.scope_clean`，端点侧与工具侧 `usage.current_user` 同口径）；
+user 角色清单/下载/删除仅本域，approver/admin/开放模式全局视图可带 `<域>/` 前缀
+跨域访问；单段文件名按请求身份路由，旧版历史链接由全局视图自动回退 `shared/`；
+升级时存量文件启动迁入 `shared/`（重试 3 次 + 失败告警，不静默丢失）。
+
+验收明细见 SECURITY.md 3.15-3.17、6.7 及「八、已知限制与接受风险」。

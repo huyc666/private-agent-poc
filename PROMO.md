@@ -128,4 +128,4 @@ Private Agent POC 交付的不是一个封闭产品，而是一个**能长大的
 
 ---
 
-*Private Agent POC v0.17.6 · 完全本地运行 · 代码可读可改 · 数据永不出域*
+*Private Agent POC v0.17.8 · 完全本地运行 · 代码可读可改 · 数据永不出域*

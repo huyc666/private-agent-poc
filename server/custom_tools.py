@@ -95,7 +95,9 @@ def write_custom_tool(name: str, code: str) -> str:
     existed = path.exists()
     path.write_text(code if code.endswith("\n") else code + "\n", encoding="utf-8")
     action = "已更新" if existed else "已创建"
-    return f"自定义工具「{name}」{action}：{path}\n（无需重启，下一轮对话起即可调用）"
+    # 只呈现逻辑路径（相对工作区），不暴露服务器部署布局（安全修复）
+    return (f"自定义工具「{name}」{action}：custom_tools/{name}.py\n"
+            "（无需重启，下一轮对话起即可调用）")
 
 
 def delete_custom_tool_file(name: str) -> str:
@@ -106,7 +108,9 @@ def delete_custom_tool_file(name: str) -> str:
     if not path.is_file():
         return f"自定义工具「{name}」不存在"
     path.unlink()
-    return f"自定义工具「{name}」已删除：{path}\n（无需重启，下一轮对话起不再可调用）"
+    # 只呈现逻辑路径（相对工作区），不暴露服务器部署布局（安全修复）
+    return (f"自定义工具「{name}」已删除：custom_tools/{name}.py\n"
+            "（无需重启，下一轮对话起不再可调用）")
 
 
 _TYPE_MAP = {"str": str, "int": int, "float": float, "bool": bool}
