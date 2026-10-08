@@ -8,6 +8,7 @@
 - POST /run       执行任意 Python 代码片段（run_python_code 工具）
 - POST /run_tool  执行 custom_tools 目录中已审批的自定义工具（tools 目录以只读卷挂载）
 """
+import hmac
 import json
 import os
 import re
@@ -39,7 +40,10 @@ def check_token(x_sandbox_token: str = Header(default="")):
     2) 未配置令牌 → 默认拒绝（503），仅 SANDBOX_OPEN_MODE=true 时放行
        （兼容既有未启用鉴权的部署）。"""
     if SANDBOX_AUTH_TOKEN:
-        if x_sandbox_token != SANDBOX_AUTH_TOKEN:
+        # 常数时间比较（架构评审 P3）：普通 != 会短路，比较耗时随前缀匹配
+        # 长度变化，理论上可被计时侧信道逐字节猜出令牌；与 Agent 侧 HMAC
+        # 校验口径保持一致，统一用 hmac.compare_digest。
+        if not hmac.compare_digest(x_sandbox_token, SANDBOX_AUTH_TOKEN):
             raise HTTPException(status_code=401, detail="unauthorized")
         return
     if not SANDBOX_OPEN_MODE:

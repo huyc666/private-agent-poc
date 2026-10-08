@@ -202,9 +202,17 @@ async def chat(req: ChatRequest, request: Request):
         # 2) STATE_DB 分布式租约（SessionLease）承担跨进程互斥——
         #    多副本指向同一 STATE_DB 时，同一 session 的并发请求在此排队，
         #    避免 checkpointer 状态写冲突与对话记录交错；不同会话互不干扰。
-        lease = session_lock.SessionLease(session_id, owner)
         async with agent.session_lock(session_id):
-            async with lease:
+            lease = session_lock.SessionLease(session_id, owner)
+            try:
+                await lease.__aenter__()
+            except session_lock.LeaseTimeout as e:
+                # 租约等待超时（架构评审 P3）：此前无界等待——同会话另一请求
+                # 长时间持有租约（如审批 resume 挂起）时新请求无限挂起且用户
+                # 无任何反馈。现在返回可理解的错误事件，用户稍后重试即可。
+                yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+                return
+            try:
                 # SQLite 写为同步调用，挪到线程池避免阻塞事件循环（v0.16.1）
                 await asyncio.to_thread(sessions.append, session_id, user_id,
                                         "user", req.message)
@@ -233,6 +241,8 @@ async def chat(req: ChatRequest, request: Request):
                                      if lease.lost else "\n\n（连接中断，回复不完整）")
                         await asyncio.to_thread(
                             sessions.append, session_id, user_id, "assistant", text)
+            finally:
+                await lease.__aexit__()  # 停心跳 + 释放租约（与 __aenter__ 配对）
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

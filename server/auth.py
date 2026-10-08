@@ -43,13 +43,15 @@ if config.AUTH_PROXY_ALLOWED_IPS:
 _PBKDF2_ITERATIONS = 200_000
 MIN_PASSWORD_LEN = 8
 
-# 登录失败限流（v0.17.2）：内存级按用户名计数，连续失败达阈值锁定一段时间。
+# 登录失败限流（v0.17.2，v0.17.6 迁库）：按用户名计数，连续失败达阈值锁定一段时间。
 # 防的是在线爆破账号密码；PBKDF2 已大幅拉高单次尝试成本，此限流再兜一层。
 # 返回仍与成功同路径的模糊响应（None），不泄露「锁定中」以外的信息（防枚举）。
+# 存储迁到 STATE_DB（架构评审 P3）：此前进程内存级，多副本轮转即可绕过锁定；
+# 同库 WAL + busy_timeout 保证同机多进程跨进程生效（跨机多副本仍应由
+# 前置网关统一限流，与 SQLite 共享存储边界一致）。
 LOGIN_MAX_FAILS = 5         # 连续失败达到该次数 → 锁定
 LOGIN_LOCK_SECONDS = 30     # 锁定时长（秒），到期自动解锁（计数清零）
-_LOGIN_FAILS_MAX = 10_000   # 限流表容量上限（v0.17.3）：防随机用户名灌爆进程内存
-_login_fails: dict[str, tuple[int, float]] = {}  # username -> (失败计数, 锁定截止时间)
+_LOGIN_FAILS_MAX = 10_000   # 限流表容量上限（v0.17.3）：防随机用户名灌爆内存
 
 
 def enabled() -> bool:
@@ -92,6 +94,13 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             username TEXT NOT NULL,
             created REAL NOT NULL,
             expires_at REAL NOT NULL
+        )""")
+    # 登录失败限流表（v0.17.6，架构评审 P3：内存级 → 跨进程）
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS login_fails (
+            username TEXT PRIMARY KEY,
+            fails INTEGER NOT NULL,
+            lock_until REAL NOT NULL
         )""")
 
 
@@ -188,32 +197,40 @@ def login(username: str, password: str) -> dict | None:
     """账号密码登录：验证通过则签发 pat- 令牌（有效期 AUTH_TOKEN_TTL_HOURS）。
     返回 {token, expires_at, identity:{username, role}}；失败（用户不存在/
     已吊销/未设密码/密码错误/限流锁定中）一律返回 None，不区分原因（防用户名枚举）。
-    v0.17.2：连续失败 LOGIN_MAX_FAILS 次锁定 LOGIN_LOCK_SECONDS（内存级，
-    单进程/单副本生效；多副本部署应由前置网关承担统一限流）。"""
+    v0.17.2：连续失败 LOGIN_MAX_FAILS 次锁定 LOGIN_LOCK_SECONDS。
+    v0.17.6（架构评审 P3）：限流计数迁 STATE_DB login_fails 表——进程内存级
+    时多副本轮转即可绕过锁定，迁库后同机多进程共享计数（跨机多副本仍应由
+    前置网关承担统一限流）。"""
     username = (username or "").strip()
     if not username or not password:
         return None
     with _lock:
         now = time.time()
-        # 限流表容量控制（v0.17.3）：攻击者可用海量随机用户名刷失败记录，
-        # 若无上限内存会无限增长。先清已解锁的旧条目；极端情况（超上限且
-        # 均为活跃条目）整体清空保底——限流临时降级，PBKDF2 仍兜底暴力破解。
-        if len(_login_fails) >= _LOGIN_FAILS_MAX:
-            stale = [u for u, (_, until) in _login_fails.items() if until <= now]
-            for u in stale:
-                del _login_fails[u]
-            if len(_login_fails) >= _LOGIN_FAILS_MAX:
-                _login_fails.clear()
-        fails, lock_until = _login_fails.get(username, (0, 0.0))
-        if lock_until > now:
-            # 锁定中：仍返回模糊 None（与密码错误不可区分），仅记日志供排障
-            print(f"[auth] 登录限流锁定中，拒绝: {username}"
-                  f"（{int(lock_until - now)}s 后解锁）")
-            return None
         conn = _connect()
         conn.row_factory = sqlite3.Row
         try:
             _ensure_schema(conn)
+            # 限流表容量控制（v0.17.3 语义不变，改在库上执行）：攻击者可用
+            # 海量随机用户名刷失败记录，若无上限表会无限增长。先清已解锁的
+            # 旧条目；极端情况（超上限且均为活跃条目）整体清空保底——限流
+            # 临时降级，PBKDF2 仍兜底暴力破解。
+            n_fails = conn.execute("SELECT COUNT(*) FROM login_fails").fetchone()[0]
+            if n_fails >= _LOGIN_FAILS_MAX:
+                conn.execute("DELETE FROM login_fails WHERE lock_until <= ?", (now,))
+                if conn.execute("SELECT COUNT(*) FROM login_fails").fetchone()[0] \
+                        >= _LOGIN_FAILS_MAX:
+                    conn.execute("DELETE FROM login_fails")
+                conn.commit()
+            row_fail = conn.execute(
+                "SELECT fails, lock_until FROM login_fails WHERE username = ?",
+                (username,)).fetchone()
+            fails, lock_until = (row_fail["fails"], row_fail["lock_until"]) \
+                if row_fail else (0, 0.0)
+            if lock_until > now:
+                # 锁定中：仍返回模糊 None（与密码错误不可区分），仅记日志供排障
+                print(f"[auth] 登录限流锁定中，拒绝: {username}"
+                      f"（{int(lock_until - now)}s 后解锁）")
+                return None
             row = conn.execute(
                 "SELECT username, role, password_hash FROM api_users"
                 " WHERE username = ? AND revoked = 0", (username,)).fetchone()
@@ -221,14 +238,20 @@ def login(username: str, password: str) -> dict | None:
                     or not _verify_password(password, row["password_hash"]):
                 fails += 1
                 if fails >= LOGIN_MAX_FAILS:
-                    _login_fails[username] = (0, now + LOGIN_LOCK_SECONDS)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO login_fails(username, fails, lock_until)"
+                        " VALUES (?,0,?)", (username, now + LOGIN_LOCK_SECONDS))
                     print(f"[auth] 登录连续失败 {LOGIN_MAX_FAILS} 次，"
                           f"锁定 {username} {LOGIN_LOCK_SECONDS}s"
                           "（锁定期内该账号登录一律拒绝）")
                 else:
-                    _login_fails[username] = (fails, lock_until)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO login_fails(username, fails, lock_until)"
+                        " VALUES (?,?,?)", (username, fails, lock_until))
+                conn.commit()
                 return None
-            _login_fails.pop(username, None)  # 登录成功：清除失败计数
+            conn.execute("DELETE FROM login_fails WHERE username = ?",
+                         (username,))  # 登录成功：清除失败计数
             token = "pat-" + secrets.token_hex(16)
             now = time.time()
             expires = now + config.AUTH_TOKEN_TTL_HOURS * 3600

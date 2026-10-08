@@ -6,6 +6,8 @@
 - 真实模式走 LangChain CallbackHandler 自动埋点；Mock 模式手动埋点演示
 """
 import os
+import threading
+import time
 from contextlib import contextmanager
 
 try:
@@ -15,9 +17,11 @@ except ImportError:
     pass
 
 DEFAULT_HOST = "http://localhost:3000"
+RETRY_COOLDOWN = 60.0  # 秒：连接失败后的重试冷却（架构评审 P3：失败可恢复）
 
 _client = None
-_checked = False
+_next_retry = 0.0  # 冷却期内不再探测；期满自动重试（此前只检查一次，永久停用）
+_init_lock = threading.Lock()
 
 
 def enabled() -> bool:
@@ -25,30 +29,41 @@ def enabled() -> bool:
 
 
 def get_client():
-    """返回 Langfuse 客户端；未启用或不可用返回 None（惰性初始化，只检查一次）。"""
-    global _client, _checked
-    if _checked:
+    """返回 Langfuse 客户端；未启用或暂不可用返回 None。
+    连接失败不再永久停用（架构评审 P3）：失败后进入 RETRY_COOLDOWN 冷却，
+    期满自动重试——观测服务后启动/临时宕机恢复后，埋点无需重启即可接回。"""
+    global _client, _next_retry
+    if _client is not None:
         return _client
-    _checked = True
     if not enabled():
         return None
-    try:
-        from langfuse import Langfuse
+    now = time.monotonic()
+    if now < _next_retry:
+        return None
+    # 冷却期满：抢占下一轮探测时间，避免并发请求同时打探测（auth_check 有超时）
+    with _init_lock:
+        now = time.monotonic()
+        if _client is not None or now < _next_retry:
+            return _client
+        _next_retry = now + RETRY_COOLDOWN
+        try:
+            from langfuse import Langfuse
 
-        client = Langfuse(
-            public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", "pk-lf-local"),
-            secret_key=os.environ.get("LANGFUSE_SECRET_KEY", "sk-lf-local"),
-            host=os.environ.get("LANGFUSE_HOST", DEFAULT_HOST),
-            timeout=3,
-        )
-        if client.auth_check():
-            _client = client
-            print(f"[telemetry] Langfuse 已连接: {os.environ.get('LANGFUSE_HOST', DEFAULT_HOST)}")
-        else:
-            print("[telemetry] Langfuse 认证失败，观测已停用（不影响主链路）")
-    except Exception as e:
-        print(f"[telemetry] Langfuse 不可用（{type(e).__name__}: {e}），观测已停用（不影响主链路）")
-    return _client
+            client = Langfuse(
+                public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", "pk-lf-local"),
+                secret_key=os.environ.get("LANGFUSE_SECRET_KEY", "sk-lf-local"),
+                host=os.environ.get("LANGFUSE_HOST", DEFAULT_HOST),
+                timeout=3,
+            )
+            if client.auth_check():
+                _client = client
+                print(f"[telemetry] Langfuse 已连接: {os.environ.get('LANGFUSE_HOST', DEFAULT_HOST)}")
+            else:
+                print(f"[telemetry] Langfuse 认证失败，{RETRY_COOLDOWN:.0f}s 后重试（不影响主链路）")
+        except Exception as e:
+            print(f"[telemetry] Langfuse 不可用（{type(e).__name__}: {e}），"
+                  f"{RETRY_COOLDOWN:.0f}s 后重试（不影响主链路）")
+        return _client
 
 
 def langchain_callbacks() -> list:

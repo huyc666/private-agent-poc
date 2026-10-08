@@ -83,9 +83,13 @@ CHECKPOINTER = os.environ.get("CHECKPOINTER", "memory").lower()
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://postgres:postgres@127.0.0.1:5432/agent_poc")
 
-# ---- API 认证（v0.14.0，设计见 AUTH_DESIGN.md）----
-# false（默认）= 开放模式，行为与认证引入前一致；true = Bearer API Key 认证
-AUTH_ENABLED = os.environ.get("AUTH_ENABLED", "false").lower() in ("1", "true", "yes")
+# ---- API 认证与多用户（v0.14.0，设计见 AUTH_DESIGN.md）----
+# 默认值联动运行模式（v0.17.6）：Mock 模式（MOCK_LLM=true）= 开发者模式，
+# 默认免登录直接进入；真实 LLM 模式默认要求登录（生产链路必须认证）。
+# 显式设置 AUTH_ENABLED 可覆盖默认（如真实模式本地调试想免登录：
+# AUTH_ENABLED=false）。认证开启后所有 /api/* 须持有效凭据（pak-/pat-）。
+AUTH_ENABLED = os.environ.get(
+    "AUTH_ENABLED", "false" if MOCK_LLM else "true").lower() in ("1", "true", "yes")
 # 认证模式下用户表为空时，以此为用户名创建首个 admin 并打印一次性 Key
 AUTH_BOOTSTRAP_ADMIN = os.environ.get("AUTH_BOOTSTRAP_ADMIN", "")
 # 账号密码登录（v0.15.0）签发的 pat- 令牌有效期（小时）

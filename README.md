@@ -1,10 +1,12 @@
 # Private Agent POC — 私有化 Agent 开发运行框架
 
-**版本：v0.17.5**（2026-10-07）
+**版本：v0.17.6**（2026-10-08）
 
 最小可运行的私有化 Agent 框架：**vLLM（Qwen 27B）+ LangGraph（Agent 循环 + 多 Agent 编排）+ MCP（工具协议）+ Skills（技能系统）+ 对话式自定义工具 + 人工审批流 + 代码沙箱 + Langfuse 观测 + FastAPI（SSE 流式接口）+ 离线聊天前端**。
 
 ## 版本记录
+
+- **v0.17.6**：架构评审遗留低危项（P3）修复 + 认证默认联动运行模式——① **沙箱令牌常数时间比较**：`check_token` 的 `!=` 改 `hmac.compare_digest`，比较耗时不再随前缀匹配长度变化，堵住计时侧信道逐字节猜令牌的的理论路径（与 Agent 侧 HMAC 校验口径统一）；② **观测失败可恢复**：Langfuse 连接失败不再「一次检查、永久停用」，改为 60s 冷却期后自动重试（`RETRY_COOLDOWN`）——观测服务后启动或临时宕机恢复后，埋点无需重启即可接回，冷却期内不重复探测、不阻塞主链路；③ **会话租约有界等待**：`SessionLease` 获取租约此前无上限轮询，同会话另一请求长时间持有（如审批 resume 挂起）时新请求无限挂起且用户零反馈——现按 `LEASE_ACQUIRE_TIMEOUT`（默认 120s）超时，向用户返回「租约被占用，请稍后重试」错误事件；④ **登录限流跨进程**：失败计数与锁定状态从进程内存迁到 STATE_DB `login_fails` 表（旧库自动建表），多副本轮转打不同进程不再能绕过 30 秒锁定，容量上限与保底清空语义不变（跨机多副本仍应由前置网关统一限流）；⑤ **认证默认联动运行模式**：`AUTH_ENABLED` 默认值不再固定 false——Mock 模式（`MOCK_LLM=true`）= 开发者模式默认免登录直接进入，真实 LLM 模式默认要求登录（生产链路必须认证），显式设置 `AUTH_ENABLED` 可覆盖（如真实模式本地调试免登录）；真实模式首次启动须配 `AUTH_BOOTSTRAP_ADMIN` 或用 manage_users.py 建用户，否则无人能登录
 
 - **v0.17.5**：架构评审修复（2×P1 + 2×P2，评审报告见 SECURITY.md 对应验收项）——① **审批 abandoned 宽限期**：周期扫描/启动清理只把决议时间超过宽限（审批超时 + 扫描间隔）的「已批准未执行」记录转 abandoned，刚批准正在 resume 执行的长任务不再被误标（误标后 mark_executed 静默失效、审计失真）；② **沙箱令牌不下发子进程**：`_run_isolated` 子进程环境剔除 `SANDBOX_AUTH_TOKEN`/`SANDBOX_OPEN_MODE`，沙箱内执行的不可信代码无法读走令牌伪造合法调用方；③ **删除敏感文件拦截**：`do_delete` 与 `read_text_file` 对称——`.env` 及变体、运行时 SQLite 库（state.db 承载会话/审批/租约锁）即使审批通过也拒绝删除，误删破坏并发控制与部署配置的路径关闭；④ **租约接管中止本轮流**：会话租约心跳发现被其他进程接管时，chat 流立即发 error 事件中止本轮（此前仅记日志继续跑，等于跨进程互斥失效、回到 checkpointer 写冲突场景），部分回复落库并标注「租约被接管」
 
@@ -305,7 +307,7 @@ MODEL_NAME=deepseek-chat        # 或 deepseek-reasoner（R1 推理模型）
 | `STATE_DB` | `./state.db` | 会话/审批/租约锁 SQLite 库（v0.13.0；跨机多副本须换 Postgres） |
 | `USAGE_DB` | `./usage.db` | Token 计量 SQLite 库（v0.11.0） |
 | `CHECKPOINTER` | `memory` | `postgres` 可切换持久化（Windows 开发机仅支持 memory） |
-| `AUTH_ENABLED` | `false` | API 认证开关（v0.14.0）；true 时 Bearer 凭据 + 三级角色 |
+| `AUTH_ENABLED` | 联动 `MOCK_LLM`（v0.17.6） | Mock=开发者模式默认免登录；真实模式默认要求登录；显式设置可覆盖。true 时 Bearer 凭据 + 三级角色 |
 | `AUTH_IDENTITY_HEADER` | 空 | SSO 身份头（如 `X-Forwarded-User`，v0.16.0）；须配合 `AUTH_PROXY_ALLOWED_IPS` 白名单才生效（v0.17.4 F2） |
 | `SYSTEM_PROMPT` | 见 config.py | 系统提示词 |
 

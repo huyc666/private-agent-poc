@@ -13,6 +13,7 @@
 会话/审批/用量协作是同一前提）。MemorySaver 模式本就不支持多副本共享上下文。
 """
 import asyncio
+import os
 import sqlite3
 import threading
 import time
@@ -23,6 +24,14 @@ from . import config
 LEASE_TTL = 60.0          # 秒：无心跳即视为持有者崩溃，租约到期可被接管
 HEARTBEAT_INTERVAL = 15.0  # 心跳间隔（远小于 TTL，健康持有者租约不会过期）
 POLL_INTERVAL = 0.4       # 等待租约时的轮询间隔
+# 获取租约的最大等待时间（秒，架构评审 P3）：此前无界等待——持有者长任务
+# （如审批 resume 挂起）时，同会话新请求会无限挂起且用户无任何反馈。
+# 超时报错让用户重试，而不是干等；多轮排队场景可调大此值。
+LEASE_ACQUIRE_TIMEOUT = float(os.environ.get("LEASE_ACQUIRE_TIMEOUT", "120"))
+
+
+class LeaseTimeout(RuntimeError):
+    """等待会话租约超时（同会话另一请求长时间持有，请稍后重试）。"""
 
 _lock = threading.Lock()
 
@@ -92,20 +101,31 @@ class SessionLease:
                 ... 整轮对话 ...
     """
 
-    def __init__(self, session_id: str, owner: str, ttl: float = LEASE_TTL):
+    def __init__(self, session_id: str, owner: str, ttl: float = LEASE_TTL,
+                 wait_timeout: float = LEASE_ACQUIRE_TIMEOUT):
         self.session_id = session_id
         self.owner = owner
         self.ttl = ttl
+        self.wait_timeout = wait_timeout
         self.acquired = False
         self.lost = False  # 心跳发现租约被他人接管 → 调用方应中止本轮对话
         self._hb: asyncio.Task | None = None
 
     async def __aenter__(self):
+        # 有界等待（架构评审 P3）：此前 while 循环无上限，同会话另一请求
+        # 长时间持有租约（如审批 resume 挂起）时新请求会无限挂起且无反馈。
+        # 超时抛 LeaseTimeout，由调用方向用户返回可理解的错误事件。
+        deadline = time.monotonic() + self.wait_timeout
         while not self.acquired:
             self.acquired = await asyncio.to_thread(
                 acquire, self.session_id, self.owner, self.ttl)
-            if not self.acquired:
-                await asyncio.sleep(POLL_INTERVAL)
+            if self.acquired:
+                break
+            if time.monotonic() >= deadline:
+                raise LeaseTimeout(
+                    f"会话 {self.session_id} 的租约被其他请求占用超过 "
+                    f"{self.wait_timeout:.0f}s，请稍后重试")
+            await asyncio.sleep(POLL_INTERVAL)
         self._hb = asyncio.create_task(self._heartbeat())
         return self
 

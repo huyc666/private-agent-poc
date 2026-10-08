@@ -125,7 +125,8 @@ ALTER TABLE approvals ADD COLUMN decided_by TEXT;   -- 决议人（谁批的/拒
 
 ```bash
 # ---- API 认证（v0.14.0）----
-AUTH_ENABLED=false          # true 启用 Bearer 认证；false 为开放模式（POC 默认）
+AUTH_ENABLED=               # 留空 = 联动运行模式（v0.17.6）：Mock 模式默认免登录（开发者模式），
+                             # 真实 LLM 模式默认要求登录；显式 true/false 可覆盖默认
 AUTH_BOOTSTRAP_ADMIN=       # 首次启动时若用户表为空，以此为用户名创建 admin 并打印一次性 Key
 ```
 

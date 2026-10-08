@@ -1,4 +1,4 @@
-# 分步部署执行手册 — GPU + Docker 生产机（v0.17.5）
+# 分步部署执行手册 — GPU + Docker 生产机（v0.17.6）
 
 目标：在一台 Linux GPU 机器上把框架从 zip 包部署到「上线验收通过」。
 每步给出**可复制命令**与**验收点**，任一步验收不过即停下排查，不要带错继续。
@@ -24,7 +24,7 @@ python3 --version               # ≥ 3.11
 ## Step 1 · 解压与依赖
 
 ```bash
-unzip private-agent-poc-v0.17.5.zip -d agent-poc && cd agent-poc
+unzip private-agent-poc-v0.17.6.zip -d agent-poc && cd agent-poc
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt    # 内网环境指向内部 pip 源
 ```
