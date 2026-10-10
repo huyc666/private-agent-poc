@@ -65,14 +65,32 @@ def _rebuild_graph():
     from langgraph.prebuilt import create_react_agent
 
     # checkpointer 是 interrupt 审批流的前提（中断现场需要落盘才能恢复）
-    # 技能索引 + 领域包提示词片段注入系统提示词（渐进式披露：模型按需调用 load_skill 拉取完整指令）
-    system = config.SYSTEM_PROMPT + skills.skill_index_prompt() + config.UPLOAD_PROMPT
+    # 静态系统提示词 = 基础 + 通用技能索引 + 上传说明 + 领域包片段（图重建时刷新）；
+    # 本人专属技能索引按请求身份在 _dynamic_prompt 里每轮动态注入（v0.17.9）
+    STATE.system_prompt_static = (
+        config.SYSTEM_PROMPT + skills.skill_index_prompt() + config.UPLOAD_PROMPT)
     fragments = packs.prompt_fragments()
     if fragments:
-        system += "\n\n" + fragments
-    STATE.agent = create_react_agent(STATE.llm, tools, prompt=system,
+        STATE.system_prompt_static += "\n\n" + fragments
+    STATE.agent = create_react_agent(STATE.llm, tools, prompt=_dynamic_prompt,
                                      checkpointer=STATE.checkpointer,
                                      pre_model_hook=_pre_model_hook)
+
+
+def _dynamic_prompt(state: dict) -> list:
+    """动态系统提示词（v0.17.9）：静态部分 + 按当前请求身份注入的专属技能索引。
+    prompt callable 与 str prompt 同约定：state["messages"] 已是 pre_model_hook
+    裁剪后的模型视野，返回 [SystemMessage] + messages。每轮模型调用执行一次，
+    只扫描本人专属技能目录（通用索引已随图重建缓存，无重复扫描成本）。"""
+    from langchain_core.messages import SystemMessage
+
+    system = getattr(STATE, "system_prompt_static", "") or (
+        config.SYSTEM_PROMPT + skills.skill_index_prompt() + config.UPLOAD_PROMPT)
+    extra = skills.personal_index_prompt(skills.current_scope())
+    if extra:
+        system += extra
+    msgs = state.get("messages") or []
+    return [SystemMessage(content=system)] + list(msgs)
 
 
 async def build_agent():

@@ -15,3 +15,5 @@ usage.db-shm
 # 运行时用户文件（v0.17.7 文档上传/模型产出，勿入库；多用户按域分目录）
 uploads/
 outputs/
+# 用户专属技能（v0.17.9：user 角色创建，仅本人可见，勿入库）
+skills_personal/

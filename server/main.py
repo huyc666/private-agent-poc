@@ -541,12 +541,14 @@ async def uploads_list(request: Request):
 
 @app.post("/api/skillpacks")
 async def upload_skillpack(request: Request, overwrite: bool = False):
-    """上传技能包 zip：服务端安全解包直接挂载到 skills/<name>/（多文件技能：
-    SKILL.md + references/ 等）。技能是全局资产（不按用户分域）。安全校验：
-    条目路径防穿越（zip-slip）、条目数与解压后总量上限（防 zip 炸弹）、扩展名
-    白名单；技能名取 SKILL.md frontmatter，与 create_skill 同一命名白名单与
-    冲突语义；覆盖导入先解包临时目录校验后原子换名（失败不损坏原技能）。
-    导入成功后重建图使技能立即可发现。"""
+    """上传技能包 zip：服务端安全解包直接挂载（多文件技能：SKILL.md +
+    references/ 等）。存储按角色分流（v0.17.9）：user 角色导入本人专属域
+    skills_personal/<域>/（仅本人可见），approver/admin/开放模式导入通用
+    skills/（全员共享）。安全校验：条目路径防穿越（zip-slip）、条目数与
+    解压后总量上限（防 zip 炸弹）、扩展名白名单；技能名取 SKILL.md
+    frontmatter，与 create_skill 同一命名白名单与冲突语义；覆盖导入先解包
+    临时目录校验后原子换名（失败不损坏原技能）。通用层导入成功后重建图使
+    技能立即可发现；专属技能索引动态注入，无需重建图。"""
     pre = _check_body_limit(request)
     if pre:
         return pre
@@ -556,15 +558,20 @@ async def upload_skillpack(request: Request, overwrite: bool = False):
     if len(body) > config.UPLOAD_MAX_MB * 1024 * 1024:
         return JSONResponse({"error": f"文件超过大小上限（{config.UPLOAD_MAX_MB}MB）"},
                             status_code=413)
+    ident = _acl_identity(request)
+    personal_scope = (config.scope_clean(ident["username"])
+                      if ident and ident.get("role") == "user" else None)
     try:
-        result = await asyncio.to_thread(skills.import_skill_zip, body, overwrite)
+        result = await asyncio.to_thread(
+            skills.import_skill_zip, body, overwrite, personal_scope)
     except FileExistsError as e:
         return JSONResponse({"error": str(e), "conflict": True}, status_code=409)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception:
         return JSONResponse({"error": "导入失败（服务器内部错误）"}, status_code=500)
-    await asyncio.to_thread(agent.maybe_reload_custom_tools)  # 技能签名变化 → 重建图，立即可发现
+    if not personal_scope:
+        await asyncio.to_thread(agent.maybe_reload_custom_tools)  # 通用技能签名变化 → 重建图
     result["files"] = result["files"][:50]
     return result
 
@@ -615,7 +622,9 @@ class ApproveRequest(BaseModel):
 @app.post("/api/approve")
 async def approve(req: ApproveRequest, request: Request):
     """前端提交危险操作审批决定。
-    决议权限：admin/approver 可决议任何 pending；普通 user 只能决议自己创建的。
+    决议权限（v0.17.9 收紧）：仅 admin/approver 可决议任何 pending——此前
+    「user 可决议自己创建的」存在自审自批漏洞（发起者自己批准即可放行
+    危险操作）；user 角色发起的审批等待 approver/admin 决议。
     ok=false 时 error 区分 forbidden（无权限）与 not_found（不存在/已决议）。"""
     u = request.state.user or {"username": "", "role": "admin"}  # 开放模式：任何人可决议（旧行为）
     result = approval.resolve(req.approval_id, req.approve, u["username"], u["role"])

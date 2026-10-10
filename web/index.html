@@ -411,7 +411,7 @@ function addApprovalCard(ev) {
       const d = await r.json();
       status.textContent = d.ok
         ? (approve ? '已批准 ✓，执行中…' : '已拒绝 ✗')
-        : (d.error === 'forbidden' ? '无权限决议该审批（需 approver/admin 或创建人本人）'
+        : (d.error === 'forbidden' ? '无权限决议该审批（需 approver/admin）'
            : '审批已失效（可能已超时）');
     } catch (e) {
       status.textContent = '提交失败: ' + e.message;

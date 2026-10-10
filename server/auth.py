@@ -9,7 +9,8 @@
 - 登录令牌（pat-）：账号密码登录（POST /api/auth/login）签发的短期令牌，
   默认 12 小时过期，适合浏览器端人工使用；密码只存 PBKDF2 加盐散列
 
-角色：user（聊天/自决审批）→ approver（决议任何审批）→ admin（用户管理）。
+角色：user（聊天/创建审批，v0.17.9 起不可决议任何审批，堵自审自批）→
+approver（决议任何审批）→ admin（用户管理）。
 
 存储：SQLite（STATE_DB 同库），只存凭据的散列，吊销不删除（留审计）。
 AUTH_ENABLED=false（默认）= 开放模式，行为与认证引入前完全一致。
@@ -309,6 +310,18 @@ def user_by_name(username: str) -> dict | None:
             return dict(row) if row else None
         finally:
             conn.close()
+
+
+def current_role() -> str:
+    """当前对话上下文的角色（工具侧权限判断用，v0.17.9）。
+    从 usage.current_user（stream_reply 注入的对话归属身份）查用户表取角色；
+    开放模式/匿名/身份缺失 → "admin"（行为等同旧版全局开放）；
+    用户不存在或已吊销 → "user"（最小权限，fail-closed）。"""
+    from . import usage   # 函数内导入：避免模块级循环依赖
+    u = usage.current_user.get() or ""
+    if not enabled() or not u or u == "anonymous":
+        return "admin"
+    return (user_by_name(u) or {}).get("role") or "user"
 
 
 def proxy_ip_allowed(remote_host: str | None) -> bool:

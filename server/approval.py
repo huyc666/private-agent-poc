@@ -160,17 +160,17 @@ async def wait_decision(aid: str, timeout: float = APPROVAL_TIMEOUT):
 def resolve(aid: str, approve: bool, username: str = "", role: str = "admin") -> str:
     """前端提交审批决定。返回 "ok" / "forbidden" / "not_found"。
 
-    决议权限（v0.14.0）：admin / approver 可决议任何 pending；
-    普通 user 只能决议自己创建的 pending（创建人为 NULL 的旧记录收紧为
-    仅 approver/admin 可决议）。开放模式调用方传 role="admin"，行为同旧版。
+    决议权限（v0.14.0，v0.17.9 收紧）：仅 admin / approver 可决议任何 pending。
+    此前「普通 user 可决议自己创建的」存在自审自批漏洞——发起者自己批准即可
+    放行危险操作（创建可执行工具、启停领域包等全局影响），审批门形同虚设。
+    user 角色发起的审批等待 approver/admin 决议；开放模式调用方传 role="admin"。
     仅 pending → 决议 算成功（原子 UPDATE，并发重复提交安全）。
     """
-    rec = _query_one("SELECT status, user_id FROM approvals WHERE aid = ?", (aid,))
+    rec = _query_one("SELECT status FROM approvals WHERE aid = ?", (aid,))
     if rec is None or rec["status"] != "pending":
         return "not_found"
     if role not in ("admin", "approver"):
-        if not rec["user_id"] or rec["user_id"] != username:
-            return "forbidden"
+        return "forbidden"
     status = "approved" if approve else "rejected"
     n = _execute(
         "UPDATE approvals SET status = ?, decided = ?, decided_by = ?"

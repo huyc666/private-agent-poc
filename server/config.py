@@ -79,6 +79,11 @@ SANDBOX_AUTH_TOKEN = os.environ.get("SANDBOX_AUTH_TOKEN", "")
 
 # ---- Skills 目录 ----
 SKILLS_DIR = Path(os.environ.get("SKILLS_DIR", str(PROJECT_ROOT / "skills"))).resolve()
+# 用户专属技能目录（v0.17.9）：user 角色创建的技能落到 skills_personal/<域>/，
+# 仅本人会话可见可用；approver/admin 创建的进通用 skills/（全员共享）。
+# 专属技能索引按请求身份动态注入（不参与图重建签名）
+PERSONAL_SKILLS_DIR = Path(os.environ.get(
+    "PERSONAL_SKILLS_DIR", str(PROJECT_ROOT / "skills_personal"))).resolve()
 
 # ---- 自定义工具目录（对话式创建，免重启热加载）----
 CUSTOM_TOOLS_DIR = Path(os.environ.get("CUSTOM_TOOLS_DIR", str(PROJECT_ROOT / "custom_tools"))).resolve()

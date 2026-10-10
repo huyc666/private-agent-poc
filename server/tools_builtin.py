@@ -53,6 +53,21 @@ def _is_sensitive_file(target) -> bool:
     return bool(_SENSITIVE_FILENAME_RE.match(target.name))
 
 
+def _cross_scope_denied(rel_parts: tuple) -> str | None:
+    """user 角色越域访问他人私有目录时返回资源类别（用于拒绝文案），放行返回
+    None（v0.17.9）。覆盖三类按身份分域的目录：skills_personal/<域>/（专属技能，
+    本次新增）、uploads/<域>/ 与 outputs/<域>/（v0.17.8 分域此前只在清单/端点层
+    生效，直拼路径可读他人文档——同一提示词注入/路径猜测面，一并收口）。
+    approver/admin/开放模式（current_role != "user"）全局可见，一律放行。"""
+    if not rel_parts or rel_parts[0] not in ("skills_personal", "uploads", "outputs"):
+        return None
+    if auth.current_role() != "user":
+        return None
+    if len(rel_parts) < 2 or rel_parts[1] == _file_scope():
+        return None
+    return "专属技能" if rel_parts[0] == "skills_personal" else "上传/产出文件"
+
+
 def _redact_secrets(text: str) -> str:
     """按行掩码密钥值：键名含 token/key/secret/password/credential 等敏感词的
     键值行，值统一替换为占位符（工具代码/配置文件里的硬编码密钥不外泄到对话）。"""
@@ -68,11 +83,15 @@ def _redact_secrets(text: str) -> str:
 
 def read_text_file(path: str) -> str:
     """读取工作区内的文本文件内容（最大 20KB）。path 相对项目根目录。
-    v0.17.4：敏感文件（.env 及运行时 DB）拒绝读取；其余内容按行掩码密钥值。"""
+    v0.17.4：敏感文件（.env 及运行时 DB）拒绝读取；其余内容按行掩码密钥值。
+    v0.17.9：user 角色不可读取他人专属技能与他人域的上传/产出文件。"""
     try:
         target = (config.TOOL_WORKSPACE / path).resolve()
         if not target.is_relative_to(config.TOOL_WORKSPACE):
             return "拒绝访问：路径越出工作区边界"
+        denied = _cross_scope_denied(target.relative_to(config.TOOL_WORKSPACE).parts)
+        if denied:
+            return f"拒绝访问：他人{denied}不可读取"
         if _is_sensitive_file(target):
             return f"拒绝访问：{target.name} 为敏感文件（部署密钥/运行时数据），不予读取"
         if not target.is_file():
@@ -239,11 +258,15 @@ def do_delete(path: str) -> str:
     """删除的实际执行逻辑（审批通过后才会走到这里；Mock 演示剧本也复用）。
     v0.17.5 架构评审 P2：与 read_text_file 对称的敏感文件拦截（F1）——
     .env 承载部署密钥、state.db 承载会话/审批/租约锁，误删破坏并发控制与
-    部署配置；删除此类文件属运维操作，一律不走对话路径（即使批准也拒绝）。"""
+    部署配置；删除此类文件属运维操作，一律不走对话路径（即使批准也拒绝）。
+    v0.17.9：user 角色不可删除他人专属技能与他人域的上传/产出文件（与读取同规则）。"""
     try:
         target = (config.TOOL_WORKSPACE / path).resolve()
         if not target.is_relative_to(config.TOOL_WORKSPACE):
             return "拒绝访问：路径越出工作区边界"
+        denied = _cross_scope_denied(target.relative_to(config.TOOL_WORKSPACE).parts)
+        if denied:
+            return f"拒绝删除：他人{denied}不可操作"
         if _is_sensitive_file(target):
             return f"拒绝删除：{target.name} 为敏感文件（部署密钥/运行时状态库），请由管理员在部署层操作"
         if not target.is_file():

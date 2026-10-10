@@ -26,16 +26,18 @@ def _reload_graph():
 # ---------------------------------------------------------------- 技能工具
 
 def list_skills_tool() -> str:
-    """列出当前全部可用技能（名称 + 一句话描述）。"""
-    items = skills.list_skills()
+    """列出当前可用的技能（名称 + 一句话描述）：通用技能 + 本人专属技能
+    （user 角色创建的技能仅本人可见，他人专属技能不在列表中）。"""
+    items = skills.list_skills(skills.current_scope())
     if not items:
         return "当前没有可用技能。可以用 create_skill 工具创建一个。"
     return "\n".join(f"- {s['name']}: {s['description']}" for s in items)
 
 
 def load_skill(name: str) -> str:
-    """加载指定技能的完整指令内容（SKILL.md）。任务匹配某个技能描述时先调用本工具获取指令。"""
-    content = skills.load_skill(name)
+    """加载指定技能的完整指令内容（SKILL.md）。任务匹配某个技能描述时先调用本工具获取指令。
+    可加载通用技能与本人专属技能；他人专属技能不可见。"""
+    content = skills.load_skill(name, skills.current_scope())
     return content if content is not None else f"技能「{name}」不存在，可用 list_skills_tool 查看全部技能"
 
 
