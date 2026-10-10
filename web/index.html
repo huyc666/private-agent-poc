@@ -7,100 +7,153 @@
 <!-- 全部样式与脚本内联，无任何外部 CDN 依赖，可在断网内网环境运行 -->
 <style>
   :root {
-    --bg: #0f1115; --panel: #171a21; --border: #262b36;
-    --text: #e6e9ef; --dim: #8b93a3; --accent: #4f8cff; --tool: #b082f7;
+    --bg: #f3f5fa; --panel: #ffffff; --border: #e4e8f1;
+    --text: #2b3040; --dim: #7d8496; --accent: #4f7cff; --accent-2: #6c5cff;
+    --tool: #7c5cd6; --shadow: 0 2px 10px rgba(47, 60, 110, .07);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: "Segoe UI", "Microsoft YaHei", sans-serif; height: 100vh; display: flex; flex-direction: column; }
-  header { padding: 14px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
-  header h1 { font-size: 17px; font-weight: 600; }
-  .badge { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--dim); }
-  .badge.live { color: #4ade80; border-color: #1d4d33; }
-  .badge.mock { color: #fbbf24; border-color: #5a4517; }
-  .badge.online { color: #4ade80; border-color: #1d4d33; }
+  body {
+    background: linear-gradient(180deg, #eef1f9 0%, var(--bg) 240px);
+    color: var(--text); font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    padding: 12px 24px; border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,.82); backdrop-filter: blur(8px);
+    display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 16.5px; font-weight: 700; letter-spacing: .3px;
+    display: flex; align-items: center; gap: 7px; }
+  header h1 .logo { font-weight: 400; }  /* 图标保持原色，不随文字渐变 */
+  header h1 .h1-text {
+    background: linear-gradient(100deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .badge { font-size: 12px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--dim); background: #fff; }
+  .badge.live { color: #12915c; border-color: #bfe8d2; background: #effaf4; }
+  .badge.mock { color: #b26a00; border-color: #f2dfb8; background: #fdf6e8; }
+  .badge.online { color: #12915c; border-color: #bfe8d2; background: #effaf4; }
   .badge.online::before { content: "● "; }
-  .badge.offline { color: #f87171; border-color: #5a2020; animation: pulse 1.2s infinite; }
+  .badge.offline { color: #d64545; border-color: #f3c6c6; background: #fdf1f1; animation: pulse 1.2s infinite; }
   .badge.offline::before { content: "● "; }
   @keyframes pulse { 50% { opacity: .45; } }
-  #chat { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
-  .msg { max-width: 78%; padding: 12px 16px; border-radius: 12px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; font-size: 14.5px; }
-  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
-  .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  /* 技术细节徽章：非技术界面默认隐藏（保留元素，JS 照常写入，悬停记录入口仍可查） */
+  #toolBadge, #obsBadge { display: none; }
+  #chat { flex: 1; overflow-y: auto; padding: 28px 24px 16px; display: flex; flex-direction: column; gap: 14px; }
+  .msg { max-width: 76%; padding: 11px 16px; border-radius: 16px; line-height: 1.7;
+    white-space: pre-wrap; word-break: break-word; font-size: 14.5px; }
+  .msg.user { align-self: flex-end; color: #fff; border-bottom-right-radius: 5px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 3px 10px rgba(90, 105, 255, .28); }
+  .msg.assistant { align-self: flex-start; background: var(--panel);
+    border: 1px solid var(--border); border-bottom-left-radius: 5px; box-shadow: var(--shadow); }
   .msg a { color: var(--accent); text-decoration: underline; cursor: pointer; font-weight: 500; }
   .msg.user a { color: #fff; }
-  .think { align-self: flex-start; max-width: 92%; margin: 2px 0; padding: 6px 10px;
-           border: 1px dashed var(--border); border-left: 3px solid var(--border);
-           border-radius: 8px; background: var(--panel); opacity: .85; }
-  .think summary { cursor: pointer; color: var(--muted, #8a93a6); font-size: 12px; user-select: none; }
-  .think-body { margin-top: 6px; color: var(--muted, #8a93a6); font-size: 12px;
+  .think { align-self: flex-start; max-width: 88%; margin: 0; padding: 6px 12px;
+           border: 1px solid var(--border); border-radius: 12px; background: #fafbfe; opacity: .92; }
+  .think summary { cursor: pointer; color: var(--dim); font-size: 12px; user-select: none; }
+  .think-body { margin-top: 6px; color: var(--dim); font-size: 12px;
                 line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
-  .tool-chip { align-self: flex-start; font-size: 12.5px; color: var(--tool); background: rgba(176,130,247,.08); border: 1px solid rgba(176,130,247,.3); padding: 5px 12px; border-radius: 8px; }
+  .tool-chip { align-self: flex-start; font-size: 12.5px; color: var(--tool);
+    background: #f6f2fd; border: 1px solid #e6dcf8; padding: 4px 12px; border-radius: 999px; }
   .tool-chip .result { color: var(--dim); }
-  .approval-card { align-self: flex-start; background: rgba(248,113,113,.07); border: 1px solid rgba(248,113,113,.45); border-radius: 10px; padding: 12px 16px; font-size: 13.5px; max-width: 78%; }
-  .approval-card .title { color: #f87171; font-weight: 600; margin-bottom: 6px; }
+  .approval-card { align-self: flex-start; background: #fffdf5; border: 1px solid #f0dca8;
+    border-left: 4px solid #e8b64c; border-radius: 12px; padding: 13px 16px;
+    font-size: 13.5px; max-width: 76%; box-shadow: var(--shadow); }
+  .approval-card .title { color: #a06a00; font-weight: 600; margin-bottom: 6px; }
   .approval-card .detail { color: var(--dim); margin: 3px 0; word-break: break-all; }
-  .approval-card .detail code { color: var(--text); background: rgba(255,255,255,.06); padding: 1px 6px; border-radius: 4px; }
+  .approval-card .detail code { color: var(--text); background: #f2f4f9; padding: 1px 6px; border-radius: 5px; }
   .approval-card .btns { margin-top: 10px; display: flex; gap: 10px; align-items: center; }
-  .approve-btn { background: #166534; color: #fff; border: none; border-radius: 8px; padding: 6px 18px; cursor: pointer; }
-  .reject-btn { background: #7f1d1d; color: #fff; border: none; border-radius: 8px; padding: 6px 18px; cursor: pointer; }
+  .approve-btn { background: #17945a; color: #fff; border: none; border-radius: 8px; padding: 6px 18px; cursor: pointer; font-size: 13px; }
+  .reject-btn { background: #d64545; color: #fff; border: none; border-radius: 8px; padding: 6px 18px; cursor: pointer; font-size: 13px; }
+  .approve-btn:hover, .reject-btn:hover { filter: brightness(1.06); }
   .approve-btn:disabled, .reject-btn:disabled { opacity: .4; cursor: not-allowed; }
   .approval-status { color: var(--dim); font-size: 12.5px; }
-  #composer { display: flex; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--border); }
-  #input { flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; color: var(--text); font-size: 14.5px; outline: none; resize: none; font-family: inherit; }
-  #input:focus { border-color: var(--accent); }
-  #send { background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 0 22px; font-size: 14.5px; cursor: pointer; }
-  #send:disabled { opacity: .45; cursor: not-allowed; }
-  #attach { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 0 14px; font-size: 16px; cursor: pointer; }
+  #composer { display: flex; gap: 10px; padding: 14px 24px 18px; border-top: 1px solid var(--border);
+    background: rgba(255,255,255,.82); backdrop-filter: blur(8px); align-items: flex-end; }
+  #input { flex: 1; background: #fff; border: 1.5px solid var(--border); border-radius: 14px;
+    padding: 12px 16px; color: var(--text); font-size: 14.5px; outline: none;
+    resize: none; font-family: inherit; box-shadow: var(--shadow); transition: border-color .15s, box-shadow .15s; }
+  #input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79, 124, 255, .13); }
+  #send { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; border: none;
+    border-radius: 14px; padding: 0 24px; font-size: 14.5px; cursor: pointer; box-shadow: 0 3px 10px rgba(90, 105, 255, .28); }
+  #send:hover { filter: brightness(1.06); }
+  #send:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
+  #attach { background: #fff; color: var(--dim); border: 1.5px solid var(--border); border-radius: 14px;
+    padding: 0 16px; font-size: 17px; cursor: pointer; box-shadow: var(--shadow); }
+  #attach:hover { color: var(--accent); border-color: var(--accent); }
   #attach:disabled { opacity: .45; cursor: not-allowed; }
-  .hint { color: var(--dim); font-size: 12.5px; text-align: center; padding: 6px; }
-  .usage-note { color: var(--dim); font-size: 12px; padding: 0 24px 4px 48px; }
+  .hint { color: var(--dim); font-size: 12px; text-align: center; padding: 8px 24px; }
+  .usage-note { color: #a7adbc; font-size: 11.5px; text-align: center; padding: 2px; }
   #userBadge { cursor: pointer; }
   .nav-btn { cursor: pointer; }
-  .divider { align-self: center; color: var(--dim); font-size: 12.5px; padding: 4px 0; }
-  #panel { position: fixed; top: 0; right: -360px; width: 340px; height: 100vh; background: var(--panel); border-left: 1px solid var(--border); transition: right .2s; z-index: 10; display: flex; flex-direction: column; }
+  .divider { align-self: center; color: var(--dim); font-size: 12px; padding: 4px 0;
+    background: #eef1f8; border-radius: 999px; padding: 4px 14px; }
+  /* ---- 空会话欢迎卡（非技术用户引导）---- */
+  .welcome { align-self: center; max-width: 560px; width: 100%; margin: auto;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 20px;
+    padding: 34px 30px 26px; text-align: center; box-shadow: var(--shadow); }
+  .welcome .w-icon { font-size: 44px; margin-bottom: 12px; }
+  .welcome h3 { font-size: 19px; font-weight: 700; margin-bottom: 8px; }
+  .welcome p { color: var(--dim); font-size: 13.5px; line-height: 1.7; margin-bottom: 18px; }
+  .welcome .w-grid { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+  .welcome .w-try { border: 1.5px solid var(--border); background: #fafbfe; color: var(--text);
+    font-size: 13px; border-radius: 999px; padding: 8px 16px; cursor: pointer; transition: all .15s; }
+  .welcome .w-try:hover { border-color: var(--accent); color: var(--accent); background: #f2f6ff; }
+  .welcome .w-note { color: #a7adbc; font-size: 12px; margin-top: 18px; }
+  #panel { position: fixed; top: 0; right: -370px; width: 350px; height: 100vh; background: var(--panel);
+    border-left: 1px solid var(--border); transition: right .2s; z-index: 10; display: flex; flex-direction: column;
+    box-shadow: -6px 0 24px rgba(47, 60, 110, .10); }
   #panel.open { right: 0; }
   #panel .panel-head { display: flex; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border); align-items: center; }
   #panel .tab { font-size: 13px; padding: 4px 12px; border-radius: 8px; border: 1px solid var(--border); color: var(--dim); cursor: pointer; }
-  #panel .tab.active { color: var(--text); border-color: var(--accent); }
+  #panel .tab.active { color: var(--accent); border-color: var(--accent); background: #f2f6ff; }
   #panel .close { margin-left: auto; color: var(--dim); cursor: pointer; font-size: 16px; }
-  #panel .panel-body { flex: 1; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
-  .sess-item { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; cursor: pointer; font-size: 13px; }
+  #panel .panel-body { flex: 1; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; background: #f8f9fd; }
+  .sess-item { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; cursor: pointer;
+    font-size: 13px; background: #fff; }
   .sess-item:hover { border-color: var(--accent); }
-  .sess-item.current { border-color: var(--accent); background: rgba(79,140,255,.08); }
+  .sess-item.current { border-color: var(--accent); background: #f2f6ff; }
   .sess-item .meta { color: var(--dim); font-size: 11.5px; margin-top: 3px; }
-  .appr-item { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; }
+  .appr-item { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; font-size: 12.5px; background: #fff; }
   .appr-item .meta { color: var(--dim); font-size: 11.5px; margin-top: 3px; word-break: break-all; }
-  .appr-item.pending { border-color: rgba(251,191,36,.5); }
+  .appr-item.pending { border-color: #f0dca8; background: #fffdf5; }
   .appr-item .btns { margin-top: 6px; display: flex; gap: 8px; align-items: center; }
   .appr-item .approve-btn, .appr-item .reject-btn { padding: 3px 12px; font-size: 12px; border-radius: 6px; }
   .appr-item .note { color: var(--dim); font-size: 11px; margin-top: 4px; }
-  #newSessBtn { width: 100%; background: none; border: 1px dashed var(--border); color: var(--dim); border-radius: 8px; padding: 8px; cursor: pointer; font-size: 13px; }
-  #newSessBtn:hover { color: var(--text); border-color: var(--accent); }
+  #newSessBtn { width: 100%; background: #fff; border: 1.5px dashed #cdd4e2; color: var(--dim);
+    border-radius: 10px; padding: 8px; cursor: pointer; font-size: 13px; }
+  #newSessBtn:hover { color: var(--accent); border-color: var(--accent); }
   /* ---- 登录框（v0.15.0 账号密码登录）---- */
-  #loginMask { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: center; justify-content: center; z-index: 20; }
+  #loginMask { position: fixed; inset: 0; background: rgba(43, 48, 64, .45); backdrop-filter: blur(3px);
+    display: none; align-items: center; justify-content: center; z-index: 20; }
   #loginMask.open { display: flex; }
-  #loginBox { width: 340px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 22px 24px; }
-  #loginBox h2 { font-size: 16px; margin-bottom: 14px; }
+  #loginBox { width: 360px; background: #fff; border: 1px solid var(--border); border-radius: 18px;
+    padding: 26px 28px; box-shadow: 0 18px 60px rgba(47, 60, 110, .25); }
+  #loginBox h2 { font-size: 17px; margin-bottom: 14px; }
   #loginBox label { display: block; font-size: 12.5px; color: var(--dim); margin: 10px 0 4px; }
-  #loginBox input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; color: var(--text); font-size: 14px; outline: none; }
-  #loginBox input:focus { border-color: var(--accent); }
-  #loginBox .login-btn { width: 100%; margin-top: 14px; background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 10px; font-size: 14px; cursor: pointer; }
+  #loginBox input { width: 100%; background: #f8f9fd; border: 1.5px solid var(--border); border-radius: 10px;
+    padding: 10px 12px; color: var(--text); font-size: 14px; outline: none; }
+  #loginBox input:focus { border-color: var(--accent); background: #fff; }
+  #loginBox .login-btn { width: 100%; margin-top: 14px; background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #fff; border: none; border-radius: 10px; padding: 10px; font-size: 14px; cursor: pointer; }
+  #loginBox .login-btn:hover { filter: brightness(1.06); }
   #loginBox .login-btn:disabled { opacity: .45; cursor: not-allowed; }
   #loginBox .divider-line { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: 12px; margin: 16px 0 4px; }
   #loginBox .divider-line::before, #loginBox .divider-line::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
-  #loginErr { color: #f87171; font-size: 12.5px; margin-top: 10px; min-height: 16px; }
-  #logoutBtn { width: 100%; margin-top: 8px; background: none; border: 1px solid var(--border); color: var(--dim); border-radius: 8px; padding: 8px; cursor: pointer; font-size: 13px; }
+  #loginErr { color: #d64545; font-size: 12.5px; margin-top: 10px; min-height: 16px; }
+  #logoutBtn { width: 100%; margin-top: 8px; background: none; border: 1px solid var(--border); color: var(--dim);
+    border-radius: 10px; padding: 8px; cursor: pointer; font-size: 13px; }
+  #logoutBtn:hover { color: #d64545; border-color: #f3c6c6; }
 </style>
 </head>
 <body>
 <header>
-  <h1>🤖 Private Agent POC</h1>
+  <h1><span class="logo">💠</span><span class="h1-text">智能助手</span></h1>
   <span class="badge" id="statusBadge">连接中…</span>
-  <span class="badge" id="modeBadge"></span>
   <span class="badge" id="obsBadge"></span>
-  <span class="badge" id="userBadge" title="点击切换用户标识（token 计量维度）"></span>
+  <span class="badge" id="userBadge" title="当前登录身份，点击可切换或注销"></span>
   <span class="badge" id="toolBadge"></span>
-  <span class="badge nav-btn" id="panelBtn" title="会话与审批记录">☰ 记录</span>
+  <span class="badge nav-btn" id="panelBtn" title="历史会话、待确认操作与用量">☰ 记录</span>
 </header>
 
 <div id="panel">
@@ -115,27 +168,27 @@
 
 <div id="loginMask">
   <div id="loginBox">
-    <h2>🔏 登录 Private Agent POC</h2>
+    <h2>🔐 欢迎使用智能助手</h2>
     <label>用户名</label>
     <input id="loginUser" autocomplete="username">
     <label>密码</label>
     <input id="loginPass" type="password" autocomplete="current-password">
-    <button class="login-btn" id="loginBtn">登录</button>
-    <div class="divider-line">或使用 API Key</div>
+    <button class="login-btn" id="loginBtn">登 录</button>
+    <div class="divider-line">开发者通道</div>
     <input id="loginKey" placeholder="pak- 开头的 API Key">
-    <button class="login-btn" id="keyBtn" style="background:#2a2f3a">用 Key 进入</button>
+    <button class="login-btn" id="keyBtn" style="background:#59606f">用 Key 进入</button>
     <div id="loginErr"></div>
     <button id="logoutBtn" style="display:none">注销当前登录</button>
   </div>
 </div>
 
 <div id="chat"></div>
-<div class="hint">Mock 模式试试：「现在几点」｜「北京天气怎么样」｜「用 MCP 查北京天气」｜「删除文件 test.txt」（审批流）｜「有哪些技能」「创建一个技能」（Skills）｜「创建一个工具」（审批后免重启生效）｜「调研北京上海成都天气对比」（多 Agent）</div>
+<div class="hint">上传文档（📎）可让助手阅读分析；涉及删除等敏感操作时，助手会先请求你的确认</div>
 <div id="composer">
   <button id="attach" title="上传文档（分析/创建工具/技能/领域包）或技能包 zip（含 SKILL.md + 子目录）">📎</button>
   <input type="file" id="fileInput" style="display:none"
          accept=".md,.markdown,.txt,.csv,.tsv,.json,.yaml,.yml,.xml,.html,.htm,.py,.js,.ts,.java,.go,.rs,.sql,.sh,.bat,.ini,.cfg,.conf,.toml,.log,.rst,.docx,.zip">
-  <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行；📎 上传文档后可直接让模型分析"></textarea>
+  <textarea id="input" rows="1" placeholder="有什么可以帮你？输入问题，Enter 发送"></textarea>
   <button id="send">发送</button>
 </div>
 
@@ -233,6 +286,32 @@ function addUsageNote(usage) {
 
 let serverOnline = false;
 
+// ---- 空会话欢迎卡（非技术用户引导：示例问题点击即发送）----
+const SAMPLES = ['现在几点了？', '帮我写一段项目周报', '北京今天天气怎么样？', '调研对比北京、上海、成都的天气，给出出行建议'];
+function renderWelcome() {
+  if (chat.children.length) return;
+  const w = document.createElement('div');
+  w.className = 'welcome'; w.id = 'welcome';
+  const icon = document.createElement('div');
+  icon.className = 'w-icon'; icon.textContent = '👋';
+  const h = document.createElement('h3'); h.textContent = '你好，我是你的智能助手';
+  const p = document.createElement('p');
+  p.textContent = '可以问我问题、写材料、查资料、分析上传的文档。挑一个试试：';
+  const grid = document.createElement('div');
+  grid.className = 'w-grid';
+  for (const s of SAMPLES) {
+    const b = document.createElement('button');
+    b.className = 'w-try'; b.textContent = s;
+    b.onclick = () => { input.value = s; send(); };
+    grid.appendChild(b);
+  }
+  const note = document.createElement('div');
+  note.className = 'w-note'; note.textContent = '点右上角「☰ 记录」可查看历史会话与用量';
+  w.append(icon, h, p, grid, note);
+  chat.appendChild(w);
+}
+function removeWelcome() { const w = document.getElementById('welcome'); if (w) w.remove(); }
+
 async function checkHealth() {
   const status = document.getElementById('statusBadge');
   try {
@@ -266,11 +345,9 @@ async function checkHealth() {
       renderUserBadge();
     }
     serverOnline = true;
-    status.textContent = '服务在线';
+    // 状态灯与模型信息合并为一个徽章（方案 B）：正常=绿点+模型名/演示模式
+    status.textContent = h.mode === 'mock' ? '演示模式' : '已连接 ' + h.model;
     status.className = 'badge online';
-    const badge = document.getElementById('modeBadge');
-    badge.textContent = h.mode === 'mock' ? 'Mock 模式' : `已连接 ${h.model}`;
-    badge.className = 'badge ' + h.mode;
     const obs = document.getElementById('obsBadge');
     if (h.langfuse_connected) { obs.textContent = '📊 Langfuse 已连接'; obs.className = 'badge online'; }
     else if (h.langfuse_enabled) { obs.textContent = '📊 Langfuse 不可达（观测停用）'; obs.className = 'badge offline'; }
@@ -352,8 +429,8 @@ function addToolChip(ev) {
   const div = document.createElement('div');
   div.className = 'tool-chip';
   div.textContent = ev.status === 'start'
-    ? `⚙️ 调用工具 ${ev.name} …`
-    : `✅ 工具 ${ev.name} 返回`;
+    ? `⏳ 正在处理：${ev.name}…`
+    : `✅ ${ev.name} 完成`;
   if (ev.result) {
     // 返回摘要默认截断预览（长结果不刷屏），点击展开/收起完整内容——
     // 「技能已更新：<完整路径>」这类末尾带关键信息的结果不再被截没
@@ -434,6 +511,7 @@ async function send() {
     return;
   }
   input.value = '';
+  removeWelcome();
   sendBtn.disabled = true;
   input.disabled = true;     // 流式期间禁输入：对话本质串行，防并发插队
   attachBtn.disabled = true;
@@ -517,6 +595,7 @@ fileInput.onchange = async () => {
   fileInput.value = '';          // 允许重复选择同一文件
   if (!f) return;
   if (!serverOnline) { addMsg('assistant', '⚠️ 后端服务当前离线，恢复后即可上传。'); return; }
+  removeWelcome();
   attachBtn.disabled = true;
   attachBtn.textContent = '⏳';
   try {
@@ -582,16 +661,16 @@ function addDivider(text) {
 
 // 页面加载时恢复上次会话的历史消息（记录存于服务端 SQLite，重启不丢）
 async function loadHistory() {
-  if (!sessionId) return;
+  if (!sessionId) { renderWelcome(); return; }
   try {
     const r = await fetch(`/api/sessions/${sessionId}/history`, { cache: 'no-store', headers: authHdr() });
-    if (!r.ok) return;
+    if (!r.ok) { renderWelcome(); return; }
     const d = await r.json();
     const msgs = d.messages || [];
-    if (!msgs.length) return;
-    addDivider(`—— 已恢复 ${msgs.length} 条历史消息（会话 ${sessionId}）——`);
+    if (!msgs.length) { renderWelcome(); return; }
+    addDivider(`已恢复 ${msgs.length} 条历史消息（会话 ${sessionId}）`);
     for (const m of msgs) addMsg(m.role === 'user' ? 'user' : 'assistant', m.content);
-  } catch (e) { /* 历史恢复失败不影响正常使用 */ }
+  } catch (e) { renderWelcome(); /* 历史恢复失败不影响正常使用 */ }
 }
 loadHistory();
 
@@ -602,7 +681,7 @@ async function checkPendingApprovals() {
     if (!r.ok) return;
     const d = await r.json();
     const n = (d.approvals || []).filter(a => a.status === 'pending').length;
-    if (n > 0) addDivider(`—— 有 ${n} 条待审批的危险操作，点击右上角「☰ 记录 → 审批记录」决议 ——`);
+    if (n > 0) addDivider(`有 ${n} 条操作待你确认，点右上角「☰ 记录」处理`);
   } catch (e) { /* 提醒失败不影响正常使用 */ }
 }
 checkPendingApprovals();
@@ -627,6 +706,7 @@ function switchSession(id) {
   chat.innerHTML = '';
   panel.classList.remove('open');
   if (id) loadHistory();
+  else renderWelcome();
   input.focus();
 }
 
