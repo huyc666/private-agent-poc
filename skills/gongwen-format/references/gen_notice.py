@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""生成《关于印发〈数字国控项目系统应急预案〉的通知》标准公文（GB/T 9704-2012）。
+"""生成《关于印发〈XX项目系统应急预案〉的通知》标准公文（GB/T 9704-2012）。
 用法：python gen_notice.py
-输出：数字国控项目系统应急预案-印发通知.docx
+输出：XX项目系统应急预案-印发通知.docx
 说明：发文机关、发文字号、主送、署名、日期为占位/建议值，需按实际发文主体替换。
 """
 import sys, copy
@@ -17,7 +17,7 @@ import gongwen_autofix as G
 GB = G.GB
 
 # 默认发文机关（示例值，可用 --org 覆盖；不写死到任何具体发文字号/日期）
-DEFAULT_ORG = "江西省国有资本运营控股集团有限公司"
+DEFAULT_ORG = "XX单位"
 
 RED = RGBColor(0xC0, 0x00, 0x00)
 
@@ -34,7 +34,7 @@ zs = _opt(sys.argv, "--zs")                # 主送机关
 luo = _opt(sys.argv, "--luo")              # 署名
 date_str = _opt(sys.argv, "--date")        # 成文日期
 org = _opt(sys.argv, "--org") or DEFAULT_ORG
-title = _opt(sys.argv, "--title") or "关于印发《数字国控项目系统应急预案》的通知"
+title = _opt(sys.argv, "--title") or "关于印发《XX项目系统应急预案》的通知"
 pre_path = _opt(sys.argv, "--pre") or _opt(sys.argv, "--source")   # 附件(预案)源 docx
 out = _opt(sys.argv, "--out")              # 输出路径（必填）
 if not out or not pre_path:
@@ -100,7 +100,7 @@ if hongtou:
     p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.paragraph_format.space_before = Pt(6); p.paragraph_format.space_after = Pt(6)
     p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY; p.paragraph_format.line_spacing = Pt(28)
-    set_run_font(p.add_run("赣国控发〔2026〕  号"), "仿宋_GB2312", size=16)
+    set_run_font(p.add_run("XX发〔2026〕  号"), "仿宋_GB2312", size=16)
     add_red_bottom_rule(p)
 
 # ---- 标题 ----
@@ -116,14 +116,14 @@ if zs:
 
 # ---- 正文 ----
 for t in [
-    "现将《数字国控项目系统应急预案》印发给你们，请结合实际认真组织学习，严格遵照执行，确保项目系统安全平稳运行。",
+    "现将《XX项目系统应急预案》印发给你们，请结合实际认真组织学习，严格遵照执行，确保项目系统安全平稳运行。",
     "本预案自印发之日起施行。此前有关规定与本预案不一致的，以本预案为准。",
 ]:
     doc.add_paragraph(t)
 
 # ---- 附件说明（左空二字） ----
 p = doc.add_paragraph()
-set_run_font(p.add_run("附件：数字国控项目系统应急预案"), "仿宋_GB2312", size=16)
+set_run_font(p.add_run("附件：XX项目系统应急预案"), "仿宋_GB2312", size=16)
 
 # ---- 署名 + 成文日期（右对齐）——默认不添加，仅用户要求时写，绝不臆造 ----
 if luo or date_str:
@@ -139,7 +139,7 @@ doc.add_page_break()
 p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 p.paragraph_format.space_after = Pt(18)
 p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY; p.paragraph_format.line_spacing = Pt(33)
-set_run_font(p.add_run("数字国控项目系统应急预案"), "方正小标宋简体", size=22)
+set_run_font(p.add_run("XX项目系统应急预案"), "方正小标宋简体", size=22)
 
 # ---- 克隆预案正文（跳过预案大标题段）+ 表格 ----
 pre = Document(pre_path)

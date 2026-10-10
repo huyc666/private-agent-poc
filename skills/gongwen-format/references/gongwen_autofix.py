@@ -261,11 +261,11 @@ def detect_gongwen(doc):
         if st in ('Heading 1', 'Heading 2'):
             sig['heading_styles'] = True
         text = ''.join(r.text for r in p.runs)
-        if re.match(r'^(公司领导|各位领导|各(参建|部室|单位))', text):
+        if re.match(r'^(单位领导|各位领导|各(参建|部室|单位))', text):
             sig['zhusong'] = True
         if '以上报告' in text or text.strip().startswith('特此') or '请审阅' in text:
             sig['jieyu'] = True
-        if re.match(r'^(数字国控|江西省|集团|公司).{0,12}(工作组|有限公司|集团)$', text.strip()):
+        if re.match(r'^[Xx×\u4e00-\u9fa5]{2,16}(工作组|单位|中心|委员会|办公室|局|所|厅|部|院|校|站|队)$', text.strip()):
             sig['luokuan'] = True
         for r in p.runs:
             rpr = r._element.rPr
@@ -283,11 +283,11 @@ def detect_gongwen(doc):
 
 def classify(text, style_name):
     """按内容/样式识别段落角色（用于主送/结语/落款等）。标题已由 _heading_level_and_split 处理。"""
-    if re.match(r'^(公司领导|各位领导|各(参建|部室|单位))', text):
+    if re.match(r'^(单位领导|各位领导|各(参建|部室|单位))', text):
         return 'zs'
     if '以上报告' in text or text.strip().startswith('特此') or '请审阅' in text:
         return 'jie'
-    if re.match(r'^(数字国控|江西省|集团|公司).{0,12}(工作组|有限公司|集团)$', text.strip()):
+    if re.match(r'^[Xx×\u4e00-\u9fa5]{2,16}(工作组|单位|中心|委员会|办公室|局|所|厅|部|院|校|站|队)$', text.strip()):
         return 'luo'
     return 'body'
 
@@ -299,12 +299,12 @@ def _text(p):
 def _looks_like_heading(text):
     """数字序号（N. / N、 /（N） / N.N）开头的段落，判定是否为标题：
     标题是短短语，正文是完整句子。判定规则（需求2）：
-      - 以年份(20xx年/19xx年)开头        → 正文（叙事，如“2024年公司…”）
-      - 含句末标点‘。’                  → 正文（完整句子，如“1. 公司于…。”）
+      - 以年份(20xx年/19xx年)开头        → 正文（叙事，如“2024年单位…”）
+      - 含句末标点‘。’                  → 正文（完整句子，如“1. 单位于…。”）
       - 残余文字长度 > 30 字            → 正文（过长，非标题短语）
       - 否则                           → 标题（短短语，如“1. 加强组织领导”）
     说明：中文标记（一、/（一）/一是）恒为标题，不经此判定；本函数仅用于
-    易混淆的数字序号开头段落，避免把“1. 公司于2023年完成…”误判为标题。"""
+    易混淆的数字序号开头段落，避免把“1. 单位于2023年完成…”误判为标题。"""
     m = re.match(r'^([（(]?\d+[.、)）]?\s*)', text)
     rest = text[m.end():]
     if re.match(r'^\d{3,4}年', rest):

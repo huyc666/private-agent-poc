@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-生成《关于数字国控一期培训工作情况的报告》
+生成《关于XX一期培训工作情况的报告》
 GB/T 9704-2012 公文格式，支持国标字体版 / 系统字体版两套输出。
 用法：
   python gen_report.py gb     -> 国标字体版（方正小标宋简体/仿宋_GB2312/楷体_GB2312）
@@ -196,7 +196,7 @@ def add_page_number(doc, font_page="宋体"):
 
 
 def build(mode, zhusong=None, luokuan=None, date_str=None, jieyu=False,
-           title="关于数字国控一期培训工作情况的报告"):
+           title="关于XX一期培训工作情况的报告"):
     """生成一份报告文种公文（GB/T 9704-2012）。
 
     title/org 等正文为示例内容，调用方可按需替换为实际文稿；输出路径由调用方决定，
@@ -232,7 +232,7 @@ def build(mode, zhusong=None, luokuan=None, date_str=None, jieyu=False,
         add_para(doc, zhusong, F['body'], align=L, first_line_indent=False)
 
     # 引言
-    add_para(doc, "数字国控一期项目自2025年10月启动系统上线以来，培训工作与系统建设同步推进。截至2026年9月18日，各项培训已按计划组织实施完毕。现将有关情况报告如下。", F['body'])
+    add_para(doc, "XX一期项目自2025年10月启动系统上线以来，培训工作与系统建设同步推进。截至2026年9月18日，各项培训已按计划组织实施完毕。现将有关情况报告如下。", F['body'])
 
     # 一
     add_para(doc, "一、培训工作总体情况", F['h1'], align=L)
@@ -265,10 +265,10 @@ def build(mode, zhusong=None, luokuan=None, date_str=None, jieyu=False,
                ["7", "统一门户", "2", "15", "数据管理平台", "1"],
                ["8", "OA系统（公文管理、业务招待）", "2", "合计", "—", "29"]],
               F['body'], widths=[1.3, 4.5, 1.2, 1.3, 4.5, 1.2])
-    add_para(doc, "此外，网络安全意识培训已列入计划，由第三方江西神舟承担，具体时间尚待确定。", F['body'])
+    add_para(doc, "此外，网络安全意识培训已列入计划，由第三方服务商承担，具体时间尚待确定。", F['body'])
 
     add_para(doc, "（三）培训对象实现分层分类覆盖", F['h2'], align=L)
-    add_para(doc, "培训范围覆盖集团本部各部室、各二级子公司及部分三级单位，涉及建工集团、置业集团、交易集团、基金公司、联晟电子、省进出口、联晟投资、商投、吉成物业、商务投资集团等单位；参训角色涵盖系统管理员、财务、人力资源、风控法务、党群、战略投资、采购、办公室、业务员、楼管等各类人员。培训以线下集中为主，党务党宣、三级单位人力资源等2场采用线上会议方式开展。", F['body'])
+    add_para(doc, "培训范围覆盖单位本部各部室、各二级单位及部分三级单位，涉及工程建设、置业、交易、基金、电子信息、进出口、投资、物业等各类业务板块单位；参训角色涵盖系统管理员、财务、人力资源、风控法务、党群、战略投资、采购、办公室、业务员、楼管等各类人员。培训以线下集中为主，党务党宣、三级单位人力资源等2场采用线上会议方式开展。", F['body'])
 
     # 三
     add_para(doc, "三、部门自主培训开展情况", F['h1'], align=L)
@@ -336,7 +336,7 @@ if __name__ == '__main__':
     luo = _opt(sys.argv, "--luo")
     date_str = _opt(sys.argv, "--date")
     jieyu = "--jie" in sys.argv          # 默认不保留文末结束语（需求1）
-    title = _opt(sys.argv, "--title") or "关于数字国控一期培训工作情况的报告"
+    title = _opt(sys.argv, "--title") or "关于XX一期培训工作情况的报告"
     out = _opt(sys.argv, "--out")
     if not out:
         out = ("%s（国标字体版）.docx" if mode == 'gb' else "%s（系统字体版）.docx") % title
