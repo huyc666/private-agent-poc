@@ -1,0 +1,698 @@
+{
+    "type":  "excalidraw",
+    "version":  2,
+    "source":  "mcp-excalidraw-server",
+    "elements":  [
+                     {
+                         "id":  "t-title",
+                         "type":  "text",
+                         "x":  60,
+                         "y":  40,
+                         "strokeColor":  "#0A0A0A",
+                         "text":  "私有化 Agent 框架 · 系统流程",
+                         "fontSize":  28,
+                         "fontFamily":  2,
+                         "createdAt":  "2026-10-11T13:35:42.029Z",
+                         "updatedAt":  "2026-10-11T13:40:52.520Z",
+                         "version":  2,
+                         "textAlign":  "left"
+                     },
+                     {
+                         "id":  "t-intro",
+                         "type":  "text",
+                         "x":  60,
+                         "y":  88,
+                         "strokeColor":  "#404040",
+                         "text":  "一次对话请求从浏览器到模型回复的完整链路，以及贯穿全程的审批、隔离与观测能力",
+                         "fontSize":  16,
+                         "fontFamily":  2,
+                         "createdAt":  "2026-10-11T13:35:42.029Z",
+                         "updatedAt":  "2026-10-11T13:40:49.135Z",
+                         "version":  2,
+                         "textAlign":  "left"
+                     },
+                     {
+                         "id":  "n-browser",
+                         "type":  "rectangle",
+                         "x":  60,
+                         "y":  180,
+                         "width":  220,
+                         "height":  90,
+                         "backgroundColor":  "#FFFFFF",
+                         "strokeColor":  "#7373735C",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "label":  {
+                                       "text":  "浏览器前端\nchat 界面 · 文档上传"
+                                   },
+                         "fontSize":  16,
+                         "fontFamily":  2,
+                         "roundness":  {
+                                           "type":  3,
+                                           "value":  16
+                                       },
+                         "fillStyle":  "solid",
+                         "createdAt":  "2026-10-11T13:35:42.029Z",
+                         "updatedAt":  "2026-10-11T13:39:44.897Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "n-gateway",
+                         "type":  "rectangle",
+                         "x":  340,
+                         "y":  180,
+                         "width":  220,
+                         "height":  90,
+                         "backgroundColor":  "#FFFFFF",
+                         "strokeColor":  "#7373735C",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "label":  {
+                                       "text":  "FastAPI 网关\n认证 · 多用户分域"
+                                   },
+                         "fontSize":  16,
+                         "fontFamily":  2,
+                         "roundness":  {
+                                           "type":  3,
+                                           "value":  16
+                                       },
+                         "fillStyle":  "solid",
+                         "createdAt":  "2026-10-11T13:35:42.029Z",
+                         "updatedAt":  "2026-10-11T13:39:48.283Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "n-sse",
+                         "type":  "rectangle",
+                         "x":  620,
+                         "y":  180,
+                         "width":  220,
+                         "height":  90,
+                         "backgroundColor":  "#FFFFFF",
+                         "strokeColor":  "#7373735C",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "label":  {
+                                       "text":  "SSE 对话接口\n/api/chat · 会话租约锁"
+                                   },
+                         "fontSize":  16,
+                         "fontFamily":  2,
+                         "roundness":  {
+                                           "type":  3,
+                                           "value":  16
+                                       },
+                         "fillStyle":  "solid",
+                         "createdAt":  "2026-10-11T13:35:42.030Z",
+                         "updatedAt":  "2026-10-11T13:39:52.000Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "n-agent",
+                         "type":  "rectangle",
+                         "x":  900,
+                         "y":  180,
+                         "width":  220,
+                         "height":  90,
+                         "backgroundColor":  "#654ACB",
+                         "strokeColor":  "#654ACB",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "label":  {
+                                       "text":  "LangGraph Agent 循环\n模型 ↔ 工具多轮"
+                                   },
+                         "fontSize":  16,
+                         "fontFamily":  2,
+                         "roundness":  {
+                                           "type":  3,
+                                           "value":  16
+                                       },
+                         "fillStyle":  "solid",
+                         "createdAt":  "2026-10-11T13:35:42.030Z",
+                         "updatedAt":  "2026-10-11T13:35:42.030Z",
+                         "version":  1
+                     },
+                     {
+                         "id":  "n-caps",
+                         "type":  "rectangle",
+                         "x":  1180,
+                         "y":  180,
+                         "width":  220,
+                         "height":  90,
+                         "backgroundColor":  "#FFFFFF",
+                         "strokeColor":  "#7373735C",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "label":  {
+                                       "text":  "能力层\n内置工具 / 包 / 技能 / MCP"
+                                   },
+                         "fontSize":  16,
+                         "fontFamily":  2,
+                         "roundness":  {
+                                           "type":  3,
+                                           "value":  16
+                                       },
+                         "fillStyle":  "solid",
+                         "createdAt":  "2026-10-11T13:35:42.030Z",
+                         "updatedAt":  "2026-10-11T13:39:55.320Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "n-llm",
+                         "type":  "rectangle",
+                         "x":  1460,
+                         "y":  180,
+                         "width":  220,
+                         "height":  90,
+                         "backgroundColor":  "#FFFFFF",
+                         "strokeColor":  "#7373735C",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "label":  {
+                                       "text":  "LLM\nDeepSeek / vLLM 私有部署"
+                                   },
+                         "fontSize":  16,
+                         "fontFamily":  2,
+                         "roundness":  {
+                                           "type":  3,
+                                           "value":  16
+                                       },
+                         "fillStyle":  "solid",
+                         "createdAt":  "2026-10-11T13:35:42.030Z",
+                         "updatedAt":  "2026-10-11T13:39:58.732Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "n-approval",
+                         "type":  "rectangle",
+                         "x":  860,
+                         "y":  400,
+                         "width":  220,
+                         "height":  90,
+                         "backgroundColor":  "#EEEFFF",
+                         "strokeColor":  "#654ACB",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "label":  {
+                                       "text":  "人工审批流\n危险操作落库待决议"
+                                   },
+                         "fontSize":  16,
+                         "fontFamily":  2,
+                         "roundness":  {
+                                           "type":  3,
+                                           "value":  16
+                                       },
+                         "fillStyle":  "solid",
+                         "createdAt":  "2026-10-11T13:35:42.031Z",
+                         "updatedAt":  "2026-10-11T13:35:42.031Z",
+                         "version":  1
+                     },
+                     {
+                         "id":  "n-approver",
+                         "type":  "rectangle",
+                         "x":  1200,
+                         "y":  400,
+                         "width":  220,
+                         "height":  90,
+                         "backgroundColor":  "#FFFFFF",
+                         "strokeColor":  "#7373735C",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "label":  {
+                                       "text":  "审批 / 管理员\n批准或拒绝"
+                                   },
+                         "fontSize":  16,
+                         "fontFamily":  2,
+                         "roundness":  {
+                                           "type":  3,
+                                           "value":  16
+                                       },
+                         "fillStyle":  "solid",
+                         "createdAt":  "2026-10-11T13:35:42.031Z",
+                         "updatedAt":  "2026-10-11T13:40:02.104Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "zone-support",
+                         "type":  "rectangle",
+                         "x":  60,
+                         "y":  556,
+                         "width":  1620,
+                         "height":  178,
+                         "backgroundColor":  "#FAFAFA",
+                         "strokeColor":  "#7373732E",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "roundness":  {
+                                           "type":  3,
+                                           "value":  16
+                                       },
+                         "fillStyle":  "solid",
+                         "createdAt":  "2026-10-11T13:35:42.031Z",
+                         "updatedAt":  "2026-10-11T13:40:15.626Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "t-support",
+                         "type":  "text",
+                         "x":  84,
+                         "y":  568,
+                         "strokeColor":  "#0A0A0A",
+                         "text":  "运行时支撑",
+                         "fontSize":  20,
+                         "fontFamily":  2,
+                         "createdAt":  "2026-10-11T13:35:42.031Z",
+                         "updatedAt":  "2026-10-11T13:40:55.771Z",
+                         "version":  2,
+                         "textAlign":  "left"
+                     },
+                     {
+                         "id":  "n-db",
+                         "type":  "rectangle",
+                         "x":  340,
+                         "y":  614,
+                         "width":  220,
+                         "height":  90,
+                         "backgroundColor":  "#FFFFFF",
+                         "strokeColor":  "#7373735C",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "label":  {
+                                       "text":  "SQLite 状态库\n会话 / 审批 / 用户 / 计量"
+                                   },
+                         "fontSize":  16,
+                         "fontFamily":  2,
+                         "roundness":  {
+                                           "type":  3,
+                                           "value":  16
+                                       },
+                         "fillStyle":  "solid",
+                         "createdAt":  "2026-10-11T13:35:42.031Z",
+                         "updatedAt":  "2026-10-11T13:40:05.776Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "n-langfuse",
+                         "type":  "rectangle",
+                         "x":  900,
+                         "y":  614,
+                         "width":  220,
+                         "height":  90,
+                         "backgroundColor":  "#FFFFFF",
+                         "strokeColor":  "#7373735C",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "label":  {
+                                       "text":  "Langfuse 观测\n全链路 trace 与用量"
+                                   },
+                         "fontSize":  16,
+                         "fontFamily":  2,
+                         "roundness":  {
+                                           "type":  3,
+                                           "value":  16
+                                       },
+                         "fillStyle":  "solid",
+                         "createdAt":  "2026-10-11T13:35:42.031Z",
+                         "updatedAt":  "2026-10-11T13:40:09.081Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "n-sandbox",
+                         "type":  "rectangle",
+                         "x":  1460,
+                         "y":  614,
+                         "width":  220,
+                         "height":  90,
+                         "backgroundColor":  "#FFFFFF",
+                         "strokeColor":  "#7373735C",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "label":  {
+                                       "text":  "代码沙箱\niptables 网络隔离"
+                                   },
+                         "fontSize":  16,
+                         "fontFamily":  2,
+                         "roundness":  {
+                                           "type":  3,
+                                           "value":  16
+                                       },
+                         "fillStyle":  "solid",
+                         "createdAt":  "2026-10-11T13:35:42.031Z",
+                         "updatedAt":  "2026-10-11T13:40:12.368Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "e1",
+                         "type":  "arrow",
+                         "x":  288,
+                         "y":  225,
+                         "strokeColor":  "#737373",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "roundness":  null,
+                         "points":  [
+                                        [
+                                            0,
+                                            0
+                                        ],
+                                        [
+                                            44,
+                                            0
+                                        ]
+                                    ],
+                         "start":  {
+                                       "id":  "n-browser"
+                                   },
+                         "end":  {
+                                     "id":  "n-gateway"
+                                 },
+                         "startArrowhead":  null,
+                         "endArrowhead":  "triangle",
+                         "elbowed":  false,
+                         "createdAt":  "2026-10-11T13:37:14.706Z",
+                         "updatedAt":  "2026-10-11T13:40:18.962Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "e2",
+                         "type":  "arrow",
+                         "x":  568,
+                         "y":  225,
+                         "strokeColor":  "#737373",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "roundness":  null,
+                         "points":  [
+                                        [
+                                            0,
+                                            0
+                                        ],
+                                        [
+                                            44,
+                                            0
+                                        ]
+                                    ],
+                         "start":  {
+                                       "id":  "n-gateway"
+                                   },
+                         "end":  {
+                                     "id":  "n-sse"
+                                 },
+                         "startArrowhead":  null,
+                         "endArrowhead":  "triangle",
+                         "elbowed":  false,
+                         "createdAt":  "2026-10-11T13:37:14.706Z",
+                         "updatedAt":  "2026-10-11T13:40:22.307Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "e3",
+                         "type":  "arrow",
+                         "x":  848,
+                         "y":  225,
+                         "strokeColor":  "#737373",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "roundness":  null,
+                         "points":  [
+                                        [
+                                            0,
+                                            0
+                                        ],
+                                        [
+                                            44,
+                                            0
+                                        ]
+                                    ],
+                         "start":  {
+                                       "id":  "n-sse"
+                                   },
+                         "end":  {
+                                     "id":  "n-agent"
+                                 },
+                         "startArrowhead":  null,
+                         "endArrowhead":  "triangle",
+                         "elbowed":  false,
+                         "createdAt":  "2026-10-11T13:37:14.706Z",
+                         "updatedAt":  "2026-10-11T13:40:25.601Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "e4",
+                         "type":  "arrow",
+                         "x":  1128,
+                         "y":  225,
+                         "strokeColor":  "#737373",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "roundness":  null,
+                         "points":  [
+                                        [
+                                            0,
+                                            0
+                                        ],
+                                        [
+                                            44,
+                                            0
+                                        ]
+                                    ],
+                         "start":  {
+                                       "id":  "n-agent"
+                                   },
+                         "end":  {
+                                     "id":  "n-caps"
+                                 },
+                         "startArrowhead":  null,
+                         "endArrowhead":  "triangle",
+                         "elbowed":  false,
+                         "createdAt":  "2026-10-11T13:37:14.706Z",
+                         "updatedAt":  "2026-10-11T13:40:28.908Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "e5",
+                         "type":  "arrow",
+                         "x":  1408,
+                         "y":  225,
+                         "strokeColor":  "#737373",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "roundness":  null,
+                         "points":  [
+                                        [
+                                            0,
+                                            0
+                                        ],
+                                        [
+                                            44,
+                                            0
+                                        ]
+                                    ],
+                         "start":  {
+                                       "id":  "n-caps"
+                                   },
+                         "end":  {
+                                     "id":  "n-llm"
+                                 },
+                         "startArrowhead":  null,
+                         "endArrowhead":  "triangle",
+                         "elbowed":  false,
+                         "createdAt":  "2026-10-11T13:37:14.706Z",
+                         "updatedAt":  "2026-10-11T13:40:32.224Z",
+                         "version":  2
+                     },
+                     {
+                         "id":  "e6",
+                         "type":  "arrow",
+                         "x":  1000.387098312582,
+                         "y":  277.87095928079924,
+                         "strokeColor":  "#737373",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "dashed",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "roundness":  null,
+                         "points":  [
+                                        [
+                                            0,
+                                            0
+                                        ],
+                                        [
+                                            -20.774196625163995,
+                                            114.25808143840152
+                                        ]
+                                    ],
+                         "start":  {
+                                       "id":  "n-agent"
+                                   },
+                         "end":  {
+                                     "id":  "n-approval"
+                                 },
+                         "startArrowhead":  null,
+                         "endArrowhead":  "triangle",
+                         "elbowed":  false,
+                         "fontFamily":  2,
+                         "createdAt":  "2026-10-11T13:37:14.706Z",
+                         "updatedAt":  "2026-10-11T13:40:35.959Z",
+                         "version":  3,
+                         "label":  {
+                                       "text":  "危险操作"
+                                   },
+                         "fontSize":  16
+                     },
+                     {
+                         "id":  "e7",
+                         "type":  "arrow",
+                         "x":  1088,
+                         "y":  445,
+                         "strokeColor":  "#737373",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "solid",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "roundness":  null,
+                         "points":  [
+                                        [
+                                            0,
+                                            0
+                                        ],
+                                        [
+                                            104,
+                                            0
+                                        ]
+                                    ],
+                         "start":  {
+                                       "id":  "n-approval"
+                                   },
+                         "end":  {
+                                     "id":  "n-approver"
+                                 },
+                         "startArrowhead":  null,
+                         "endArrowhead":  "triangle",
+                         "elbowed":  false,
+                         "fontFamily":  2,
+                         "createdAt":  "2026-10-11T13:37:14.706Z",
+                         "updatedAt":  "2026-10-11T13:40:39.253Z",
+                         "version":  3,
+                         "label":  {
+                                       "text":  "提交决议"
+                                   },
+                         "fontSize":  16
+                     },
+                     {
+                         "id":  "e8",
+                         "type":  "arrow",
+                         "x":  1242.1851236695181,
+                         "y":  395.26909069097985,
+                         "strokeColor":  "#737373",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "dashed",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "roundness":  null,
+                         "points":  [
+                                        [
+                                            0,
+                                            0
+                                        ],
+                                        [
+                                            -164.37024733903627,
+                                            -120.5381813819597
+                                        ]
+                                    ],
+                         "start":  {
+                                       "id":  "n-approver"
+                                   },
+                         "end":  {
+                                     "id":  "n-agent"
+                                 },
+                         "startArrowhead":  null,
+                         "endArrowhead":  "triangle",
+                         "elbowed":  true,
+                         "fontFamily":  2,
+                         "createdAt":  "2026-10-11T13:37:14.706Z",
+                         "updatedAt":  "2026-10-11T13:40:42.615Z",
+                         "version":  3,
+                         "label":  {
+                                       "text":  "批准后恢复执行"
+                                   },
+                         "fontSize":  16
+                     },
+                     {
+                         "id":  "e9",
+                         "type":  "arrow",
+                         "x":  853.256191676164,
+                         "y":  493.0445672717325,
+                         "strokeColor":  "#737373",
+                         "strokeWidth":  1,
+                         "strokeStyle":  "dashed",
+                         "roughness":  0,
+                         "opacity":  100,
+                         "roundness":  null,
+                         "points":  [
+                                        [
+                                            0,
+                                            0
+                                        ],
+                                        [
+                                            -286.512383352328,
+                                            117.91086545653502
+                                        ]
+                                    ],
+                         "start":  {
+                                       "id":  "n-approval"
+                                   },
+                         "end":  {
+                                     "id":  "n-db"
+                                 },
+                         "startArrowhead":  null,
+                         "endArrowhead":  "triangle",
+                         "elbowed":  true,
+                         "fontFamily":  2,
+                         "createdAt":  "2026-10-11T13:37:14.706Z",
+                         "updatedAt":  "2026-10-11T13:40:45.904Z",
+                         "version":  3,
+                         "label":  {
+                                       "text":  "审批落库"
+                                   },
+                         "fontSize":  16
+                     }
+                 ],
+    "appState":  {
+                     "viewBackgroundColor":  "#F7F6F5",
+                     "gridSize":  null
+                 }
+}
