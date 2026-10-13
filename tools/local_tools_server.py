@@ -1,4 +1,4 @@
-"""示例 MCP Server（stdio 传输）：向 Agent 暴露工作区目录与天气工具。
+"""示例 MCP Server（stdio 传输）：向 Agent 暴露天气工具。
 
 POC 里演示了 MCP 的标准接入方式；业务方新增工具时，
 只需在这里（或独立 MCP Server 进程）加函数即可，Agent 端零改动。
@@ -10,12 +10,13 @@ POC 里演示了 MCP 的标准接入方式；业务方新增工具时，
 
 两个天气工具共用 server/weather.py 的多数据源降级链（Open-Meteo → itboy），
 保证内置 / MCP 两条接入路径行为一致。
+
+注意（全项目评审问题5）：不在此提供工作区文件类工具（列目录/数字数）——
+MCP Server 是独立进程，取不到主进程的用户身份上下文（contextvars），
+做不了 uploads/outputs 的多用户域隔离；文件能力统一走内置工具
+（list_uploaded_docs / read_text_file，有完整的分域与敏感文件拦截）。
 """
-import json
-import os
 import sys
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
 from fastmcp import FastMCP
@@ -24,34 +25,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "server"))
 import weather  # noqa: E402  server/weather.py，与内置工具共用的天气降级链
 
 mcp = FastMCP("poc-local-tools")
-
-WORKSPACE = Path(__file__).resolve().parent.parent
-
-
-@mcp.tool
-def list_workspace_files(subdir: str = ".") -> str:
-    """列出工作区某个子目录下的文件与目录（最多 100 条）。"""
-    target = (WORKSPACE / subdir).resolve()
-    if not target.is_relative_to(WORKSPACE):
-        return "拒绝访问：路径越出工作区边界"
-    if not target.is_dir():
-        return f"目录不存在: {subdir}"
-    entries = []
-    for p in sorted(target.iterdir())[:100]:
-        entries.append(("[目录] " if p.is_dir() else "[文件] ") + p.name)
-    return "\n".join(entries) or "（空目录）"
-
-
-@mcp.tool
-def word_count(path: str) -> str:
-    """统计工作区内某个文本文件的行数和字符数。path 相对项目根目录。"""
-    target = (WORKSPACE / path).resolve()
-    if not target.is_relative_to(WORKSPACE):
-        return "拒绝访问：路径越出工作区边界"
-    if not target.is_file():
-        return f"文件不存在: {path}"
-    text = target.read_text(encoding="utf-8", errors="replace")
-    return f"行数: {text.count(chr(10)) + 1}, 字符数: {len(text)}"
 
 
 # ---------------------------------------------------------------- 天气工具（MCP 版）
@@ -66,7 +39,9 @@ def get_city_weather(city: str) -> str:
     try:
         return weather.query_weather(city) + "（MCP 通道）"
     except Exception as e:
-        return (f"天气查询失败: {e}。"
+        # 不回显原始异常文本（P1-3 约定：可能携带内部代理地址等部署细节）
+        print(f"[mcp] 天气查询失败: {e}")
+        return ("天气查询失败（内部错误）。"
                 "私有化内网环境请将 WEATHER_GEOCODING_URL / WEATHER_API_URL 配置为内部代理地址")
 
 

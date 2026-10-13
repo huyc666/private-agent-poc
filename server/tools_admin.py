@@ -296,7 +296,9 @@ def _research_tools() -> list:
     for t in STATE.pack_tools.values():
         if t.name not in have:
             tools.append(t)
-    for n in ("get_city_weather", "word_count", "list_workspace_files"):
+    # 工作区文件类 MCP 工具（word_count/list_workspace_files）已移除（全项目评审
+    # 问题5：MCP 独立进程取不到用户身份上下文，做不了多用户域隔离），仅保留天气
+    for n in ("get_city_weather",):
         if n in STATE.mcp_tools:  # MCP 工具可用时一并授予 worker
             tools.append(STATE.mcp_tools[n])
     return tools
@@ -313,7 +315,9 @@ async def research_topic(topic: str) -> str:
     try:
         return await multi_agent.run_research(topic, STATE.llm, _research_tools())
     except Exception as e:
-        return f"多 Agent 调研执行失败: {e}"
+        # 不回显原始异常文本（P1-3 约定），细节仅进服务端日志
+        print(f"[tools] 多 Agent 调研执行失败: {e}")
+        return f"多 Agent 调研执行失败（{type(e).__name__}），请稍后重试"
 
 
 # ---------------------------------------------------------------- 工具装配清单

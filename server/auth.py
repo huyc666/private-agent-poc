@@ -121,12 +121,18 @@ def generate_key() -> str:
 
 def add_user(username: str, role: str = "user", days: int = 0,
              department: str = "") -> str | None:
-    """创建用户并返回一次性明文 Key（只在此时可见）；用户名已存在或角色非法返回 None。
+    """创建用户并返回一次性明文 Key（只在此时可见）；用户名已存在、清洗后落入
+    保留域 shared 或角色非法返回 None。
     days>0 时 Key 在指定天数后过期（expires_at）；0 = 永不过期。
     department（v0.17.11）：所属部门（成本报表聚合 / 知识库分库权限维度，≤64 字）。"""
     username = username.strip()
     department = (department or "").strip()[:64]
     if not username or len(username) > 64 or role not in ROLES:
+        return None
+    # 全项目评审问题7：拦截清洗后落入保留域 shared 的用户名——shared/ 承载开放
+    # 模式遗留文件（全局可见），同名用户会与之合并、越权读取遗留内容；
+    # scope_clean 的回退值就是 shared（含全非法字符用户名），一并拦截
+    if config.scope_clean(username) == "shared":
         return None
     key = generate_key()
     expires = time.time() + days * 86400 if days > 0 else None

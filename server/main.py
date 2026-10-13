@@ -140,7 +140,9 @@ async def login_endpoint(req: LoginRequest):
     成功失败都走同一路径，不区分「用户不存在」与「密码错误」（防枚举）。"""
     if not auth.enabled():
         return JSONResponse({"error": "当前为开放模式，无需登录"}, status_code=400)
-    result = auth.login(req.username, req.password)
+    # PBKDF2 200k 迭代是 CPU 密集同步调用（实测 300ms+），挪线程池避免阻塞
+    # 事件循环（全项目评审问题4；同 resolve_identity 的 to_thread 先例）
+    result = await asyncio.to_thread(auth.login, req.username, req.password)
     if result is None:
         return JSONResponse({"error": "用户名或密码错误"}, status_code=401)
     return result
@@ -287,7 +289,9 @@ async def session_list(request: Request, limit: int = 50):
     user 角色只列自己的会话；approver/admin 列全部。"""
     ident = _acl_identity(request)
     uid = ident["username"] if ident and ident["role"] == "user" else ""
-    return {"sessions": sessions.list_sessions(limit=min(limit, 200), user_id=uid)}
+    # limit<=0 回退默认（全项目评审问题3：SQLite LIMIT 负数 = 全量返回，防绕过 200 条上限）
+    return {"sessions": sessions.list_sessions(
+        limit=min(limit if limit > 0 else 50, 200), user_id=uid)}
 
 
 @app.get("/api/sessions/{session_id}/history")
@@ -613,7 +617,9 @@ async def approval_list(request: Request, limit: int = 50):
     user 角色只看自己创建的；approver/admin 看全部。"""
     ident = _acl_identity(request)
     uid = ident["username"] if ident and ident["role"] == "user" else ""
-    return {"approvals": approval.list_recent(limit=min(limit, 200), user_id=uid)}
+    # limit<=0 回退默认（全项目评审问题3：SQLite LIMIT 负数 = 全量返回，防绕过 200 条上限）
+    return {"approvals": approval.list_recent(
+        limit=min(limit if limit > 0 else 50, 200), user_id=uid)}
 
 
 @app.get("/api/usage")

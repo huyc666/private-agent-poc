@@ -135,8 +135,10 @@ def list_personal_all() -> list[dict]:
 
 
 def signature() -> tuple:
-    """目录内容签名（文件名 + 修改时间），用于热重载变更检测。"""
-    return tuple(sorted((p.name, p.stat().st_mtime) for p in _dir().glob("*.py")))
+    """目录内容签名（文件名 + 修改时间纳秒），用于热重载变更检测。
+    纳秒精度（st_mtime_ns）：秒级 mtime 在快速连续更新时不变，会导致图不重建、
+    新工具不生效（全项目评审问题6，与 skills.signature 约定对齐）。"""
+    return tuple(sorted((p.name, p.stat().st_mtime_ns) for p in _dir().glob("*.py")))
 
 
 def _extract_doc(path: Path) -> str | None:
@@ -313,7 +315,9 @@ def _sandbox_run_tool(name: str, args: dict, pack: str = "", env: dict | None = 
         with urllib.request.urlopen(req, timeout=config.SANDBOX_TIMEOUT + 5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        return f"沙箱调用失败: {e}"
+        # 不向模型/用户回显原始异常文本（P1-3 约定），细节仅进服务端日志
+        print(f"[custom-tools] 沙箱调用失败: {e}")
+        return f"沙箱调用失败（{type(e).__name__}），请检查沙箱服务状态"
     if data.get("ok"):
         return str(data.get("result", ""))
     return f"沙箱执行失败: {data.get('error', '未知错误')}"

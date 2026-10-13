@@ -105,7 +105,9 @@ def read_text_file(path: str) -> str:
         return _redact_secrets(
             target.read_text(encoding="utf-8", errors="replace"))[:20_000]
     except Exception as e:
-        return f"读取失败: {e}"
+        # 不回显原始异常文本（P1-3 约定：OSError 等可能携带服务器绝对路径）
+        print(f"[tools] read_text_file 读取失败: {e}")
+        return f"读取失败（{type(e).__name__}）"
 
 
 def list_uploaded_docs() -> str:
@@ -257,7 +259,9 @@ def run_python_code(code: str) -> str:
             data = json.loads(resp.read().decode("utf-8"))
         return data.get("output") or data.get("error") or "（无输出）"
     except Exception as e:
-        return f"沙箱调用失败: {e}"
+        # 不回显原始异常文本（P1-3 约定），细节仅进服务端日志
+        print(f"[tools] run_python_code 沙箱调用失败: {e}")
+        return f"沙箱调用失败（{type(e).__name__}），请检查沙箱服务状态"
 
 
 def do_delete(path: str) -> str:
@@ -280,7 +284,9 @@ def do_delete(path: str) -> str:
         target.unlink()
         return f"已删除文件: {path}"
     except Exception as e:
-        return f"删除失败: {e}"
+        # 不回显原始异常文本（P1-3 约定），细节仅进服务端日志
+        print(f"[tools] do_delete 删除失败: {e}")
+        return f"删除失败（{type(e).__name__}）"
 
 
 async def delete_workspace_file(path: str) -> str:

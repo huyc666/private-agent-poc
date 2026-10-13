@@ -365,17 +365,19 @@ def register_pack_skills() -> None:
 
 
 def packs_signature() -> tuple:
-    """包目录签名（清单/工具/提示词的修改时间 + 运行时禁用集合），用于热重载检测。"""
+    """包目录签名（清单/工具/提示词的修改时间纳秒 + 运行时禁用集合），用于热重载检测。
+    纳秒精度（st_mtime_ns，全项目评审问题6）：与 skills/custom_tools 签名约定
+    一致——秒级 mtime 在快速连续更新时不变，会导致图不重建、包变更不生效。"""
     sig = []
     for pack in scan_packs():
         mtimes = []
         manifest = pack["dir"] / "pack.yaml"
         if manifest.is_file():
-            mtimes.append(manifest.stat().st_mtime)
+            mtimes.append(manifest.stat().st_mtime_ns)
         for p in pack["tools"]:
-            mtimes.append(p.stat().st_mtime)
+            mtimes.append(p.stat().st_mtime_ns)
         if pack["prompt"] and Path(pack["prompt"]).is_file():
-            mtimes.append(Path(pack["prompt"]).stat().st_mtime)
+            mtimes.append(Path(pack["prompt"]).stat().st_mtime_ns)
         sig.append((pack["name"], tuple(mtimes)))
     return (tuple(sig), tuple(sorted(_disabled)))
 

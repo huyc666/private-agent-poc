@@ -44,12 +44,27 @@ async def load_mcp_tools() -> list:
 
 def _rebuild_graph():
     """组装 内置 + MCP + 自定义 + 领域包工具 并重建 Agent 图。
-    自定义工具/领域包变化时调用本函数即可免重启生效（checkpointer 复用，会话不丢）。"""
+    自定义工具/领域包变化时调用本函数即可免重启生效（checkpointer 复用，会话不丢）。
+    同名工具先挂载者优先（内置 > MCP > 自定义 > 领域包）：ToolNode 按名做
+    dict 赋值、后写静默覆盖先写，此前 pack 同名工具会无声遮蔽 custom/builtin
+    版本且无人知晓（全项目评审问题2）——此处显式去重 + 告警，冲突可发现。"""
     tools = tools_admin.builtin_langchain_tools() + list(STATE.mcp_tool_list)
     tools += custom_tools.load_langchain_tools()
     pack_tool_list = packs.load_pack_tools()
     tools += pack_tool_list
-    STATE.pack_tools = {t.name: t for t in pack_tool_list}
+    seen: set[str] = set()
+    deduped: list = []
+    for t in tools:
+        if t.name in seen:
+            print(f"[agent] 工具名冲突：跳过后挂载的「{t.name}」"
+                  "（保留先挂载版本；挂载顺序：内置 > MCP > 自定义 > 领域包）")
+            continue
+        seen.add(t.name)
+        deduped.append(t)
+    tools = deduped
+    # 仅登记真正挂载进主图的 pack 工具（被冲突跳过者不进调研 worker 装配）
+    _pack_ids = {id(p) for p in pack_tool_list}
+    STATE.pack_tools = {t.name: t for t in tools if id(t) in _pack_ids}
     STATE.tool_names = [t.name for t in tools]
     # 签名同时包含沙箱可达性/领域包状态/技能文件：任一变化都会触发重绑
     STATE.custom_sig = (custom_tools.signature(), custom_tools._sandbox_up(),
@@ -438,7 +453,11 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
         except Exception as e:
             # resume 轮抛错：executed_at 不标记，记录保持「已批准但未执行」
             # （审计可见，绝不让失败被误报为已执行）
-            yield {"type": "error", "content": f"模型调用失败: {e}"}
+            # 全项目评审问题1：SSE 直达用户，不回显原始异常文本（P1-3 约定：
+            # 可能携带绝对路径/DATABASE_URL 等部署细节），细节仅进服务端日志
+            print(f"[agent] 模型调用失败: {e}", flush=True)
+            yield {"type": "error",
+                   "content": f"模型调用失败（{type(e).__name__}），请稍后重试或联系管理员"}
             return
         if resuming_aid:
             await asyncio.to_thread(approval.mark_executed, resuming_aid)

@@ -63,7 +63,7 @@ def main() -> int:
         key = auth.add_user(args.username, args.role, days=args.days,
                             department=args.department)
         if key is None:
-            print(f"创建失败：用户名「{args.username}」已存在或参数非法")
+            print(f"创建失败：用户名「{args.username}」已存在、为保留名或参数非法")
             return 1
         expiry = f"{args.days} 天后过期" if args.days > 0 else "永不过期"
         dept = f"，部门 {args.department}" if args.department else ""
