@@ -76,6 +76,13 @@ async def lifespan(app: FastAPI):
         print("[auth] WARNING: 已配置 AUTH_IDENTITY_HEADER 但未配置"
               " AUTH_PROXY_ALLOWED_IPS——身份头将被忽略（fail-closed，防伪造）。"
               "请在 .env 配置受信代理来源 IP 白名单后重启，SSO 身份头才会生效。")
+    # v0.17.11（评审）：部门头嵌套在身份头分支内读取——只配部门头不配身份头时
+    # 永不生效且无提示，运维难以自查；按 fail-closed 配置须明确告警的惯例补提示
+    if auth.enabled() and config.AUTH_IDENTITY_DEPARTMENT_HEADER \
+            and not config.AUTH_IDENTITY_HEADER:
+        print("[auth] WARNING: 已配置 AUTH_IDENTITY_DEPARTMENT_HEADER 但未配置"
+              " AUTH_IDENTITY_HEADER——部门头不会被读取（部门头随身份头一同生效），"
+              "SSO 部门透传未启用。")
     await agent.build_agent()
     scan_task = asyncio.create_task(_approval_scan_loop())
     yield
@@ -101,15 +108,20 @@ async def auth_middleware(request: Request, call_next):
     # v0.17.4（安全审计 F2）：身份头必须来自受信代理白名单才生效——
     # 未命中白名单/未配置白名单一律忽略（fail-closed），直连端口伪造头无效。
     header_user = ""
+    header_department = ""
     if config.AUTH_IDENTITY_HEADER:
         if auth.proxy_ip_allowed(request.client.host if request.client else None):
             header_user = request.headers.get(config.AUTH_IDENTITY_HEADER, "")
+            # 部门头（v0.17.11 PLAN 6.1）：同样只在受信代理来源生效
+            if config.AUTH_IDENTITY_DEPARTMENT_HEADER:
+                header_department = request.headers.get(
+                    config.AUTH_IDENTITY_DEPARTMENT_HEADER, "")
         elif request.headers.get(config.AUTH_IDENTITY_HEADER):
             print("[auth] 身份头来自非受信来源（不在 AUTH_PROXY_ALLOWED_IPS 白名单），"
                   "已忽略（防伪造冒充）")
     # 解析涉及 SQLite 同步调用，挪到线程池避免阻塞事件循环（v0.16.1）
     request.state.user = await asyncio.to_thread(
-        auth.resolve_identity, token, header_user)
+        auth.resolve_identity, token, header_user, header_department)
     path = request.url.path
     if path.startswith("/api/") and path not in ("/api/health", "/api/auth/login") \
             and request.state.user is None:

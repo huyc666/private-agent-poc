@@ -142,6 +142,10 @@ AUTH_IDENTITY_HEADER = os.environ.get("AUTH_IDENTITY_HEADER", "")
 # "127.0.0.1,10.0.0.0/8"）。留空 = 不信任任何身份头（fail-closed 默认）。
 # 仅配置了 AUTH_IDENTITY_HEADER 且来源命中此白名单时，SSO 身份头才生效。
 AUTH_PROXY_ALLOWED_IPS = os.environ.get("AUTH_PROXY_ALLOWED_IPS", "")
+# SSO 部门头（v0.17.11，PLAN 6.1）：可选。配置后受信代理可经该头透传用户部门
+# （如 X-Forwarded-Department），头值优先于本地用户表（IdP 是部门信息的权威源）；
+# 未配置 / 头缺失时使用本地表 department 字段。同样受 AUTH_PROXY_ALLOWED_IPS 保护。
+AUTH_IDENTITY_DEPARTMENT_HEADER = os.environ.get("AUTH_IDENTITY_DEPARTMENT_HEADER", "")
 
 SYSTEM_PROMPT = os.environ.get(
     "SYSTEM_PROMPT",

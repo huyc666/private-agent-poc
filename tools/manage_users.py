@@ -1,14 +1,16 @@
 #!/usr/bin/env python
-"""用户管理 CLI（v0.15.0）：签发 / 吊销 / 轮换 / 密码 / 列出 API Key 用户。
+"""用户管理 CLI（v0.15.0；v0.17.11 增加部门维度）：签发 / 吊销 / 轮换 / 密码 / 部门 / 列出 API Key 用户。
 
 用法（在 agent-poc 目录下）：
-    python tools/manage_users.py add <用户名> [--role user|approver|admin] [--days N]
+    python tools/manage_users.py add <用户名> [--role user|approver|admin] [--days N] [--department 部门]
     python tools/manage_users.py rotate <用户名> [--days N]
     python tools/manage_users.py passwd <用户名> [--password 明文]   # 不给则交互输入
+    python tools/manage_users.py setdept <用户名> <部门>             # 部门置空串即清除
     python tools/manage_users.py revoke <用户名>
     python tools/manage_users.py list
 
 --days N：Key 在 N 天后过期（0 = 永不过期）。
+--department：所属部门（v0.17.11，成本报表聚合/知识库分库权限维度，≤64 字）。
 rotate：为已有用户换发新 Key，旧 Key 立即失效。
 passwd：设置/重置登录密码（账号密码登录用，只存 PBKDF2 加盐散列）；
         --password 会留在 shell 历史里，仅建议脚本化场景使用。
@@ -39,6 +41,11 @@ def main() -> int:
     p_add.add_argument("--role", default="user", choices=auth.ROLES)
     p_add.add_argument("--days", type=int, default=0,
                        help="Key 有效期天数（0 = 永不过期）")
+    p_add.add_argument("--department", default="",
+                       help="所属部门（成本报表聚合/知识库分库权限维度）")
+    p_setdept = sub.add_parser("setdept", help="设置用户部门（空串清除）")
+    p_setdept.add_argument("username")
+    p_setdept.add_argument("department")
     p_rotate = sub.add_parser("rotate", help="换发新 Key（旧 Key 立即失效）")
     p_rotate.add_argument("username")
     p_rotate.add_argument("--days", type=int, default=0,
@@ -53,14 +60,23 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.cmd == "add":
-        key = auth.add_user(args.username, args.role, days=args.days)
+        key = auth.add_user(args.username, args.role, days=args.days,
+                            department=args.department)
         if key is None:
             print(f"创建失败：用户名「{args.username}」已存在或参数非法")
             return 1
         expiry = f"{args.days} 天后过期" if args.days > 0 else "永不过期"
-        print(f"用户「{args.username}」（角色 {args.role}，{expiry}）已创建。")
+        dept = f"，部门 {args.department}" if args.department else ""
+        print(f"用户「{args.username}」（角色 {args.role}{dept}，{expiry}）已创建。")
         print(f"一次性 API Key（请立即保存，不再显示）: {key}")
         return 0
+    if args.cmd == "setdept":
+        if auth.set_department(args.username, args.department):
+            dept = args.department if args.department else "（已清除）"
+            print(f"用户「{args.username}」部门已更新为 {dept}")
+            return 0
+        print(f"设置失败：用户「{args.username}」不存在或已吊销")
+        return 1
     if args.cmd == "rotate":
         key = auth.rotate_user(args.username, days=args.days)
         if key is None:
@@ -97,7 +113,7 @@ def main() -> int:
         print("（暂无用户；开放模式无需用户，认证模式用 add 创建）")
         return 0
     now = time.time()
-    print(f"{'用户名':<20} {'角色':<10} {'状态':<8} {'密码':<6} {'过期时间':<22} 创建时间")
+    print(f"{'用户名':<20} {'角色':<10} {'部门':<12} {'状态':<8} {'密码':<6} {'过期时间':<22} 创建时间")
     for u in users:
         if u["revoked"]:
             status = "已吊销"
@@ -106,7 +122,8 @@ def main() -> int:
         else:
             status = "正常"
         pwd = "已设置" if u.get("has_password") else "—"
-        print(f"{u['username']:<20} {u['role']:<10} {status:<8} {pwd:<6} "
+        dept = u.get("department") or "—"
+        print(f"{u['username']:<20} {u['role']:<10} {dept:<12} {status:<8} {pwd:<6} "
               f"{_fmt_ts(u.get('expires_at')):<22} {_fmt_ts(u['created'])}")
     return 0
 

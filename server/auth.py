@@ -88,6 +88,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # v0.15.0 账号密码登录迁移：password_hash 为 NULL 表示该用户禁用密码登录
     if "password_hash" not in cols:
         conn.execute("ALTER TABLE api_users ADD COLUMN password_hash TEXT")
+    # v0.17.11（PLAN 6.1）部门维度迁移：部门成本报表（6.2）、知识库分库权限（2.3）
+    # 的聚合/过滤维度。空串 = 未设置。
+    if "department" not in cols:
+        conn.execute(
+            "ALTER TABLE api_users ADD COLUMN department TEXT NOT NULL DEFAULT ''")
     # 登录令牌（pat-）：只存 sha256；过期即失效
     conn.execute("""
         CREATE TABLE IF NOT EXISTS auth_tokens (
@@ -114,10 +119,13 @@ def generate_key() -> str:
     return "pak-" + secrets.token_hex(16)
 
 
-def add_user(username: str, role: str = "user", days: int = 0) -> str | None:
+def add_user(username: str, role: str = "user", days: int = 0,
+             department: str = "") -> str | None:
     """创建用户并返回一次性明文 Key（只在此时可见）；用户名已存在或角色非法返回 None。
-    days>0 时 Key 在指定天数后过期（expires_at）；0 = 永不过期。"""
+    days>0 时 Key 在指定天数后过期（expires_at）；0 = 永不过期。
+    department（v0.17.11）：所属部门（成本报表聚合 / 知识库分库权限维度，≤64 字）。"""
     username = username.strip()
+    department = (department or "").strip()[:64]
     if not username or len(username) > 64 or role not in ROLES:
         return None
     key = generate_key()
@@ -130,8 +138,9 @@ def add_user(username: str, role: str = "user", days: int = 0) -> str | None:
                             (username,)).fetchone():
                 return None
             conn.execute(
-                "INSERT INTO api_users (username, key_hash, role, created, expires_at)"
-                " VALUES (?,?,?,?,?)", (username, _hash(key), role, time.time(), expires))
+                "INSERT INTO api_users (username, key_hash, role, created,"
+                " expires_at, department) VALUES (?,?,?,?,?,?)",
+                (username, _hash(key), role, time.time(), expires, department))
             conn.commit()
             return key
         finally:
@@ -194,9 +203,25 @@ def set_password(username: str, password: str) -> bool:
             conn.close()
 
 
+def set_department(username: str, department: str) -> bool:
+    """设置/清空用户部门（v0.17.11，PLAN 6.1）。用户不存在或已吊销返回 False。"""
+    with _lock:
+        conn = _connect()
+        try:
+            _ensure_schema(conn)
+            cur = conn.execute(
+                "UPDATE api_users SET department = ?"
+                " WHERE username = ? AND revoked = 0",
+                ((department or "").strip()[:64], username.strip()))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
 def login(username: str, password: str) -> dict | None:
     """账号密码登录：验证通过则签发 pat- 令牌（有效期 AUTH_TOKEN_TTL_HOURS）。
-    返回 {token, expires_at, identity:{username, role}}；失败（用户不存在/
+    返回 {token, expires_at, identity:{username, role, department}}；失败（用户不存在/
     已吊销/未设密码/密码错误/限流锁定中）一律返回 None，不区分原因（防用户名枚举）。
     v0.17.2：连续失败 LOGIN_MAX_FAILS 次锁定 LOGIN_LOCK_SECONDS。
     v0.17.6（架构评审 P3）：限流计数迁 STATE_DB login_fails 表——进程内存级
@@ -233,7 +258,7 @@ def login(username: str, password: str) -> dict | None:
                       f"（{int(lock_until - now)}s 后解锁）")
                 return None
             row = conn.execute(
-                "SELECT username, role, password_hash FROM api_users"
+                "SELECT username, role, password_hash, department FROM api_users"
                 " WHERE username = ? AND revoked = 0", (username,)).fetchone()
             if not row or not row["password_hash"] \
                     or not _verify_password(password, row["password_hash"]):
@@ -262,7 +287,8 @@ def login(username: str, password: str) -> dict | None:
                 " VALUES (?,?,?,?)", (_hash(token), row["username"], now, expires))
             conn.commit()
             return {"token": token, "expires_at": expires,
-                    "identity": {"username": row["username"], "role": row["role"]}}
+                    "identity": {"username": row["username"], "role": row["role"],
+                                 "department": row["department"]}}
         finally:
             conn.close()
 
@@ -278,7 +304,7 @@ def resolve_token(token: str) -> dict | None:
             _ensure_schema(conn)
             now = time.time()
             row = conn.execute(
-                "SELECT u.username, u.role FROM auth_tokens t"
+                "SELECT u.username, u.role, u.department FROM auth_tokens t"
                 " JOIN api_users u ON u.username = t.username"
                 " WHERE t.token_hash = ? AND t.expires_at > ? AND u.revoked = 0",
                 (_hash(token), now)).fetchone()
@@ -305,7 +331,7 @@ def user_by_name(username: str) -> dict | None:
         try:
             _ensure_schema(conn)
             row = conn.execute(
-                "SELECT username, role FROM api_users"
+                "SELECT username, role, department FROM api_users"
                 " WHERE username = ? AND revoked = 0", (username,)).fetchone()
             return dict(row) if row else None
         finally:
@@ -338,7 +364,8 @@ def proxy_ip_allowed(remote_host: str | None) -> bool:
     return any(ip in net for net in _allowed_proxy_nets)
 
 
-def resolve_identity(bearer_token: str, header_user: str = "") -> dict | None:
+def resolve_identity(bearer_token: str, header_user: str = "",
+                     header_department: str = "") -> dict | None:
     """SSO 钩子（v0.16.0）：身份解析的唯一入口，企业接入时替换/扩展此函数。
 
     优先级：
@@ -349,13 +376,18 @@ def resolve_identity(bearer_token: str, header_user: str = "") -> dict | None:
        ⚠️ v0.17.4（安全审计 F2）：身份头是否被信任由 main.auth_middleware
        依据 proxy_ip_allowed() 判定（来源须命中 AUTH_PROXY_ALLOWED_IPS 白名单），
        本函数只负责把已获信任的头映射到本地用户——直连端口伪造头不会到达此处。
+       v0.17.11（PLAN 6.1）：配置 AUTH_IDENTITY_DEPARTMENT_HEADER 后，受信代理
+       可经部门头透传部门，头值优先于本地表（IdP 是部门信息的权威源，本地可能滞后）。
     2. Bearer 凭据（pak- API Key / pat- 登录令牌）。
 
     扩展其他身份源（OIDC JWT 等）时在此加分支即可，下游角色判断、
     资源级 ACL、审批审计、token 计量全部不受影响。
     """
     if header_user:
-        return user_by_name(header_user)
+        ident = user_by_name(header_user)
+        if ident is not None and header_department:
+            ident["department"] = header_department.strip()[:64]
+        return ident
     if bearer_token:
         return resolve_credential(bearer_token)
     return None
@@ -400,7 +432,7 @@ def list_users() -> list[dict]:
         try:
             _ensure_schema(conn)
             rows = conn.execute(
-                "SELECT username, role, created, revoked, expires_at,"
+                "SELECT username, role, department, created, revoked, expires_at,"
                 " (password_hash IS NOT NULL) AS has_password"
                 " FROM api_users ORDER BY created").fetchall()
             return [dict(r) for r in rows]
@@ -418,7 +450,7 @@ def resolve_key(key: str) -> dict | None:
         try:
             _ensure_schema(conn)
             row = conn.execute(
-                "SELECT username, role FROM api_users"
+                "SELECT username, role, department FROM api_users"
                 " WHERE key_hash = ? AND revoked = 0"
                 " AND (expires_at IS NULL OR expires_at > ?)",
                 (_hash(key), time.time())).fetchone()
