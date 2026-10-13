@@ -53,33 +53,82 @@ def create_skill(name: str, description: str, instructions: str,
 # ---------------------------------------------------------------- 自定义工具（对话式创建，免重启）
 
 def list_custom_tools() -> str:
-    """列出当前全部自定义工具（custom_tools/ 目录中的动态工具，含名称与功能描述）。"""
+    """列出当前可用的自定义工具（通用工具 + 当前身份可见的专属工具，含名称与
+    功能描述）。user 角色仅见本人专属域工具；approver/admin 全局视图（专属工具
+    以「域/工具名」列出）；开放模式仅通用工具。"""
+    from . import auth
     items = custom_tools.list_custom_tools()
-    if not items:
+    role = auth.current_role()
+    scope = custom_tools.current_scope()
+    extra: list[dict] = []
+    if auth.enabled():
+        # 审查问题3修复：开放模式无专属域概念，短路避免误建 custom_tools_personal/
+        # 目录、也避免列出 run_custom_tool 实际拒绝执行的遗留工具（与技能层对齐）
+        if role == "user" and scope:
+            extra = custom_tools.list_personal_tools(scope)
+        elif role in ("approver", "admin"):
+            extra = custom_tools.list_personal_all()
+    if not items and not extra:
         return "当前没有自定义工具。可以用 create_custom_tool 工具创建一个。"
-    return "\n".join(f"- {t['name']}: {t['description']}" for t in items)
+    lines = [f"- {t['name']}: {t['description']}" for t in items]
+    if role == "user" and scope:
+        # 本人专属视图：条目来自 list_personal_tools（无 scope 键），平铺名称
+        # （与 run_custom_tool 的 name 参数一致，无需「域/」前缀）
+        lines += [f"- {t['name']}: {t['description']}（本人专属，经 run_custom_tool 调用）"
+                  for t in extra]
+    else:
+        # 全局视图：带「域/」前缀，跨域同名经 run_custom_tool 以「域/工具名」消歧
+        lines += [f"- {t['scope']}/{t['name']}: {t['description']}"
+                  f"（专属域：{t['scope']}，经 run_custom_tool 以「域/工具名」调用）"
+                  for t in extra]
+    return "\n".join(lines)
 
 
 async def create_custom_tool(name: str, code: str) -> str:
-    """创建一个新的自定义工具（危险操作：写入可执行 Python 代码，执行前需用户批准）。
-    name 为小写字母/数字/下划线（如 dice_roll）；code 为完整 Python 源文件，
-    必须定义一个与 name 同名、带 docstring 的顶层函数（docstring 即工具描述，会展示给模型），
-    参数带类型注解、返回 str。创建后无需重启，下一轮对话即可调用。"""
+    """创建一个新的自定义工具（写入可执行 Python 代码，通用工具属危险操作、
+    执行前需用户批准）。name 为小写字母/数字/下划线（如 dice_roll）；code 为
+    完整 Python 源文件，必须定义一个与 name 同名、带 docstring 的顶层函数
+    （docstring 即工具描述，会展示给模型），参数带类型注解、返回 str。
+    存储按角色分流（v0.17.12）：user 角色创建的工具落本人专属域
+    custom_tools_personal/<域>/（仅本人会话可见可用，自助落盘免审批，下一轮
+    对话起经 run_custom_tool 调用）；approver/admin 创建通用工具
+    （custom_tools/，全员可用，仍走审批门）。"""
+    from . import auth
+    scope = custom_tools.current_scope() if auth.current_role() == "user" else None
     err = custom_tools.validate_tool_code(name, code)
     if err:
         return f"创建失败：{err}"
+    if scope is not None:
+        # 专属域写入：影响面限于本人会话，自助落盘免审批（与技能层同原则）
+        return custom_tools.write_custom_tool(name, code, scope=scope)
     return approval.require_approval(
         "create_custom_tool", {"name": name, "code_preview": code[:300]},
         "工具创建", lambda: custom_tools.write_custom_tool(name, code))
 
 
 async def delete_custom_tool(name: str) -> str:
-    """删除一个已存在的自定义工具（危险操作，执行前需用户批准）。删除后无需重启，下一轮对话起不再可调用。"""
+    """删除一个已存在的自定义工具。删除通用工具属危险操作（执行前需用户批准）；
+    user 角色删除本人专属域工具为自助操作（免审批）。删除后无需重启，
+    下一轮对话起不再可调用。"""
+    from . import auth
+    role = auth.current_role()
+    scope = custom_tools.current_scope() if role == "user" else None
+    if scope is not None and custom_tools.personal_tool_path(name, scope) is not None:
+        # 本人专属工具：自助删除，免审批
+        return custom_tools.delete_custom_tool_file(name, scope=scope)
     if not any(t["name"] == name for t in custom_tools.list_custom_tools()):
         return f"自定义工具「{name}」不存在，可用 list_custom_tools 查看全部自定义工具"
     return approval.require_approval(
         "delete_custom_tool", {"name": name}, "工具删除",
         lambda: custom_tools.delete_custom_tool_file(name))
+
+
+async def run_custom_tool(name: str, args: dict) -> str:
+    """调用专属自定义工具（user 创建的专属域工具不直接挂载，需经本工具调用）。
+    name 为工具名（本人专属域），全局视图角色可用「域/工具名」消歧跨域同名；
+    args 为参数对象，键与工具函数参数一致。通用自定义工具已直接挂载，
+    直接调用即可，无需经本工具。他人专属工具不可见也不可调用。"""
+    return await custom_tools.run_personal_tool(name, args)
 
 
 # ---------------------------------------------------------------- 领域包管理
@@ -273,6 +322,7 @@ BUILTIN_TOOLS = [read_text_file, list_uploaded_docs, save_output_file,
                  run_python_code, delete_workspace_file,
                  list_skills_tool, load_skill, create_skill,
                  list_custom_tools, create_custom_tool, delete_custom_tool,
+                 run_custom_tool,
                  list_packs, enable_pack, disable_pack, create_pack, delete_pack,
                  sign_pack, research_topic]
 
@@ -317,6 +367,9 @@ def builtin_langchain_tools():
         StructuredTool.from_function(
             coroutine=delete_custom_tool, name="delete_custom_tool",
             description=delete_custom_tool.__doc__),
+        StructuredTool.from_function(
+            coroutine=run_custom_tool, name="run_custom_tool",
+            description=run_custom_tool.__doc__),
         StructuredTool.from_function(
             func=list_packs, name="list_packs",
             description=list_packs.__doc__),

@@ -12,6 +12,7 @@ import hmac
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -77,6 +78,9 @@ class ToolRequest(BaseModel):
     args: dict = {}
     pack: str = ""   # 领域包名；空 = custom_tools 目录
     env: dict = {}   # 包级环境变量（注入隔离子进程，仅接受合法变量名）
+    code: str = ""   # 工具源码直传（v0.17.12 专属工具：Agent 侧用户专属工具
+                     # 文件不在只读挂载的通用 custom_tools/ 中；与 /run 同等
+                     # 隔离执行，不新增攻击面；与 pack 互斥）
 
 
 @app.get("/health")
@@ -126,19 +130,20 @@ def run(req: RunRequest):
 
 @app.post("/run_tool", dependencies=[Depends(check_token)])
 def run_tool(req: ToolRequest):
-    """执行已审批的工具。工具代码来自 Agent 侧人工审批落盘的文件，
-    此处只做名称合法性/存在性校验，执行本身走与 /run 相同的隔离子进程。
+    """执行工具。工具代码来自 Agent 侧人工审批落盘的文件（只读挂载卷），
+    或专属工具场景随请求直传的源码（v0.17.12，与 /run 同等隔离执行）。
+    此处只做名称合法性/存在性/大小校验，执行本身走与 /run 相同的隔离子进程。
     pack 为空时从 custom_tools 目录取，否则从领域包的 tools/ 子目录取。"""
     if not _TOOL_NAME.match(req.name):
         return {"error": "非法工具名"}
-    if req.pack:
-        if not _PACK_NAME.match(req.pack):
-            return {"error": "非法领域包名"}
-        tool_dir = os.path.join(PACKS_DIR, req.pack, "tools")
-    else:
-        tool_dir = TOOLS_DIR
-    if not os.path.isfile(os.path.join(tool_dir, req.name + ".py")):
-        return {"error": f"工具「{req.name}」不存在"}
+    if req.code:
+        if req.pack:
+            return {"error": "code 与 pack 不能同时指定"}
+        if len(req.code.encode("utf-8")) > 20_000:
+            return {"error": "代码过长（>20KB），已拒绝"}
+    # 入参校验全部通过后才创建临时目录（审查问题2修复：此前以下 4 个提前
+    # return 位于 mkdtemp 之后、try/finally 之外，会泄漏含未审批源码的
+    # sbx_tool_* 临时目录）
     try:
         args_json = json.dumps(req.args, ensure_ascii=False)
     except (TypeError, ValueError) as e:
@@ -154,8 +159,35 @@ def run_tool(req: ToolRequest):
         env_extra[str(k)] = str(v)[:2000]
     if len(env_extra) > 50:
         return {"error": "环境变量过多（>50），已拒绝"}
-    res = _run_isolated({"code": _RUNNER, "extra": [req.name, tool_dir, args_json]},
-                        extra_env=env_extra)
+    if req.pack:
+        if not _PACK_NAME.match(req.pack):
+            return {"error": "非法领域包名"}
+        tool_dir = os.path.join(PACKS_DIR, req.pack, "tools")
+        if not os.path.isfile(os.path.join(tool_dir, req.name + ".py")):
+            return {"error": f"工具「{req.name}」不存在"}
+    elif req.code:
+        tool_dir = tempfile.mkdtemp(prefix="sbx_tool_")   # 直传源码落临时目录
+        try:
+            with open(os.path.join(tool_dir, req.name + ".py"),
+                      "w", encoding="utf-8") as f:
+                f.write(req.code)
+        except OSError:
+            shutil.rmtree(tool_dir, ignore_errors=True)   # 落盘失败不残留
+            return {"error": "工具源码落盘失败"}
+    else:
+        tool_dir = TOOLS_DIR
+        if not os.path.isfile(os.path.join(tool_dir, req.name + ".py")):
+            return {"error": f"工具「{req.name}」不存在"}
+    try:
+        res = _run_isolated({"code": _RUNNER, "extra": [req.name, tool_dir, args_json]},
+                            extra_env=env_extra)
+    finally:
+        if req.code:
+            # 直传源码的临时目录用后即删（不残留未审批代码）
+            try:
+                shutil.rmtree(tool_dir, ignore_errors=True)
+            except OSError:
+                pass
     if "error" in res:
         return res
     for line in res.get("output", "").splitlines():

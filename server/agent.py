@@ -78,10 +78,11 @@ def _rebuild_graph():
 
 
 def _dynamic_prompt(state: dict) -> list:
-    """动态系统提示词（v0.17.9）：静态部分 + 按当前请求身份注入的专属技能索引。
+    """动态系统提示词（v0.17.9）：静态部分 + 按当前请求身份注入的专属技能索引
+    与专属自定义工具索引（v0.17.12）。
     prompt callable 与 str prompt 同约定：state["messages"] 已是 pre_model_hook
     裁剪后的模型视野，返回 [SystemMessage] + messages。每轮模型调用执行一次，
-    只扫描本人专属技能目录（通用索引已随图重建缓存，无重复扫描成本）。"""
+    只扫描本人专属目录（通用索引已随图重建缓存，无重复扫描成本）。"""
     from langchain_core.messages import SystemMessage
 
     system = getattr(STATE, "system_prompt_static", "") or (
@@ -89,6 +90,9 @@ def _dynamic_prompt(state: dict) -> list:
     extra = skills.personal_index_prompt(skills.current_scope())
     if extra:
         system += extra
+    tool_extra = custom_tools.personal_index_prompt()
+    if tool_extra:
+        system += tool_extra
     msgs = state.get("messages") or []
     return [SystemMessage(content=system)] + list(msgs)
 

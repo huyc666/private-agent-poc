@@ -17,3 +17,5 @@ uploads/
 outputs/
 # 用户专属技能（v0.17.9：user 角色创建，仅本人可见，勿入库）
 skills_personal/
+# 用户专属自定义工具（v0.17.12：user 角色创建，仅本人可见，勿入库）
+custom_tools_personal/

@@ -87,6 +87,12 @@ PERSONAL_SKILLS_DIR = Path(os.environ.get(
 
 # ---- 自定义工具目录（对话式创建，免重启热加载）----
 CUSTOM_TOOLS_DIR = Path(os.environ.get("CUSTOM_TOOLS_DIR", str(PROJECT_ROOT / "custom_tools"))).resolve()
+# 用户专属自定义工具目录（v0.17.12）：user 角色创建的工具落到
+# custom_tools_personal/<域>/，仅本人会话可见可用（与技能层同机制：
+# 清单按请求身份过滤 + 执行时归属校验，不做按用户缓存图）；
+# approver/admin 创建的进通用 custom_tools/（全员共享，仍走审批门）。
+PERSONAL_CUSTOM_TOOLS_DIR = Path(os.environ.get(
+    "PERSONAL_CUSTOM_TOOLS_DIR", str(PROJECT_ROOT / "custom_tools_personal"))).resolve()
 
 # ---- Token 计量（按用户/任务/会话，SQLite 零依赖存储）----
 USAGE_DB = os.environ.get("USAGE_DB", str(PROJECT_ROOT / "usage.db"))
@@ -170,6 +176,6 @@ UPLOAD_PROMPT = (
     "（Word 文档传 as_docx=true 并以 .docx 命名，会自动套用公文版式），"
     "并在最终回复中附上工具返回的下载链接（/api/files/<域>/<文件名>）。\n"
     "- 与用户交流时只使用逻辑路径（skills/…、packs/…、custom_tools/…、"
-    "uploads/…、outputs/…），绝不提及服务器文件系统的绝对路径"
+    "custom_tools_personal/…、uploads/…、outputs/…），绝不提及服务器文件系统的绝对路径"
     "（如盘符/用户目录/项目部署位置）——部署布局属于内部信息。"
 )
