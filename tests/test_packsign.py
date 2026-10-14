@@ -1,0 +1,95 @@
+"""领域包可信签名：HMAC-SHA256 compute/verify 往返、篡改失效、幂等重签、信任状态四态。"""
+import pytest
+
+from server import config, packsign
+
+
+@pytest.fixture
+def key(monkeypatch):
+    monkeypatch.setattr(config, "PACK_SIGNING_KEY", "testkey")
+    return b"testkey"
+
+
+@pytest.fixture
+def pack_dir(tmp_path):
+    d = tmp_path / "signed-pack"
+    d.mkdir()
+    (d / "pack.yaml").write_text(
+        "name: signed-pack\nversion: '0.1.0'\ndescription: 测试\n", encoding="utf-8")
+    (d / "tools").mkdir()
+    (d / "tools" / "greet.py").write_text("def greet():\n    pass\n", encoding="utf-8")
+    (d / "skills").mkdir()
+    (d / "skills" / "demo").mkdir()
+    (d / "skills" / "demo" / "SKILL.md").write_text("内容\n", encoding="utf-8")
+    (d / "prompt.md").write_text("提示词\n", encoding="utf-8")
+    return d
+
+
+def test_not_enforced_by_default():
+    # conftest 未配密钥（开放模式，POC 默认）
+    assert config.PACK_SIGNING_KEY == ""
+    assert not packsign.is_enforced()
+
+
+def test_is_enforced(key):
+    assert packsign.is_enforced()
+
+
+def test_compute_verify_roundtrip(key, pack_dir):
+    sig = packsign.compute(pack_dir)
+    assert sig.startswith("hmac-sha256:")
+    assert packsign.verify(pack_dir, sig)
+
+
+def test_verify_rejects_bad_format(key, pack_dir):
+    assert not packsign.verify(pack_dir, "deadbeef")           # 无签名前缀
+    assert not packsign.verify(pack_dir, "")                   # 空签名
+
+
+def test_tamper_invalidates(key, pack_dir):
+    sig = packsign.compute(pack_dir)
+    (pack_dir / "prompt.md").write_text("被篡改的提示词\n", encoding="utf-8")
+    assert not packsign.verify(pack_dir, sig)                  # 签名随内容变化失效
+
+
+def test_manifest_signature_line_excluded_from_payload(key, pack_dir):
+    """pack.yaml 的 signature 行不进签名载荷 → 重签幂等（写签名不改变内容哈希）。"""
+    sig1 = packsign.sign_pack_files(pack_dir)
+    assert packsign.read_signature(pack_dir) == sig1
+    sig2 = packsign.sign_pack_files(pack_dir)                  # 再签一次
+    assert sig1 == sig2
+    assert packsign.verify(pack_dir, sig2)
+    text = (pack_dir / "pack.yaml").read_text(encoding="utf-8")
+    assert sum(1 for l in text.splitlines()
+               if l.strip().startswith("signature:")) == 1     # 只有一行签名
+
+
+def test_sign_pack_files_without_key_returns_empty(pack_dir, monkeypatch):
+    monkeypatch.setattr(config, "PACK_SIGNING_KEY", "")
+    assert packsign.sign_pack_files(pack_dir) == ""
+
+
+def test_trust_status_four_states(key, pack_dir):
+    # 1) unsigned：包无签名
+    assert packsign.trust_status(pack_dir, "") == "unsigned"
+    # 2) signed：签名且校验通过
+    sig = packsign.sign_pack_files(pack_dir)
+    assert packsign.trust_status(pack_dir, packsign.read_signature(pack_dir)) == "signed"
+    # 3) invalid：内容被篡改
+    (pack_dir / "prompt.md").write_text("篡改\n", encoding="utf-8")
+    assert packsign.trust_status(pack_dir, sig) == "invalid"
+    # 4) signed-unverified：带签名但本机未配密钥，无法校验（仅声明，不代表可信）
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(config, "PACK_SIGNING_KEY", "")
+    try:
+        assert packsign.trust_status(pack_dir, sig) == "signed-unverified"
+    finally:
+        monkeypatch.undo()
+
+
+def test_signature_covers_subdirs(key, pack_dir):
+    """签名覆盖 tools/**、skills/** 全部文件：子目录新增文件同样使旧签名失效。"""
+    sig = packsign.compute(pack_dir)
+    sub = pack_dir / "tools" / "extra.py"
+    sub.write_text("x = 1\n", encoding="utf-8")
+    assert not packsign.verify(pack_dir, sig)
