@@ -1,11 +1,12 @@
 # Private Agent POC — 私有化 Agent 开发运行框架
 
-**版本：v0.17.18**（2026-10-15）
+**版本：v0.17.19**（2026-10-15）
 
 最小可运行的私有化 Agent 框架：**vLLM（Qwen 27B）+ LangGraph（Agent 循环 + 多 Agent 编排）+ MCP（工具协议）+ Skills（技能系统）+ 对话式自定义工具 + 人工审批流 + 代码沙箱 + Langfuse 观测 + FastAPI（SSE 流式接口）+ 离线聊天前端**。
 
 ## 版本记录
 
+- **v0.17.19**：多 Agent 编排通用化——原调研专用能力扩展为通用子任务编排（工具更名 `orchestrate_subtasks`）：任意可拆分任务（多角度调研、方案对比、批量文档处理、多维度分析）均可拆为多个子任务并行执行后整合；任务过于简单时不强行拆分。并行执行、安全工具隔离、资源上限等机制不变。
 - **v0.17.18**：领域包按角色限制使用范围（包级 RBAC）——包声明可配置允许使用的角色白名单（不配置则不限制，保持既有行为）；受限包对无权角色双重不可用：对话中看不到该包的能力说明，直接调用也会被拒绝（管理员全局可用）；白名单配置错误（空列表、非法角色名）时整包标记为错误并提示原因，避免包静默失效。新增 16 个离线用例，全量 362 个用例通过。
 
 - **v0.17.17**：安全防线拒绝路径测试补齐——针对分支覆盖审查发现的「测试只打到放行侧」问题，新增 32 个离线用例逐个触发各安全防线的拒绝分支：上传/技能包的空请求体与超大请求拒绝、docx 解压超限拒绝、路径穿越文件名拒绝、技能包 zip 炸弹上限、登录限流表容量控制（清已解锁/超限全清）、SSO 身份头来源校验（非受信来源忽略、白名单解析失效即整体弃用）、会话越权 403 与角色放行、专属自定义工具归属校验与沙箱不可达拒绝、包签名未启用/包缺失/签名失败、审批超时竞态以决议为准、凭据解析对非法哈希与非法令牌的拒绝。全量 346 个离线用例通过，安全模块分支覆盖显著提升（approval 100%、auth 98%、tools_builtin 95%）。
@@ -463,7 +464,7 @@ docker compose -f docker/docker-compose.langfuse.yml up -d
 2. ~~审批流~~：危险操作人工审批已交付 ✅（SSE 审批卡片 + fail-closed）
 3. ~~观测~~：Langfuse 已接入 ✅（Docker Desktop 观测栈实测通过：health 连接标志 + mock-chat trace/工具 span 上报）
 4. ~~持久化~~：checkpointer 可切换 PostgresSaver ✅（docker/docker-compose.postgres.yml，Docker Desktop 实测建表与跨连接读回通过；Windows 开发机保持 memory——psycopg 异步与 ProactorEventLoop 不兼容，启动时 fail-fast 明确提示）
-5. ~~多 Agent~~：orchestrator-worker 子图已交付 ✅（`research_topic` 工具：拆题 → Send 并行调研 → 汇总；worker 只持安全工具子集，中间 token 经标签过滤不进主流）
+5. ~~多 Agent~~：orchestrator-worker 子图已交付 ✅（v0.17.19 起泛化为通用子任务编排 `orchestrate_subtasks`：拆分子任务 → Send 并行执行 → 整合；worker 只持安全工具子集，中间 token 经标签过滤不进主流）
 6. ~~网关~~：LiteLLM 网关已交付 ✅（docker/docker-compose.gateway.yml：fallback/限流/审计；vLLM 宕机自动切 DeepSeek 实测通过）
 7. ~~领域包架构~~：第一期已交付 ✅（packs/ 可插拔领域能力：工具+技能+提示词一个目录打包，运行时启停免重启；示例包 weather-ops）
 8. ~~包脚手架~~：第二期已交付 ✅（`create_pack`/`delete_pack` 对话式建删包，模型现场编写清单与工具代码，审批落盘免重启挂载；core_version 强制校验）

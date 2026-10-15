@@ -1,5 +1,5 @@
 """tools_admin：管理类工具包装层——技能/自定义工具/领域包生命周期、
-worker 安全工具装配、多 Agent 调研入口、内置工具装配清单。审批分支以
+worker 安全工具装配、多 Agent 编排入口、内置工具装配清单。审批分支以
 patch_interrupt 模拟用户决议（与 test_approval 同一模式）。"""
 import asyncio
 
@@ -243,7 +243,7 @@ def test_delete_pack_missing_and_gated(login_as, patch_interrupt):
 
 # ---------------------------------------------------------------- worker 工具装配
 
-def test_research_tools_assembly(monkeypatch):
+def test_worker_tools_assembly(monkeypatch):
     from langchain_core.tools import StructuredTool
 
     def _f():
@@ -255,7 +255,7 @@ def test_research_tools_assembly(monkeypatch):
     STATE.pack_tools = {"pack_tool": fake_pack, "read_text_file": fake_dup}
     STATE.mcp_tools = {"get_city_weather": fake_mcp}
     try:
-        tools = tools_admin._research_tools()
+        tools = tools_admin._worker_tools()
         names = [t.name for t in tools]
         assert {"read_text_file", "list_uploaded_docs", "save_output_file",
                 "pack_tool", "get_city_weather"} <= set(names)
@@ -270,31 +270,31 @@ def test_research_tools_assembly(monkeypatch):
 
 # ---------------------------------------------------------------- 多 Agent 入口
 
-def test_research_topic_mock_mode():
+def test_orchestrate_subtasks_mock_mode():
     from server.state import STATE
     saved = STATE.llm
     STATE.llm = None
     try:
-        out = asyncio.run(tools_admin.research_topic("随便什么"))
+        out = asyncio.run(tools_admin.orchestrate_subtasks("随便什么"))
         assert "需要真实模型支持" in out
     finally:
         STATE.llm = saved
 
 
-def test_research_topic_success_and_failure_sanitized(monkeypatch):
+def test_orchestrate_subtasks_success_and_failure_sanitized(monkeypatch):
     from server.state import STATE
     saved = STATE.llm
     STATE.llm = object()                               # 有真实模型才进入编排
     try:
-        async def _ok(topic, llm, tools):
-            return "调研报告正文"
-        monkeypatch.setattr("server.multi_agent.run_research", _ok)
-        assert asyncio.run(tools_admin.research_topic("T")) == "调研报告正文"
+        async def _ok(task, llm, tools):
+            return "整合结果正文"
+        monkeypatch.setattr("server.multi_agent.run_orchestration", _ok)
+        assert asyncio.run(tools_admin.orchestrate_subtasks("T")) == "整合结果正文"
 
-        async def _boom(topic, llm, tools):
+        async def _boom(task, llm, tools):
             raise RuntimeError("部署路径/密钥等敏感细节")
-        monkeypatch.setattr("server.multi_agent.run_research", _boom)
-        out = asyncio.run(tools_admin.research_topic("T"))
+        monkeypatch.setattr("server.multi_agent.run_orchestration", _boom)
+        out = asyncio.run(tools_admin.orchestrate_subtasks("T"))
         assert "执行失败" in out
         assert "敏感细节" not in out                   # 异常原文不回显
     finally:
@@ -312,6 +312,6 @@ def test_builtin_langchain_tools_registry():
                 "list_custom_tools", "create_custom_tool", "delete_custom_tool",
                 "run_custom_tool",
                 "list_packs", "enable_pack", "disable_pack", "create_pack",
-                "delete_pack", "sign_pack", "research_topic"}
+                "delete_pack", "sign_pack", "orchestrate_subtasks"}
     assert expected <= names
     assert all(t.description for t in tools)          # docstring 即模型可见描述

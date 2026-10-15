@@ -433,7 +433,7 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
                 kind = event["event"]
                 if kind == "on_chat_model_stream":
                     # 多 Agent 子图（tag ma_worker）的中间 token 不进入用户可见流；
-                    # 其工具调用事件仍然透出，界面上可观察并行调研过程
+                    # 其工具调用事件仍然透出，界面上可观察并行执行过程
                     if any(t == "ma_worker" for t in event.get("tags", [])):
                         continue
                     chunk = event["data"]["chunk"]

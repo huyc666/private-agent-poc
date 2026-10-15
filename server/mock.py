@@ -120,9 +120,9 @@ async def _mock_stream_inner(user_text: str) -> AsyncIterator[dict]:
             yield {"type": "tool", "status": "end", "name": "list_skills_tool", "result": text}
             answer = (f"当前可用技能：\n\n{text}\n\n"
                       "可以继续试：「创建一个技能」体验制作流程，「加载 weather-report 技能」查看使用方式。")
-    elif any(k in user_text for k in ("调研", "research", "多agent", "多智能体")):
+    elif any(k in user_text for k in ("调研", "research", "多agent", "多智能体", "并行", "拆分")):
         # 演示：orchestrator-worker 编排流程（Mock 下不真跑子图，只演示事件流）
-        yield {"type": "tool", "status": "start", "name": "research_topic"}
+        yield {"type": "tool", "status": "start", "name": "orchestrate_subtasks"}
         await asyncio.sleep(0.3)
         for city in ("北京", "上海", "成都"):
             tname, w = await _query_weather_any(city)
@@ -131,17 +131,18 @@ async def _mock_stream_inner(user_text: str) -> AsyncIterator[dict]:
             yield {"type": "tool", "status": "start", "name": tname}
             yield {"type": "tool", "status": "end", "name": tname,
                    "result": w[:120]}
-        demo_report = ("多 Agent 调研完成：orchestrator 拆分为 3 个子问题，"
-                       "3 个 worker 并行调研后汇总。")
-        yield {"type": "tool", "status": "end", "name": "research_topic",
+        demo_report = ("多 Agent 编排完成：orchestrator 拆分为 3 个子任务，"
+                       "3 个 worker 并行执行后整合。")
+        yield {"type": "tool", "status": "end", "name": "orchestrate_subtasks",
                "result": demo_report}
         answer = (
-            f"已通过 `research_topic` 触发**多 Agent 编排**（orchestrator-worker）：\n\n"
+            f"已通过 `orchestrate_subtasks` 触发**多 Agent 编排**（orchestrator-worker）：\n\n"
             f"**{demo_report}**\n\n"
-            "流程：`plan`（orchestrator 拆题）→ `Send` 并行扇出 3 个 worker"
-            "（各带安全工具子集，无危险能力）→ `aggregate`（汇总报告）。\n\n"
+            "流程：`plan`（orchestrator 拆分子任务）→ `Send` 并行扇出 3 个 worker"
+            "（各带安全工具子集，无危险能力）→ `aggregate`（整合结果）。\n\n"
             "刚才流里 3 次天气工具调用就是 3 个 worker 各自查证的记录——"
-            "Mock 模式为演示数据；真实模式下拆题、调研、汇总都由模型完成。")
+            "Mock 模式为演示数据；真实模式下拆分、执行、整合都由模型完成。"
+            "除多角度调研外，方案对比、批量文档处理、多维度分析等可拆分任务同样适用。")
     elif "工具" in user_text and any(k in user_text for k in ("创建", "新建", "制作", "写一个")):
         # 演示：对话式创建自定义工具（写可执行代码，属危险操作，先审批后落盘）
         demo_code = (

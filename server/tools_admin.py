@@ -1,4 +1,4 @@
-"""管理类工具：技能 / 自定义工具 / 领域包 / 多 Agent 调研，以及内核工具装配清单。
+"""管理类工具：技能 / 自定义工具 / 领域包 / 多 Agent 编排，以及内核工具装配清单。
 
 这些工具是 Agent 对自身能力的「运行时管理接口」，全部经审批门
 （approval.require_approval）保护危险操作，fail-closed。
@@ -275,8 +275,8 @@ async def delete_pack(name: str) -> str:
 
 # ---------------------------------------------------------------- 多 Agent 编排
 
-def _research_tools() -> list:
-    """worker 调研员可用的安全工具子集（不含删文件/建工具等危险能力）。"""
+def _worker_tools() -> list:
+    """worker 执行者可用的安全工具子集（不含删文件/建工具/跑沙箱等危险能力）。"""
     from langchain_core.tools import StructuredTool
 
     tools = [
@@ -304,20 +304,21 @@ def _research_tools() -> list:
     return tools
 
 
-async def research_topic(topic: str) -> str:
-    """多 Agent 并行调研：把一个复杂调研主题拆成 2~4 个子问题，多个调研 Agent 并行查证
-    （各自可用天气/计算/读文件等工具），最后汇总为一份中文 Markdown 报告。
-    适用于需要多角度查证、对比、汇总的复杂任务；简单问答、单点查询不要使用本工具。
-    topic 为完整的调研主题描述。"""
+async def orchestrate_subtasks(task: str) -> str:
+    """多 Agent 并行编排：把一个复杂任务拆成 2~4 个可独立完成的子任务，多个执行
+    Agent 并行处理（各自可用读文件/存产出/计算等工具），最后整合为一份完整的
+    中文 Markdown 回答。适用于需要多角度拆解的任务：多角度调研、方案对比、
+    批量文档处理、多维度分析等；简单问答、单点查询不要使用本工具。
+    task 为完整的任务描述。"""
     if STATE.llm is None:
-        return "多 Agent 调研需要真实模型支持（当前为 Mock 模式）"
+        return "多 Agent 编排需要真实模型支持（当前为 Mock 模式）"
     from . import multi_agent
     try:
-        return await multi_agent.run_research(topic, STATE.llm, _research_tools())
+        return await multi_agent.run_orchestration(task, STATE.llm, _worker_tools())
     except Exception as e:
         # 不回显原始异常文本（P1-3 约定），细节仅进服务端日志
-        print(f"[tools] 多 Agent 调研执行失败: {e}")
-        return f"多 Agent 调研执行失败（{type(e).__name__}），请稍后重试"
+        print(f"[tools] 多 Agent 编排执行失败: {e}")
+        return f"多 Agent 编排执行失败（{type(e).__name__}），请稍后重试"
 
 
 # ---------------------------------------------------------------- 工具装配清单
@@ -328,7 +329,7 @@ BUILTIN_TOOLS = [read_text_file, list_uploaded_docs, save_output_file,
                  list_custom_tools, create_custom_tool, delete_custom_tool,
                  run_custom_tool,
                  list_packs, enable_pack, disable_pack, create_pack, delete_pack,
-                 sign_pack, research_topic]
+                 sign_pack, orchestrate_subtasks]
 
 
 def builtin_langchain_tools():
@@ -393,6 +394,6 @@ def builtin_langchain_tools():
             coroutine=sign_pack, name="sign_pack",
             description=sign_pack.__doc__),
         StructuredTool.from_function(
-            coroutine=research_topic, name="research_topic",
-            description=research_topic.__doc__),
+            coroutine=orchestrate_subtasks, name="orchestrate_subtasks",
+            description=orchestrate_subtasks.__doc__),
     ]

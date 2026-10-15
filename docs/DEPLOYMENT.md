@@ -20,7 +20,7 @@
 功能一览（全部已在 DeepSeek deepseek-chat 真实链路实测通过）：
 
 - **Agent 循环**：LangGraph ReAct + SSE 流式输出 + 会话记忆
-- **多 Agent 编排**：`research_topic` 工具触发 orchestrator-worker 子图（拆题 → Send 并行调研 → 汇总），worker 只持安全工具子集
+- **多 Agent 编排**：`orchestrate_subtasks` 工具触发 orchestrator-worker 子图（拆分子任务 → Send 并行执行 → 整合），worker 只持安全工具子集；调研、对比、批量处理等可拆分任务通用
 - **工具三通道**：内置工具（进程内）/ MCP 工具（stdio 子进程）/ 对话式自定义工具（热加载）
 - **Skills 技能系统**：渐进式披露（索引注入系统提示词，按需 load_skill 拉全文）
 - **人工审批流**：危险操作三态（批准/拒绝/超时），fail-closed
@@ -339,7 +339,7 @@ agent-poc/
 ├── server/            # Agent 服务
 │   ├── main.py            # FastAPI 入口：/api/chat (SSE)、/api/approve、/api/health
 │   ├── agent.py           # LangGraph Agent 构建、内置工具、MCP 加载、热重载、流式输出
-│   ├── multi_agent.py     # 多 Agent 编排（orchestrator-worker 子图，research_topic 触发）
+│   ├── multi_agent.py     # 多 Agent 编排（orchestrator-worker 子图，orchestrate_subtasks 触发）
 │   ├── packs.py           # 领域包注册中心（扫描/pack.yaml 校验/挂载/启停，v0.8.0）
 │   ├── usage.py           # Token 计量（回调采集 + SQLite 聚合，v0.11.0）
 │   ├── custom_tools.py    # 自定义工具注册中心（ast 校验/签名提取/沙箱代理/本地加载）
