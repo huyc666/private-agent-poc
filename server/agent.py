@@ -191,7 +191,7 @@ async def _make_checkpointer():
                         "到 Linux Docker 机器再启用）")
             raise RuntimeError(
                 f"PostgreSQL checkpointer 连接失败: {e}{hint}。请确认已执行 "
-                "docker compose -f docker-compose.postgres.yml up -d，"
+                "docker compose -f docker/docker-compose.postgres.yml up -d，"
                 "或将 .env 改回 CHECKPOINTER=memory") from e
         STATE.checkpointer_cm = cm
         print(f"[agent] checkpointer: PostgresSaver @ {config.DATABASE_URL.split('@')[-1]}")

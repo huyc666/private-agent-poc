@@ -1,5 +1,5 @@
 # Langfuse v3 观测栈（可选）：追踪每次 Agent 调用的工具链、耗时、token 消耗
-# 用法：docker compose -f docker-compose.langfuse.yml up -d
+# 用法（项目根目录执行）：docker compose -f docker/docker-compose.langfuse.yml up -d
 # 首次启动 ClickHouse 迁移较慢（1~2 分钟），web 就绪后访问 http://localhost:3000
 # 端口被占用时可改宿主端口：LANGFUSE_WEB_PORT=3100 docker compose ... up -d
 # （Agent 侧 .env 同步设 LANGFUSE_HOST=http://localhost:3100；NEXTAUTH_URL 已随该参数联动）

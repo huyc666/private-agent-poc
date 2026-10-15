@@ -5,16 +5,13 @@ __pycache__/
 models/
 server.log
 server.pid
-# 运行时 SQLite 数据（会话/审批/计量，勿入库）
-state.db
-state.db-wal
-state.db-shm
-usage.db
-usage.db-wal
-usage.db-shm
+# 运行时数据目录（会话/审批/计量 SQLite，勿入库；v0.17.19 起默认 data/）
+data/
 # 运行时用户文件（v0.17.7 文档上传/模型产出，勿入库；多用户按域分目录）
 uploads/
 outputs/
+# 测试覆盖率数据（pytest-cov 生成，勿入库）
+.coverage
 # 用户专属技能（v0.17.9：user 角色创建，仅本人可见，勿入库）
 skills_personal/
 # 用户专属自定义工具（v0.17.12：user 角色创建，仅本人可见，勿入库）

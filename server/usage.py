@@ -7,7 +7,7 @@
 - stream_reply 开头用 contextvars 设置 (user_id, session_id, run_id)，
   回调读取上下文完成归属（asyncio 任务创建时复制上下文，嵌套调用同样生效）
 
-存储：SQLite（USAGE_DB，默认项目根 usage.db），私有化部署零额外组件；
+存储：SQLite（USAGE_DB，默认 data/usage.db 运行时目录），私有化部署零额外组件；
 生产可替换为 Postgres（表结构见 _ensure_schema）。
 
 维度定义：

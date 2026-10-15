@@ -245,7 +245,7 @@ def save_output_file(name: str, content: str, as_docx: bool = False) -> str:
 def run_python_code(code: str) -> str:
     """在隔离沙箱中运行 Python 代码并返回 stdout/stderr。仅在部署 Docker 沙箱服务并配置 SANDBOX_URL 后可用。"""
     if not config.SANDBOX_URL:
-        return ("代码执行未启用：需先部署 Docker 沙箱服务（docker-compose.sandbox.yml）"
+        return ("代码执行未启用：需先部署 Docker 沙箱服务（docker/docker-compose.sandbox.yml）"
                 "并配置 SANDBOX_URL。本框架不允许在未隔离环境中执行代码（fail-closed）。")
     try:
         headers = {"Content-Type": "application/json"}

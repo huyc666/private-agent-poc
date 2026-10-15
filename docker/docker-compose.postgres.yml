@@ -1,5 +1,5 @@
 # PostgreSQL：checkpointer 持久化（会话记忆与审批中断现场，重启不丢）
-# 用法：docker compose -f docker-compose.postgres.yml up -d
+# 用法（项目根目录执行）：docker compose -f docker/docker-compose.postgres.yml up -d
 # 然后在 .env 配置：
 #   CHECKPOINTER=postgres
 #   DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/agent_poc

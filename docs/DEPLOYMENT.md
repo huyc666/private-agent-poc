@@ -74,8 +74,8 @@ Skills（「有哪些技能」「创建一个技能」）/ 自定义工具（「
 ### 步骤 1：部署 vLLM（GPU 机器）
 
 ```bash
-# 模型权重放入 ./models/Qwen3-27B（或修改 docker-compose.yml 的 MODEL_DIR/MODEL_PATH）
-docker compose up -d vllm
+# 模型权重放入 ./models/Qwen3-27B（或修改 docker/docker-compose.yml 的 MODEL_DIR/MODEL_PATH）
+docker compose -f docker/docker-compose.yml up -d vllm
 
 # 验证（首次加载模型需几分钟）
 curl http://localhost:8000/v1/models
@@ -110,7 +110,7 @@ curl http://localhost:7100/api/health   # mode 应为 "live"
 （OpenAI 兼容，MODEL_NAME 用逻辑名即可）：
 
 ```bash
-docker compose -f docker-compose.gateway.yml up -d
+docker compose -f docker/docker-compose.gateway.yml up -d
 curl http://127.0.0.1:4000/health/liveliness   # "I'm alive!"
 ```
 
@@ -141,7 +141,7 @@ requirements.txt 已锁定 `mcp>=1.10,<2`，如被冲掉请重装该约束）。
 ```bash
 # 先生成沙箱令牌（Agent 与沙箱必须一致；v0.17.4 起未配置令牌 = 拒绝执行）
 python3 -c "import secrets; print(secrets.token_hex(32))"
-SANDBOX_AUTH_TOKEN=<上面生成的令牌> docker compose -f docker-compose.sandbox.yml up -d
+SANDBOX_AUTH_TOKEN=<上面生成的令牌> docker compose -f docker/docker-compose.sandbox.yml up -d
 curl http://127.0.0.1:9001/health   # {"status":"ok","tools_dir":"/tools",...}
 ```
 
@@ -179,7 +179,7 @@ CPU 0.5 核 / 内存 256MB / PID 64 限额、仅监听 127.0.0.1。
 ### 步骤 4（可选）：部署 Langfuse 观测栈
 
 ```bash
-docker compose -f docker-compose.langfuse.yml up -d
+docker compose -f docker/docker-compose.langfuse.yml up -d
 # 首次启动 ClickHouse 迁移需 1~2 分钟
 curl http://localhost:3000/api/public/health   # {"status":"OK",...}
 ```
@@ -207,7 +207,7 @@ LANGFUSE_ENABLED=true
 换成 PostgreSQL 后服务重启不丢，也是多实例部署的前提：
 
 ```bash
-docker compose -f docker-compose.postgres.yml up -d
+docker compose -f docker/docker-compose.postgres.yml up -d
 docker exec poc-postgres pg_isready -U postgres   # accepting connections
 ```
 
@@ -280,12 +280,12 @@ Agent 服务确保完全生效。
 否则沙箱隔离执行时会失败。
 
 **Token 计量（v0.11.0 起）**：每次模型调用自动按 用户/任务/会话 三维度
-落账到 SQLite（`USAGE_DB`，默认 `usage.db`，零额外组件）。
+落账到 SQLite（`USAGE_DB`，默认 `data/usage.db`，零额外组件）。
 查询：`curl "http://localhost:7100/api/usage?days=7"` 返回总量 +
 按用户/会话/任务分组；前端每条回答下方展示本次消耗与会话累计，
 头部 👤 徽标切换用户标识（URL `?user=xxx` 亦可）。
 注意：vLLM 与 DeepSeek 均会返回 usage；若某提供方不返回，该次调用跳过不计。
-usage.db 是运行数据，备份/迁移时随项目目录一并处理即可。
+usage.db 是运行数据（v0.17.19 起默认在 `data/` 目录），备份/迁移时随该目录一并处理即可。
 
 ## 五、安全机制说明（评审要点）
 
@@ -326,7 +326,7 @@ usage.db 是运行数据，备份/迁移时随项目目录一并处理即可。
 | 模型不调用工具 | vLLM 缺少 `--enable-auto-tool-choice --tool-call-parser hermes` |
 | 工具列表少于 15 个 | 有旧进程残留占端口：`netstat -ano \| findstr 7100`，结束后重启（Windows 上 uvicorn 允许端口双绑，旧代码进程会抢答） |
 | 审批按钮提示「已失效」 | 审批超时 120 秒，重新发起操作；memory 模式下服务重启也会清空待审批现场 |
-| 启动报「PostgreSQL checkpointer 连接失败」 | postgres 未启动：`docker compose -f docker-compose.postgres.yml up -d`；Windows 开发机不支持 postgres 模式，改回 `CHECKPOINTER=memory` |
+| 启动报「PostgreSQL checkpointer 连接失败」 | postgres 未启动：`docker compose -f docker/docker-compose.postgres.yml up -d`；Windows 开发机不支持 postgres 模式，改回 `CHECKPOINTER=memory` |
 | 天气查询失败 | 本机无外网：配 WEATHER_API_URL 指向内部代理；兜底源可用 WEATHER_ITBOY_ENABLED 开关 |
 | 自定义工具没生效 | `/api/health` 看 `custom_tools_exec`；`sandbox-down` 表示强制沙箱但不可达（fail-closed）；工具文件损坏会跳过并打日志 |
 | 领域包没挂载 | `/api/health` 看 `packs` 字段的状态与 error（缺 pack.yaml / requires_env 未满足 / 包名与目录不一致）；ENABLED_PACKS 白名单不含该包也会显示已禁用 |
@@ -356,12 +356,8 @@ agent-poc/
 ├── tools/             # MCP Server 示例（stdio）：目录列举、字数统计、天气
 ├── sandbox/           # 代码沙箱（Dockerfile + FastAPI 执行器：/run + /run_tool）
 ├── web/index.html     # 聊天前端（零 CDN，断网可用）
-├── docker-compose.yml           # vLLM
-├── docker-compose.langfuse.yml  # 观测栈
-├── docker-compose.sandbox.yml   # 代码沙箱（含 custom_tools 只读挂载）
-├── gateway/           # LiteLLM 网关配置（路由/限流/fallback，纯 ASCII）
-├── docker-compose.gateway.yml   # LiteLLM 网关
-├── docker-compose.postgres.yml  # PostgreSQL（checkpointer 持久化）
+├── docker/           # docker compose 编排（vLLM / 沙箱 / 观测栈 / 网关 / PostgreSQL）
+├── gateway/          # LiteLLM 网关配置（路由/限流/fallback，纯 ASCII）
 ├── .env.example       # 全部配置项（复制为 .env）
 └── requirements.txt
 ```

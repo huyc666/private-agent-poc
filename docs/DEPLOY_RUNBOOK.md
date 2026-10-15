@@ -66,7 +66,7 @@ PACK_SIGNING_KEY=<K1>
 AUTH_ENABLED=true
 AUTH_BOOTSTRAP_ADMIN=admin
 AUTH_TOKEN_TTL_HOURS=12
-STATE_DB=./state.db
+STATE_DB=./data/state.db
 EOF
 chmod 600 .env
 ```
@@ -83,7 +83,7 @@ chmod 600 .env
 2. 删除 `router_settings.fallbacks` 一行（或改为第二台 vLLM）；
 3. `general_settings.master_key` 改为 `<K2>`。
 
-编辑 `docker-compose.postgres.yml`：`POSTGRES_PASSWORD` 改为 `<K3>`。
+编辑 `docker/docker-compose.postgres.yml`：`POSTGRES_PASSWORD` 改为 `<K3>`。
 
 **验收点**：`grep -n deepseek gateway/litellm_config.yaml` 无输出；
 `grep master_key gateway/litellm_config.yaml` 显示新密钥。
@@ -94,7 +94,7 @@ chmod 600 .env
 
 ```bash
 export MODEL_DIR=./models MODEL_PATH=/models/Qwen3-27B
-docker compose up -d vllm
+docker compose -f docker/docker-compose.yml up -d vllm
 docker logs -f poc-vllm        # 等待 "Application startup complete"（首载 5-15 分钟）
 curl http://127.0.0.1:8000/v1/models
 ```
@@ -106,15 +106,15 @@ curl http://127.0.0.1:8000/v1/models
 ## Step 6 · 启动 PostgreSQL / 沙箱 / 网关
 
 ```bash
-docker compose -f docker-compose.postgres.yml up -d
-docker compose -f docker-compose.sandbox.yml  up -d   # 自动读 .env 的 SANDBOX_AUTH_TOKEN 注入容器
-docker compose -f docker-compose.gateway.yml  up -d
+docker compose -f docker/docker-compose.postgres.yml up -d
+docker compose -f docker/docker-compose.sandbox.yml  up -d   # 自动读 .env 的 SANDBOX_AUTH_TOKEN 注入容器
+docker compose -f docker/docker-compose.gateway.yml  up -d
 ```
 
 **验收点**（逐条 200/healthy）：
 
 ```bash
-docker compose -f docker-compose.postgres.yml ps    # healthy
+docker compose -f docker/docker-compose.postgres.yml ps    # healthy
 curl http://127.0.0.1:9001/health                   # 沙箱 200
 curl -X POST http://127.0.0.1:9001/run -H 'Content-Type: application/json' \
   -d '{"code":"print(1)"}'                           # 无令牌 → 401/503 拒绝（fail-closed 生效）
@@ -184,7 +184,7 @@ kill $(pgrep -f "server/main.py")
 ## 上线后运维速查
 
 - **手工放包**：直接向 `packs/` 拷贝目录**不会热生效**（扫描结果有内存缓存）——重启服务生效，或走对话式创建流程（对话中让 Agent 调 `create_pack`，审批落盘后免重启挂载）；强制签名模式下手工包还需 `tools/sign_pack.py <包名>` 签名
-- **备份**：`state.db`、`usage.db`、PostgreSQL 数据卷
+- **备份**：`data/`（state.db、usage.db 所在运行时目录）、PostgreSQL 数据卷
 - **密钥轮换**：换 `PACK_SIGNING_KEY` 后必须 `tools/sign_pack.py --all` 重签
 - **用户轮换**：`manage_users.py rotate <用户名> --days N`，旧 Key 立即失效
 - **水平扩展**：前置负载均衡 + 多副本 Agent（状态已外置，见 CONCURRENCY.md 第六节）

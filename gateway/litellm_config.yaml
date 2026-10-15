@@ -2,7 +2,7 @@
 # NOTE: keep this file pure ASCII - litellm reads YAML with the OS default
 # encoding, and non-ASCII bytes break startup on zh-CN Windows (GBK).
 #
-# Docker:        docker compose -f docker-compose.gateway.yml up -d
+# Docker:        docker compose -f docker/docker-compose.gateway.yml up -d
 # No Docker:     pip install "litellm[proxy]" && \
 #                DEEPSEEK_API_KEY=sk-... litellm --config gateway/litellm_config.yaml --port 4000
 # Agent .env:    LLM_BASE_URL=http://127.0.0.1:4000/v1

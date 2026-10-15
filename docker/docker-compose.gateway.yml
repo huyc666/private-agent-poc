@@ -1,5 +1,5 @@
 # LiteLLM 网关（可选但生产推荐）：LLM 请求统一入口
-# 用法：docker compose -f docker-compose.gateway.yml up -d
+# 用法（项目根目录执行）：docker compose -f docker/docker-compose.gateway.yml up -d
 # 然后在 .env 配置：
 #   LLM_BASE_URL=http://127.0.0.1:4000/v1
 #   LLM_API_KEY=sk-poc-gateway
@@ -16,7 +16,7 @@ services:
     ports:
       - "127.0.0.1:4000:4000"   # 仅本机 Agent 服务可达
     volumes:
-      - ./gateway/litellm_config.yaml:/app/config.yaml:ro
+      - ../gateway/litellm_config.yaml:/app/config.yaml:ro
     environment:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}   # 从宿主环境/.env 注入，不落盘到镜像
     command: ["--config", "/app/config.yaml", "--port", "4000"]

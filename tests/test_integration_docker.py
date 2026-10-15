@@ -2,11 +2,11 @@
 
 默认跳过；设 RUN_DOCKER_TESTS=1 并启动对应栈后运行：
     # 1) Langfuse（本机惯例 3100 端口，预置密钥 pk-lf-local/sk-lf-local）
-    $env:LANGFUSE_WEB_PORT="3100"; docker compose -f docker-compose.langfuse.yml up -d
+    $env:LANGFUSE_WEB_PORT="3100"; docker compose -f docker/docker-compose.langfuse.yml up -d
     # 2) PostgreSQL checkpointer
-    docker compose -f docker-compose.postgres.yml up -d
+    docker compose -f docker/docker-compose.postgres.yml up -d
     # 3) 代码沙箱（令牌须与下方 SBX_TOKEN 一致）
-    $env:SANDBOX_AUTH_TOKEN="it-sbx-token"; docker compose -f docker-compose.sandbox.yml up -d --build
+    $env:SANDBOX_AUTH_TOKEN="it-sbx-token"; docker compose -f docker/docker-compose.sandbox.yml up -d --build
     # 运行
     $env:RUN_DOCKER_TESTS="1"; & .venv\\Scripts\\python.exe -B -m pytest tests/test_integration_docker.py -q
 """
@@ -49,7 +49,7 @@ def lf_live(monkeypatch):
     monkeypatch.setattr(telemetry, "_next_retry", 0.0)
     client = telemetry.get_client()
     if client is None:
-        pytest.fail("Langfuse 连接失败：先启动 docker-compose.langfuse.yml（3100 端口）")
+        pytest.fail("Langfuse 连接失败：先启动 docker/docker-compose.langfuse.yml（3100 端口）")
     yield client
     telemetry.flush()
 
@@ -130,7 +130,7 @@ def sbx_live(monkeypatch):
     out = tools_builtin.run_python_code("print('ping')")
     assert "ping" in out, ("沙箱不可达：先 $env:SANDBOX_AUTH_TOKEN="
                            "'it-sbx-token'; docker compose -f "
-                           "docker-compose.sandbox.yml up -d --build")
+                           "docker/docker-compose.sandbox.yml up -d --build")
     return tools_builtin
 
 

@@ -73,7 +73,7 @@
 
 ## 架构
 
-![架构图](architecture.png)
+![架构图](docs/architecture.png)
 
 ```
 浏览器 (web/index.html, 零 CDN 依赖，可断网运行)
@@ -86,7 +86,7 @@ LangGraph ReAct Agent (server/agent.py)  ← 通用内核：不含任何领域�
    │  工具调用                │  OpenAI 兼容接口
    ▼                          ▼
 内置工具 + MCP Server      vLLM 推理服务
-+ 自定义工具 + 领域包       (docker-compose.yml,
++ 自定义工具 + 领域包       (docker/docker-compose.yml,
 (packs/ 可插拔领域能力)      Qwen 27B + hermes 工具解析)
 ```
 
@@ -132,8 +132,13 @@ agent-poc/
 ├── sandbox/               # 代码执行沙箱服务（server.py + Dockerfile + entrypoint.sh 出网封锁，v0.17.1）
 ├── web/
 │   └── index.html         # 聊天前端（内联样式脚本，内网离线可用）
-├── docker-compose.yml     # vLLM 推理服务（GPU）
-├── docker-compose.sandbox.yml   # 沙箱服务（含出网封锁与令牌鉴权）
+├── docker/                # 全部 docker compose 编排文件
+│   ├── docker-compose.yml           # vLLM 推理服务（GPU）
+│   ├── docker-compose.sandbox.yml   # 沙箱服务（含出网封锁与令牌鉴权）
+│   ├── docker-compose.langfuse.yml  # Langfuse 观测栈
+│   ├── docker-compose.postgres.yml  # PostgreSQL（checkpointer 持久化）
+│   └── docker-compose.gateway.yml   # LiteLLM 网关（fallback/限流/审计）
+├── docs/                  # 设计与部署文档（README 之外的 .md 与架构图）
 ├── requirements.txt
 ├── .env.example           # 复制为 .env 后按需修改
 └── package.json           # npm run dev 快捷启动
@@ -289,7 +294,7 @@ MODEL_NAME=deepseek-chat        # 或 deepseek-reasoner（R1 推理模型）
 2. 把模型放到 `./models/Qwen3-27B`（或修改 compose 里的 `MODEL_DIR`/`MODEL_PATH`），然后：
 
    ```bash
-   docker compose up -d vllm
+   docker compose -f docker/docker-compose.yml up -d vllm
    curl http://localhost:8000/v1/models     # 确认模型就绪
    ```
 
@@ -329,8 +334,8 @@ MODEL_NAME=deepseek-chat        # 或 deepseek-reasoner（R1 推理模型）
 | `PACK_SIGNING_KEY` | 空（开放模式） | 配置后进入强制模式：未签名/篡改整包不加载（v0.13.0） |
 | `SANDBOX_URL` | 空（拒绝执行） | 沙箱服务地址；未配置时 `run_python_code` fail-closed |
 | `SANDBOX_AUTH_TOKEN` | 空 | Agent↔沙箱共享令牌（`X-Sandbox-Token`，v0.17.1）；沙箱侧未配置令牌时默认拒绝执行，仅 `SANDBOX_OPEN_MODE=true` 显式放开（v0.17.4 F3） |
-| `STATE_DB` | `./state.db` | 会话/审批/租约锁 SQLite 库（v0.13.0；跨机多副本须换 Postgres） |
-| `USAGE_DB` | `./usage.db` | Token 计量 SQLite 库（v0.11.0） |
+| `STATE_DB` | `./data/state.db` | 会话/审批/租约锁 SQLite 库（v0.13.0；跨机多副本须换 Postgres） |
+| `USAGE_DB` | `./data/usage.db` | Token 计量 SQLite 库（v0.11.0） |
 | `CHECKPOINTER` | `memory` | `postgres` 可切换持久化（Windows 开发机仅支持 memory） |
 | `AUTH_ENABLED` | 联动 `MOCK_LLM`（v0.17.6） | Mock=开发者模式默认免登录；真实模式默认要求登录；显式设置可覆盖。true 时 Bearer 凭据 + 三级角色 |
 | `AUTH_IDENTITY_HEADER` | 空 | SSO 身份头（如 `X-Forwarded-User`，v0.16.0）；须配合 `AUTH_PROXY_ALLOWED_IPS` 白名单才生效（v0.17.4 F2） |
@@ -397,7 +402,7 @@ Mock 模式可直接演示：「有哪些技能」/「创建一个技能」/「�
   （worker 消耗在 `worker_tokens` 字段单独标记）
 - **归属**：`/api/chat` 请求携带 `user_id`（缺省 `anonymous`），每次请求生成 `run_id`；
   三个归属维度通过 contextvars 传给回调，嵌套调用同样生效
-- **存储**：SQLite（`USAGE_DB`，默认 `usage.db`），零额外组件；提供方未返回 usage 的调用跳过
+- **存储**：SQLite（`USAGE_DB`，默认 `data/usage.db`），零额外组件；提供方未返回 usage 的调用跳过
 - **查询**：`GET /api/usage?user_id=&session_id=&days=7` 返回
   总量 + 按用户 / 按会话 / 按任务（run）四组聚合
 - **展示**：前端每条回答下方显示「本次 X tokens（输入/输出）· 本会话累计 Y」；
@@ -411,7 +416,7 @@ POC 已接入 Langfuse：**默认关闭，服务器不可达时自动停用，�
 
 ```bash
 # 1. 起观测栈（6 个容器：web + worker + postgres + clickhouse + redis + minio）
-docker compose -f docker-compose.langfuse.yml up -d
+docker compose -f docker/docker-compose.langfuse.yml up -d
 
 # 2. 访问 http://localhost:3000（已预置初始化账号 admin@poc.local / admin1234）
 
@@ -450,16 +455,16 @@ docker compose -f docker-compose.langfuse.yml up -d
 - ✅ PostgresSaver 持久化：Docker Desktop 实测通过——`setup()` 自动建表（checkpoints/blobs/writes/migrations），跨连接 checkpoint 往返读回成功；Windows 开发机按文档 fail-fast 提示（psycopg 异步与 ProactorEventLoop 不兼容，保持 memory 即可）
 - ✅ 真实模型链路（DeepSeek deepseek-chat 云端实测通过）：模型自主工具调用、interrupt 审批中断→批准→恢复执行→落盘生效、Skills 自主选择加载、天气多数据源降级链（Open-Meteo 直达与 itboy 兜底均实测通过）
 
-**新机器部署请直接看 [DEPLOYMENT.md](DEPLOYMENT.md)（POC 部署手册）。** 生产上机另有 [PRODUCTION.md](PRODUCTION.md)（生产部署清单 + 验收用例）。
+**新机器部署请直接看 [DEPLOYMENT.md](docs/DEPLOYMENT.md)（POC 部署手册）。** 生产上机另有 [PRODUCTION.md](docs/PRODUCTION.md)（生产部署清单 + 验收用例）。
 
 ## 从 POC 到生产的路线图
 
-1. ~~沙箱~~：代码执行沙箱已交付 ✅（docker-compose.sandbox.yml，fail-closed）
+1. ~~沙箱~~：代码执行沙箱已交付 ✅（docker/docker-compose.sandbox.yml，fail-closed）
 2. ~~审批流~~：危险操作人工审批已交付 ✅（SSE 审批卡片 + fail-closed）
 3. ~~观测~~：Langfuse 已接入 ✅（Docker Desktop 观测栈实测通过：health 连接标志 + mock-chat trace/工具 span 上报）
-4. ~~持久化~~：checkpointer 可切换 PostgresSaver ✅（docker-compose.postgres.yml，Docker Desktop 实测建表与跨连接读回通过；Windows 开发机保持 memory——psycopg 异步与 ProactorEventLoop 不兼容，启动时 fail-fast 明确提示）
+4. ~~持久化~~：checkpointer 可切换 PostgresSaver ✅（docker/docker-compose.postgres.yml，Docker Desktop 实测建表与跨连接读回通过；Windows 开发机保持 memory——psycopg 异步与 ProactorEventLoop 不兼容，启动时 fail-fast 明确提示）
 5. ~~多 Agent~~：orchestrator-worker 子图已交付 ✅（`research_topic` 工具：拆题 → Send 并行调研 → 汇总；worker 只持安全工具子集，中间 token 经标签过滤不进主流）
-6. ~~网关~~：LiteLLM 网关已交付 ✅（docker-compose.gateway.yml：fallback/限流/审计；vLLM 宕机自动切 DeepSeek 实测通过）
+6. ~~网关~~：LiteLLM 网关已交付 ✅（docker/docker-compose.gateway.yml：fallback/限流/审计；vLLM 宕机自动切 DeepSeek 实测通过）
 7. ~~领域包架构~~：第一期已交付 ✅（packs/ 可插拔领域能力：工具+技能+提示词一个目录打包，运行时启停免重启；示例包 weather-ops）
 8. ~~包脚手架~~：第二期已交付 ✅（`create_pack`/`delete_pack` 对话式建删包，模型现场编写清单与工具代码，审批落盘免重启挂载；core_version 强制校验）
 9. ~~包级配置~~：第三期已交付 ✅（pack.yaml `env` 默认值注入 + `requires_modules` 依赖声明，fail-closed；沙箱模式 env 透传隔离子进程）

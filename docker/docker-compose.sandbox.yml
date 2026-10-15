@@ -1,5 +1,5 @@
 # 代码执行沙箱（可选但推荐）：run_python_code 工具的执行环境
-# 用法：docker compose -f docker-compose.sandbox.yml up -d
+# 用法（项目根目录执行）：docker compose -f docker/docker-compose.sandbox.yml up -d
 # 然后在 .env 配置 SANDBOX_URL=http://127.0.0.1:9001
 #
 # 锁定措施：
@@ -21,7 +21,7 @@
 # 与沙箱共用一个 internal 网络，去掉 ports 映射，仅保留出网封锁。
 services:
   sandbox:
-    build: ./sandbox
+    build: ../sandbox
     image: poc-sandbox:latest
     container_name: poc-sandbox
     restart: unless-stopped
@@ -51,6 +51,6 @@ services:
       SANDBOX_OPEN_MODE: "${SANDBOX_OPEN_MODE:-false}"
     volumes:
       # 已审批的自定义工具以只读卷挂入沙箱，/run_tool 端点在隔离子进程中执行它们
-      - ./custom_tools:/tools:ro
+      - ../custom_tools:/tools:ro
       # 领域包工具（/run_tool 带 pack 字段时从 /packs/<pack>/tools/ 取）
-      - ./packs:/packs:ro
+      - ../packs:/packs:ro

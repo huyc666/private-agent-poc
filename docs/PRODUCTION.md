@@ -21,10 +21,10 @@ python -c "import secrets; print(secrets.token_hex(32))"   # 生成 4 个不同�
 - [ ] `PACK_SIGNING_KEY`（包签名密钥，强制信任模式的根）
 - [ ] 网关 master key（替换 `sk-poc-gateway`）：改 `gateway/litellm_config.yaml` 的
       `master_key` + `.env` 的 `LLM_API_KEY`（两处一致）
-- [ ] PostgreSQL 密码（替换 `postgres`）：改 `docker-compose.postgres.yml` 的
+- [ ] PostgreSQL 密码（替换 `postgres`）：改 `docker/docker-compose.postgres.yml` 的
       `POSTGRES_PASSWORD` + `.env` 的 `DATABASE_URL`（两处一致）
 - [ ] `SANDBOX_AUTH_TOKEN`（沙箱调用令牌，v0.17.4 起 fail-closed）：`.env` 与
-      `docker-compose.sandbox.yml` 读取同一个值（compose 用 `${SANDBOX_AUTH_TOKEN}`
+      `docker/docker-compose.sandbox.yml` 读取同一个值（compose 用 `${SANDBOX_AUTH_TOKEN}`
       自动从 `.env` 注入）；未配置时沙箱 `/run`、`/run_tool` 一律拒绝（503）
 
 ## 一·五、API 认证（v0.14.0，多用户必做）
@@ -55,13 +55,13 @@ python -c "import secrets; print(secrets.token_hex(32))"   # 生成 4 个不同�
 
 ## 三、启动（按序）
 
-- [ ] **vLLM**：`docker compose up -d vllm`
+- [ ] **vLLM**：`docker compose -f docker/docker-compose.yml up -d vllm`
   验收：`curl http://127.0.0.1:8000/v1/models` 返回 `qwen-27b`
-- [ ] **PostgreSQL**：`docker compose -f docker-compose.postgres.yml up -d`
-  验收：healthcheck 通过（`docker compose -f docker-compose.postgres.yml ps` 显示 healthy）
-- [ ] **沙箱**：`.env` 已配 `SANDBOX_AUTH_TOKEN` 后 `docker compose -f docker-compose.sandbox.yml up -d`
+- [ ] **PostgreSQL**：`docker compose -f docker/docker-compose.postgres.yml up -d`
+  验收：healthcheck 通过（`docker compose -f docker/docker-compose.postgres.yml ps` 显示 healthy）
+- [ ] **沙箱**：`.env` 已配 `SANDBOX_AUTH_TOKEN` 后 `docker compose -f docker/docker-compose.sandbox.yml up -d`
   验收：`curl http://127.0.0.1:9001/health` 返回 200；不带令牌调 `/run` 返回 401（fail-closed 生效）
-- [ ] **网关**：`docker compose -f docker-compose.gateway.yml up -d`
+- [ ] **网关**：`docker compose -f docker/docker-compose.gateway.yml up -d`
   验收：`curl http://127.0.0.1:4000/health/liveliness` 返回 200
 - [ ] **包签名**：`.env` 写入 `PACK_SIGNING_KEY` 后执行
   `python tools/sign_pack.py --all`（core-utils / weather-ops 用本机密钥重签）
@@ -82,7 +82,7 @@ SANDBOX_URL=http://127.0.0.1:9001
 SANDBOX_AUTH_TOKEN=<沙箱令牌>       # v0.17.4 起必填，未配置沙箱拒绝执行
 CUSTOM_TOOLS_EXEC=sandbox        # 强制沙箱执行自定义代码（不可达则 fail-closed）
 PACK_SIGNING_KEY=<包签名密钥>     # 强制信任模式
-STATE_DB=./state.db              # 会话/审批持久化；同机多进程可共享，跨机须换 Postgres
+STATE_DB=./data/state.db         # 会话/审批持久化；同机多进程可共享，跨机须换 Postgres
 ENABLED_PACKS=                   # 留空=全部；生产可显式白名单
 ```
 
@@ -100,11 +100,11 @@ ENABLED_PACKS=                   # 留空=全部；生产可显式白名单
 | 8 | 未签名拦截 | 手工放一个未签名包进 `packs/` | 整包 `unavailable`，不加载 |
 | 9 | token 计量 | 多轮对话后 `GET /api/usage` | 按用户/会话/任务三维度有记录且合计一致 |
 | 10 | 网关 fallback（如保留） | 停 vLLM 容器后对话 | 自动切备用模型；Agent 无感 |
-| 11 | 观测（可选） | 启动 `docker-compose.langfuse.yml` 并配置密钥后对话 | Langfuse 控制台可见完整 trace |
+| 11 | 观测（可选） | 启动 `docker/docker-compose.langfuse.yml` 并配置密钥后对话 | Langfuse 控制台可见完整 trace |
 
 ## 六、上线后运维要点
 
-- **备份**：`state.db`（会话/审批/审计）、`usage.db`（token 计量）、PostgreSQL 数据卷
+- **备份**：`data/` 目录（state.db 会话/审批/审计、usage.db token 计量）、PostgreSQL 数据卷
 - **密钥轮换**：更换 `PACK_SIGNING_KEY` 后必须 `tools/sign_pack.py --all` 重签全部包
 - **新增包流程**：代码审计 → 放入 `packs/` → `tools/sign_pack.py <包名>` → 对话中启用（挂审批）
 - **多副本扩展**（用户量增长时）：会话/审批/计量均已外置；checkpointer 已是 Postgres；

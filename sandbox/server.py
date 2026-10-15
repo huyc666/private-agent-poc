@@ -1,6 +1,6 @@
 """代码执行沙箱服务。
 
-⚠️ 安全前提：本服务只能运行在按 docker-compose.sandbox.yml 锁定的容器内
+⚠️ 安全前提：本服务只能运行在按 docker/docker-compose.sandbox.yml 锁定的容器内
 （无网络、只读文件系统、CPU/内存/PID 限额、no-new-privileges）。
 不要直接在宿主机上运行它来执行不可信代码。
 

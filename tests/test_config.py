@@ -1,7 +1,7 @@
-"""config.scope_clean：身份 → 文件域目录名的唯一清洗规则。
+"""config：scope_clean 身份清洗规则 + 运行时库迁移（v0.17.19）。
 
-端点侧（main._user_scope）与工具侧（tools_builtin._file_scope）共用，
-任何变体漂移都会破坏多用户文件隔离——此组用例锁定规则全貌。
+端点侧（main._user_scope）与工具侧（tools_builtin._file_scope）共用
+scope_clean，任何变体漂移都会破坏多用户文件隔离——此组用例锁定规则全貌。
 """
 from server import config
 
@@ -44,3 +44,42 @@ def test_leading_trailing_underscores_stripped():
 
 def test_scope_clean_is_deterministic():
     assert config.scope_clean("bad/name!#") == config.scope_clean("bad/name!#")
+
+
+# ---- 运行时库迁移（v0.17.19：根目录遗留 state.db/usage.db → data/）----
+
+def test_migrate_legacy_db_moves_root_dbs(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(config, "_DATA_DIR", tmp_path / "data")
+    (tmp_path / "state.db").write_bytes(b"x")
+    (tmp_path / "state.db-wal").write_bytes(b"w")
+    (tmp_path / "usage.db").write_bytes(b"u")
+    config._migrate_legacy_db("state.db")
+    config._migrate_legacy_db("usage.db")
+    d = tmp_path / "data"
+    assert (d / "state.db").read_bytes() == b"x"
+    assert (d / "state.db-wal").read_bytes() == b"w"
+    assert (d / "usage.db").read_bytes() == b"u"
+    assert not (tmp_path / "state.db").exists()
+    assert not (tmp_path / "state.db-wal").exists()
+    assert not (tmp_path / "usage.db").exists()
+
+
+def test_migrate_legacy_db_noop_when_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(config, "_DATA_DIR", tmp_path / "data")
+    config._migrate_legacy_db("state.db")   # 无遗留文件：不建库、不报错
+    assert not (tmp_path / "data" / "state.db").exists()
+
+
+def test_migrate_legacy_db_never_overwrites_existing(tmp_path, monkeypatch):
+    """data/ 已有现役库时不覆盖（根目录残留视为重启旧副本，等人工核对）。"""
+    monkeypatch.setattr(config, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(config, "_DATA_DIR", tmp_path / "data")
+    d = tmp_path / "data"
+    d.mkdir()
+    (d / "state.db").write_bytes(b"current")
+    (tmp_path / "state.db").write_bytes(b"stale")
+    config._migrate_legacy_db("state.db")
+    assert (d / "state.db").read_bytes() == b"current"
+    assert (tmp_path / "state.db").read_bytes() == b"stale"

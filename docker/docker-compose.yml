@@ -1,5 +1,5 @@
 # vLLM 推理服务：加载 Qwen 27B，提供 OpenAI 兼容接口 + 工具调用解析
-# 用法：docker compose up -d vllm
+# 用法（项目根目录执行）：docker compose -f docker/docker-compose.yml up -d vllm
 #
 # 显存参考（27B 模型）：
 #   FP16 约需 54GB+KV cache  →  A100/H100 80G 单卡，或 2×24G 设 --tensor-parallel-size 2
@@ -10,7 +10,7 @@ services:
     container_name: poc-vllm
     volumes:
       # 把本地下载好的模型目录挂进去（私有化场景一般用本地权重，不走 HuggingFace）
-      - ${MODEL_DIR:-./models}:/models
+      - ${MODEL_DIR:-../models}:/models
     command: >
       --model ${MODEL_PATH:-/models/Qwen3-27B}
       --served-model-name qwen-27b

@@ -94,8 +94,52 @@ CUSTOM_TOOLS_DIR = Path(os.environ.get("CUSTOM_TOOLS_DIR", str(PROJECT_ROOT / "c
 PERSONAL_CUSTOM_TOOLS_DIR = Path(os.environ.get(
     "PERSONAL_CUSTOM_TOOLS_DIR", str(PROJECT_ROOT / "custom_tools_personal"))).resolve()
 
+# ---- 运行时数据目录（v0.17.19：SQLite 运行库归位 data/，根目录只放工程文件）----
+_DATA_DIR = PROJECT_ROOT / "data"
+try:
+    _DATA_DIR.mkdir(exist_ok=True)
+except OSError as e:
+    print(f"[config] 运行时数据目录创建失败: {type(e).__name__}")
+
+
+def _migrate_legacy_db(name: str) -> None:
+    """把根目录遗留的 <name>（及 -wal/-shm 伴生文件）迁入 data/。
+    仅默认路径（env 未显式配置）时调用；幂等：源不存在直接跳过，data/ 已有
+    同名库则不覆盖（视为重启残留的旧副本，以 data/ 现役库为准）；跨进程并发
+    启动竞态吞异常，失败重试 3 次后放弃并 WARNING（不阻断启动，需人工迁移）。"""
+    import time
+
+    for suffix in ("", "-wal", "-shm"):
+        legacy = PROJECT_ROOT / (name + suffix)
+        if not legacy.is_file():
+            continue
+        try:
+            _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f"[config] WARNING: data/ 目录创建失败: {type(e).__name__}")
+            return
+        target = _DATA_DIR / (name + suffix)
+        if target.exists():
+            print(f"[config] WARNING: data/{name + suffix} 已存在，根目录遗留"
+                  f"{name + suffix} 未迁移（保留 data/ 现役库，请人工核对）")
+            continue
+        moved = False
+        for attempt in range(3):
+            try:
+                legacy.replace(target)
+                moved = True
+                break
+            except OSError:
+                time.sleep(0.2 * (attempt + 1))
+        if moved:
+            print(f"[config] 已迁移运行时库: {name + suffix} → data/")
+        else:
+            print(f"[config] WARNING: 根目录 {name + suffix} 迁移失败（3 次重试），"
+                  "请手动移动到 data/ 后重启")
+
+
 # ---- Token 计量（按用户/任务/会话，SQLite 零依赖存储）----
-USAGE_DB = os.environ.get("USAGE_DB", str(PROJECT_ROOT / "usage.db"))
+USAGE_DB = os.environ.get("USAGE_DB", str(_DATA_DIR / "usage.db"))
 
 # ---- 领域包（Domain Pack）：通用内核 + 可插拔领域能力 ----
 # 每个包是 packs/ 下的一个目录（pack.yaml + tools/ + skills/ + prompt.md），
@@ -113,7 +157,11 @@ PACK_SIGNING_KEY = os.environ.get("PACK_SIGNING_KEY", "")
 # 对话记录（sessions.py）与审批记录（approval.py）共用一个 SQLite 库；
 # WAL + busy_timeout 支持同机多进程共享同一库文件；跨机多副本须替换为 Postgres
 # （SQLite 不适合网络共享存储）。
-STATE_DB = os.environ.get("STATE_DB", str(PROJECT_ROOT / "state.db"))
+STATE_DB = os.environ.get("STATE_DB", str(_DATA_DIR / "state.db"))
+if "USAGE_DB" not in os.environ:
+    _migrate_legacy_db("usage.db")
+if "STATE_DB" not in os.environ:
+    _migrate_legacy_db("state.db")
 # 会话历史读取条数上限（展示/记录侧；模型上下文由 checkpointer 持有）
 SESSION_MAX_HISTORY = int(os.environ.get("SESSION_MAX_HISTORY", "20"))
 
