@@ -80,28 +80,32 @@ def _rebuild_graph():
     from langgraph.prebuilt import create_react_agent
 
     # checkpointer 是 interrupt 审批流的前提（中断现场需要落盘才能恢复）
-    # 静态系统提示词 = 基础 + 通用技能索引 + 上传说明 + 领域包片段（图重建时刷新）；
+    # 静态系统提示词 = 基础 + 通用技能索引 + 上传说明（图重建时刷新）；
+    # 领域包片段 PLAN 1.2 起随 _dynamic_prompt 按角色每轮注入（包级 RBAC 提示层）；
     # 本人专属技能索引按请求身份在 _dynamic_prompt 里每轮动态注入（v0.17.9）
     STATE.system_prompt_static = (
         config.SYSTEM_PROMPT + skills.skill_index_prompt() + config.UPLOAD_PROMPT)
-    fragments = packs.prompt_fragments()
-    if fragments:
-        STATE.system_prompt_static += "\n\n" + fragments
     STATE.agent = create_react_agent(STATE.llm, tools, prompt=_dynamic_prompt,
                                      checkpointer=STATE.checkpointer,
                                      pre_model_hook=_pre_model_hook)
 
 
 def _dynamic_prompt(state: dict) -> list:
-    """动态系统提示词（v0.17.9）：静态部分 + 按当前请求身份注入的专属技能索引
-    与专属自定义工具索引（v0.17.12）。
+    """动态系统提示词（v0.17.9）：静态部分 + 按当前请求身份注入的领域包片段
+    （PLAN 1.2 包级 RBAC：按角色过滤受限包的 prompt.md）+ 专属技能索引与
+    专属自定义工具索引（v0.17.12）。
     prompt callable 与 str prompt 同约定：state["messages"] 已是 pre_model_hook
     裁剪后的模型视野，返回 [SystemMessage] + messages。每轮模型调用执行一次，
     只扫描本人专属目录（通用索引已随图重建缓存，无重复扫描成本）。"""
     from langchain_core.messages import SystemMessage
 
+    from . import auth
+
     system = getattr(STATE, "system_prompt_static", "") or (
         config.SYSTEM_PROMPT + skills.skill_index_prompt() + config.UPLOAD_PROMPT)
+    fragments = packs.prompt_fragments(role=auth.current_role())
+    if fragments:
+        system += "\n\n" + fragments
     extra = skills.personal_index_prompt(skills.current_scope())
     if extra:
         system += extra

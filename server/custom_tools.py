@@ -366,10 +366,60 @@ def make_local_tool(path: Path):
         return None
 
 
-def build_tool(path: Path, pack: str = "", env: dict | None = None):
+def pack_role_denied(pack: str, allowed_roles: list | None,
+                     role: str | None = None) -> str | None:
+    """领域包 allowed_roles 执行侧校验（PLAN 1.2 包级 RBAC）。返回拒绝文案或
+    None（放行）。语义：未配置（空列表）不限制；admin 全局视图放行（开放模式/
+    匿名按 auth.current_role 契约同为 admin，行为等同不限制）；其余角色严格
+    白名单。执行入口校验是最终权限边界——提示层过滤（包片段）只防误触，
+    防不了提示词注入，二者缺一不可。"""
+    if not allowed_roles:
+        return None
+    if role is None:
+        from . import auth
+        role = auth.current_role()
+    if role == "admin" or role in allowed_roles:
+        return None
+    return (f"领域包「{pack}」仅限 {'、'.join(allowed_roles)} 角色使用，"
+            "当前身份无权限调用")
+
+
+def _guard_pack_tool(tool, pack: str, allowed_roles: list | None):
+    """包级 RBAC 执行侧包装：替换 StructuredTool 的执行入口（func/coroutine），
+    调用前先做 allowed_roles 校验。args_schema 与描述已按原函数构建，
+    仅替换执行函数不影响参数定义；同步/异步两条路径分别包装。"""
+    if tool is None or not allowed_roles:
+        return tool
+    if tool.func is not None:
+        orig = tool.func
+
+        def _guarded(*args, **kwargs):
+            denied = pack_role_denied(pack, allowed_roles)
+            if denied:
+                return denied
+            return orig(*args, **kwargs)
+
+        tool.func = _guarded
+    if getattr(tool, "coroutine", None) is not None:
+        orig_coro = tool.coroutine
+
+        async def _guarded_async(*args, **kwargs):
+            denied = pack_role_denied(pack, allowed_roles)
+            if denied:
+                return denied
+            return await orig_coro(*args, **kwargs)
+
+        tool.coroutine = _guarded_async
+    return tool
+
+
+def build_tool(path: Path, pack: str = "", env: dict | None = None,
+               allowed_roles: list | None = None):
     """按当前执行模式构建单个工具的 StructuredTool（领域包加载复用）。
     返回 None 表示构建失败（sandbox-down / 签名提取失败 / 本地导入失败）。
-    env 为包级环境变量生效值，仅沙箱模式随请求透传（local 模式已注入进程环境）。"""
+    env 为包级环境变量生效值，仅沙箱模式随请求透传（local 模式已注入进程环境）。
+    allowed_roles 非空时在执行入口外包一层角色校验（包级 RBAC，主图工具
+    绑定是静态的，schema 无法按角色摘除，故以执行侧拦截为权限边界）。"""
     mode = exec_mode()
     if mode == "sandbox-down":
         return None
@@ -378,8 +428,9 @@ def build_tool(path: Path, pack: str = "", env: dict | None = None):
         if meta is None:
             print(f"[custom-tools] {path.name} 签名提取失败，跳过")
             return None
-        return _make_sandbox_tool(meta, pack, env)
-    return make_local_tool(path)
+        return _guard_pack_tool(_make_sandbox_tool(meta, pack, env),
+                                pack, allowed_roles)
+    return _guard_pack_tool(make_local_tool(path), pack, allowed_roles)
 
 
 def load_langchain_tools() -> list:
