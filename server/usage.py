@@ -40,6 +40,9 @@ current_run = contextvars.ContextVar("usage_run", default="")
 
 _lock = threading.Lock()
 
+# 时钟挂点（单次模型调用计时，monotonic 不受系统跳变影响；测试可替换）
+_mono = time.monotonic
+
 
 def parse_model_prices(raw: str) -> dict:
     """解析 MODEL_PRICES（JSON：{"模型名": {"input": 输入单价, "output": 输出单价}}，
@@ -106,7 +109,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             completion_tokens INTEGER NOT NULL,
             total_tokens INTEGER NOT NULL,
             prompt_cost REAL NOT NULL DEFAULT 0,
-            completion_cost REAL NOT NULL DEFAULT 0
+            completion_cost REAL NOT NULL DEFAULT 0,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'ok'
         )""")
     # 老库迁移：无金额列则补齐（幂等；历史行按默认 0 计入，token 数据不动）
     cols = {r[1] for r in conn.execute("PRAGMA table_info(usage_records)")}
@@ -114,19 +119,26 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE usage_records ADD COLUMN prompt_cost REAL NOT NULL DEFAULT 0")
     if cols and "completion_cost" not in cols:
         conn.execute("ALTER TABLE usage_records ADD COLUMN completion_cost REAL NOT NULL DEFAULT 0")
+    # 老库迁移：无健康度列则补齐（v0.17.22 PLAN 6.6；历史行 0/'ok' 聚合不破）
+    if cols and "duration_ms" not in cols:
+        conn.execute("ALTER TABLE usage_records ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
+    if cols and "status" not in cols:
+        conn.execute("ALTER TABLE usage_records ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_records(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_run ON usage_records(run_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_date ON usage_records(date)")
 
 
-def record(model: str, usage: dict, source: str = "main") -> None:
-    """记录一次模型调用的 token 消耗与金额折算（归属信息取自 contextvars）。
-    usage 为空或全零（提供方未返回 usage）时跳过；缺单价模型金额记 0。"""
+def record(model: str, usage: dict, source: str = "main",
+           duration_ms: int = 0, status: str = "ok") -> None:
+    """记录一次模型调用的 token 消耗、金额折算与健康度（归属取自 contextvars）。
+    status='ok' 且 usage 为空/全零（提供方未返回 usage）时跳过；失败行（status='error'）
+    强制落库（token/金额 0），否则失败无法计数；缺单价模型金额记 0。"""
     pt = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
     ct = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
     tt = int(usage.get("total_tokens") or pt + ct)
-    if tt <= 0:
+    if tt <= 0 and status != "error":
         return
     now = time.time()
     resolved_model = model or config.MODEL_NAME
@@ -136,7 +148,8 @@ def record(model: str, usage: dict, source: str = "main") -> None:
     completion_cost = round(ct / 1e6 * price["output"], 6) if price else 0.0
     row = (now, time.strftime("%Y-%m-%d", time.localtime(now)),
            current_user.get(), current_session.get(), current_run.get(),
-           resolved_model, source, pt, ct, tt, prompt_cost, completion_cost)
+           resolved_model, source, pt, ct, tt, prompt_cost, completion_cost,
+           max(0, int(duration_ms or 0)), "error" if status == "error" else "ok")
     with _lock:
         conn = _connect()
         try:
@@ -144,30 +157,60 @@ def record(model: str, usage: dict, source: str = "main") -> None:
             conn.execute(
                 "INSERT INTO usage_records (ts, date, user_id, session_id, run_id,"
                 " model, source, prompt_tokens, completion_tokens, total_tokens,"
-                " prompt_cost, completion_cost)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", row)
+                " prompt_cost, completion_cost, duration_ms, status)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
             conn.commit()
         finally:
             conn.close()
 
 
 class UsageCallback:
-    """LangChain 回调：每次 LLM 调用结束时提取 usage_metadata 落账。
-    挂在 ChatOpenAI 上，主 Agent 与多 Agent worker（共用 _llm）全覆盖。"""
+    """LangChain 回调：每次 LLM 调用提取 usage、单次调用时长与成败状态落账。
+    挂在 ChatOpenAI 上，主 Agent 与多 Agent worker（共用 _llm）全覆盖。
+    计时按回调 run_id 配对 on_llm_start/on_llm_end（多 Agent worker 并行时
+    contextvar 单值会互相覆盖，run_id 是每次调用的天然配对键）；
+    任何回调内异常吞掉，计量失败绝不阻塞主链路。"""
 
     def __init__(self):
         from langchain_core.callbacks import BaseCallbackHandler
 
+        starts: dict = {}  # run_id → monotonic 起始时刻（end/error 后弹出，无泄漏）
+
         class _Handler(BaseCallbackHandler):
+            def on_llm_start(self, serialized, prompts, **kwargs):
+                try:
+                    rid = str(kwargs.get("run_id") or "")
+                    if rid:
+                        with _lock:
+                            starts[rid] = _mono()
+                except Exception:
+                    pass  # 计时失败不影响落账与主链路
+
             def on_llm_end(self, response, **kwargs):
                 try:
+                    rid = str(kwargs.get("run_id") or "")
+                    with _lock:
+                        st = starts.pop(rid, None)
+                    dur = int((_mono() - st) * 1000) if st is not None else 0
                     msg = response.generations[0][0].message
                     u = getattr(msg, "usage_metadata", None) or {}
                     model = (getattr(msg, "response_metadata", None) or {}).get(
                         "model_name") or config.MODEL_NAME
                     # 多 Agent worker 的调用带 ma_worker 标签时标记来源
                     source = "worker" if "ma_worker" in (kwargs.get("tags") or []) else "main"
-                    record(model, u, source)
+                    record(model, u, source, duration_ms=dur)
+                except Exception:
+                    pass  # 计量失败绝不阻塞主链路
+
+            def on_llm_error(self, error, **kwargs):
+                try:
+                    rid = str(kwargs.get("run_id") or "")
+                    with _lock:
+                        st = starts.pop(rid, None)
+                    dur = int((_mono() - st) * 1000) if st is not None else 0
+                    # 失败时拿不到响应元数据，模型名近似取当前配置
+                    source = "worker" if "ma_worker" in (kwargs.get("tags") or []) else "main"
+                    record("", {}, source, duration_ms=dur, status="error")
                 except Exception:
                     pass  # 计量失败绝不阻塞主链路
 
@@ -202,15 +245,18 @@ def _attach_total_cost(row: dict) -> dict:
 
 
 def run_usage(run_id: str) -> dict:
-    """单次任务（一次 /api/chat 运行）的消耗合计（含金额）。"""
+    """单次任务（一次 /api/chat 运行）的消耗合计（含金额与健康度）。"""
     rows = _query(
         "SELECT COUNT(*) AS calls, COALESCE(SUM(prompt_tokens),0) AS prompt_tokens,"
         " COALESCE(SUM(completion_tokens),0) AS completion_tokens,"
         " COALESCE(SUM(total_tokens),0) AS total_tokens,"
+        " COALESCE(SUM(duration_ms),0) AS duration_ms,"
+        " COALESCE(SUM(CASE WHEN status='error' THEN 1 ELSE 0 END),0) AS failed_calls,"
         f" {_COST_COLS}"
         " FROM usage_records WHERE run_id = ?", (run_id,))
     row = rows[0] if rows else {"calls": 0, "prompt_tokens": 0,
                                 "completion_tokens": 0, "total_tokens": 0,
+                                "duration_ms": 0, "failed_calls": 0,
                                 "prompt_cost": 0.0, "completion_cost": 0.0}
     return _attach_total_cost(row)
 
@@ -266,6 +312,8 @@ def summary(user_id: str = "", session_id: str = "", days: int = 0) -> dict:
         "SELECT run_id, session_id, user_id, date, COUNT(*) AS calls,"
         " SUM(total_tokens) AS total_tokens,"
         " SUM(CASE WHEN source='worker' THEN total_tokens ELSE 0 END) AS worker_tokens,"
+        " SUM(duration_ms) AS duration_ms,"
+        " SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS failed_calls,"
         f" {_COST_COLS}"
         f" FROM usage_records{cond} GROUP BY run_id ORDER BY MAX(ts) DESC LIMIT 50",
         tuple(params))
