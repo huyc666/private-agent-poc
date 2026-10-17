@@ -43,6 +43,10 @@ _lock = threading.Lock()
 # 时钟挂点（单次模型调用计时，monotonic 不受系统跳变影响；测试可替换）
 _mono = time.monotonic
 
+# 计时配对表上限：客户端中断时 on_llm_end/on_llm_error 均不触发，条目滞留；
+# 超限按起始时刻淘汰最旧一半（活跃调用的起始时刻都是最近的，不受影响）
+_STARTS_MAX = 10_000
+
 
 def parse_model_prices(raw: str) -> dict:
     """解析 MODEL_PRICES（JSON：{"模型名": {"input": 输入单价, "output": 输出单价}}，
@@ -60,10 +64,10 @@ def parse_model_prices(raw: str) -> dict:
         logger.warning("[usage] MODEL_PRICES 需为 {模型名: {input, output}} JSON 对象，"
                        "金额折算停用（token 照常记录）")
         return {}
+    def _num(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
     prices = {}
     for name, item in data.items():
-        def _num(v):
-            return isinstance(v, (int, float)) and not isinstance(v, bool)
         if (not name.strip() or not isinstance(item, dict)
                 or not _num(item.get("input")) or not _num(item.get("output"))
                 or item["input"] < 0 or item["output"] < 0):
@@ -174,7 +178,8 @@ class UsageCallback:
     def __init__(self):
         from langchain_core.callbacks import BaseCallbackHandler
 
-        starts: dict = {}  # run_id → monotonic 起始时刻（end/error 后弹出，无泄漏）
+        starts: dict = {}  # run_id → monotonic 起始时刻（end/error 后弹出；
+        # 客户端中断的滞留条目由 _STARTS_MAX 超限清理兜底）
 
         class _Handler(BaseCallbackHandler):
             def on_llm_start(self, serialized, prompts, **kwargs):
@@ -183,6 +188,11 @@ class UsageCallback:
                     if rid:
                         with _lock:
                             starts[rid] = _mono()
+                            if len(starts) > _STARTS_MAX:
+                                stale = sorted(starts, key=starts.get)[
+                                    : _STARTS_MAX // 2]
+                                for k in stale:
+                                    starts.pop(k, None)
                 except Exception:
                     pass  # 计时失败不影响落账与主链路
 
@@ -370,15 +380,30 @@ _CSV_COLUMNS = [("department", "部门"), ("calls", "调用次数"),
                 ("completion_cost", "输出金额（元）"), ("total_cost", "总金额（元）")]
 
 
-def department_csv(days: int = 0, department_map: dict = None) -> tuple:
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def _csv_cell(value):
+    """CSV 公式注入防护：以 = + - @ 开头（含前导空白）的文本单元格加 '
+    前缀，Excel/WPS 打开时不再当公式执行；数值单元格原样直通。"""
+    if not isinstance(value, str):
+        return value
+    if value.lstrip().startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def department_csv(days: int = 0,
+                   department_map: dict = None) -> tuple[str, str]:
     """部门报表 CSV 导出（v0.17.21）：返回 (csv 文本, 建议文件名)。
     UTF-8 带 BOM（Excel 直开中文不乱码）；文件名含生成日期，服务端固定模式
-    生成（不含用户输入，无路径注入面）。只读查询，不影响计量落账。"""
+    生成（不含用户输入，无路径注入面）。文本单元格做公式注入防护。
+    只读查询，不影响计量落账。"""
     view = department_usage(days=days, department_map=department_map)
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow([label for _, label in _CSV_COLUMNS])
     for row in view["by_department"]:
-        writer.writerow([row[key] for key, _ in _CSV_COLUMNS])
+        writer.writerow([_csv_cell(row[key]) for key, _ in _CSV_COLUMNS])
     date_tag = time.strftime("%Y%m%d")
     return "\ufeff" + buf.getvalue(), f"usage-departments-{date_tag}.csv"

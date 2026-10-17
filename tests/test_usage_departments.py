@@ -87,6 +87,21 @@ def test_ac3_csv_content():
         usage._PRICES.pop("m", None)
 
 
+def test_ac3_csv_formula_injection_neutralized():
+    """拒绝路径：部门名以 = + - @ 开头（含前导空白）时单元格加 ' 前缀，
+    Excel/WPS 打开不再当公式执行；普通部门名与数值列不受影响。"""
+    _record("eve", "s1", "r1", pt=1000, ct=0)
+    _record("fred", "s2", "r2", pt=1000, ct=0)
+    text, _ = usage.department_csv(
+        department_map={"eve": "=1+1|cmd", "fred": "+2+2"})
+    rows = list(csv.reader(io.StringIO(text.lstrip("\ufeff"))))
+    cells = {r[0]: r for r in rows[1:]}
+    assert cells["'=1+1|cmd"][0] == "'=1+1|cmd"
+    assert cells["'+2+2"][1] == "1"
+    # 数值列原样直通（无 ' 前缀）
+    assert cells["'=1+1|cmd"][1] == "1"
+
+
 def test_ac3_csv_endpoint_headers(client_factory, make_user):
     key = make_user("boss", role="approver")
     c = client_factory()

@@ -196,3 +196,25 @@ def test_ac6_handler_exceptions_swallowed():
     assert cb.on_llm_start(None, object(), run_id="z2") is None
     assert cb.on_llm_error(RuntimeError("boom"), run_id="z3") is None
     assert cb.on_llm_start(None, ["q"], run_id=None) is None
+
+
+# ---- AC6 中断滞留兜底：starts 超限淘汰最旧，活跃条目不受影响 ----
+
+def test_ac6_starts_overflow_evicts_stale(monkeypatch):
+    """拒绝路径：调用被取消时 end/error 均不触发，start 条目滞留；
+    超限后按起始时刻淘汰最旧一半（对应 run 的 duration 记 0、不报错），
+    活跃条目计时不受影响。"""
+    monkeypatch.setattr(usage, "_STARTS_MAX", 4)
+    clock = iter([1.0, 1.1, 1.2, 1.3, 1.4, 1.5])
+    monkeypatch.setattr(usage, "_mono", lambda: next(clock))
+    _set_ctx(run="r-ovf")
+    cb = usage.UsageCallback().handler
+    for i in range(4):
+        cb.on_llm_start(None, ["q"], run_id=f"old{i}")   # 1.0~1.3
+    cb.on_llm_start(None, ["q"], run_id="fresh")          # 1.4，第 5 条触发淘汰 old0/old1
+    usage.current_run.set("r-old0")
+    cb.on_llm_end(_resp(), run_id="old0")                 # 已淘汰 → duration 0、不报错
+    usage.current_run.set("r-fresh")
+    cb.on_llm_end(_resp(), run_id="fresh")                # 1.5 → 100ms
+    assert [r["duration_ms"] for r in _row("r-old0")] == [0]
+    assert [r["duration_ms"] for r in _row("r-fresh")] == [100]
