@@ -1,4 +1,4 @@
-# 生产部署清单 — 私有化 Agent 框架（v0.17.8）
+# 生产部署清单 — 私有化 Agent 框架（v0.17.24）
 
 面向 GPU+Docker 机器的正式上机清单。基础部署细节见 [DEPLOYMENT.md](DEPLOYMENT.md)，
 本清单聚焦**生产化差异项**与**逐项验收**。逐项打勾，全部通过即上线。
@@ -98,13 +98,14 @@ ENABLED_PACKS=                   # 留空=全部；生产可显式白名单
 | 6 | 沙箱强制 | 让 Agent「运行 python 代码」 | 经沙箱执行；停掉沙箱容器后再试 → 明确拒绝（fail-closed） |
 | 7 | 包签名强制 | 改动 `packs/weather-ops/tools/get_current_weather.py` 任意一字节 | `/api/health` 中 weather-ops 变 `unavailable`（签名校验失败），恢复需审计后 `tools/sign_pack.py weather-ops` 重签 |
 | 8 | 未签名拦截 | 手工放一个未签名包进 `packs/` | 整包 `unavailable`，不加载 |
-| 9 | token 计量 | 多轮对话后 `GET /api/usage` | 按用户/会话/任务三维度有记录且合计一致 |
+| 9 | 计量与金额 | 多轮对话后 `GET /api/usage`（已配置 `MODEL_PRICES`） | 按用户/会话/任务/部门四维度有记录且合计一致，各视图含金额字段；approver 可拉部门 CSV |
 | 10 | 网关 fallback（如保留） | 停 vLLM 容器后对话 | 自动切备用模型；Agent 无感 |
 | 11 | 观测（可选） | 启动 `docker/docker-compose.langfuse.yml` 并配置密钥后对话 | Langfuse 控制台可见完整 trace |
+| 12 | 知识库问答 | 用口语化问法问一个 `kb/` 示例制度文档里的问题 | 答案标注「文档名·章节」出处；换无相关内容的提问时明确说明检索不到、不编造 |
 
 ## 六、上线后运维要点
 
-- **备份**：`data/` 目录（state.db 会话/审批/审计、usage.db token 计量）、PostgreSQL 数据卷
+- **备份**：`data/` 目录（state.db 会话/审批/审计、usage.db 用量计量含金额/健康度）、PostgreSQL 数据卷、知识库索引（`kb/` 源文档 + 各库索引，重建即恢复）
 - **密钥轮换**：更换 `PACK_SIGNING_KEY` 后必须 `tools/sign_pack.py --all` 重签全部包
 - **新增包流程**：代码审计 → 放入 `packs/` → `tools/sign_pack.py <包名>` → 对话中启用（挂审批）
 - **多副本扩展**（用户量增长时）：会话/审批/计量均已外置；checkpointer 已是 Postgres；

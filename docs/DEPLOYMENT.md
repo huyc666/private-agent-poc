@@ -1,8 +1,9 @@
-# POC 部署手册 — 私有化 Agent 开发运行框架（v0.12.0 首版，持续更新至 v0.17.8）
+# POC 部署手册 — 私有化 Agent 开发运行框架（v0.12.0 首版，持续更新至 v0.17.24）
 
 > 生产上机（GPU+Docker 机器）请先看 [PRODUCTION.md](PRODUCTION.md)（生产部署清单：密钥、强制签名、验收用例）；
-> 本手册为各组件的详细部署步骤，v0.13.0–v0.17.8 同样适用（新增配置项见 .env.example：
-> 认证 AUTH_*、沙箱令牌 SANDBOX_AUTH_TOKEN、受信代理 AUTH_PROXY_ALLOWED_IPS 等）。
+> 本手册为各组件的详细部署步骤，v0.13.0–v0.17.24 同样适用（新增配置项见 .env.example：
+> 认证 AUTH_*、沙箱令牌 SANDBOX_AUTH_TOKEN、受信代理 AUTH_PROXY_ALLOWED_IPS、
+> 模型单价 MODEL_PRICES、embedding 引擎 EMBED_BACKEND 等）。
 
 > 目标读者：运维 / 部署工程师。按顺序照做即可，每步都有验证命令。
 > 全程离线内网可完成（Docker 镜像与 pip 包需提前通过内网镜像仓库/代理准备）。
@@ -239,6 +240,25 @@ WEATHER_GEOCODING_URL=http://<内部代理>/v1/search
 WEATHER_API_URL=http://<内部代理>/v1/forecast
 # 或关闭兜底源：WEATHER_ITBOY_ENABLED=false
 ```
+
+### 步骤 7（可选）：知识库问答（RAG，v0.17.24）
+
+依赖已随 requirements.txt 安装（含 fastembed），放好文档后一条命令建索引：
+
+```
+# 源文档放入 kb/<库名>/（支持 md/txt/Word/PDF/Excel/PPT/网页）
+# 示例库：
+.venv/bin/python tools/build_kb.py kb/common    # 通用知识库（平台包）
+.venv/bin/python tools/build_kb.py kb/hr        # HR 知识库（kb-demo 包）
+```
+
+- 检索为「关键词 + 语义」混合排序；语义引擎默认本地离线推理，未配置或引擎
+  不可用时自动退化为关键词检索，不报错
+- **内网断网部署**：首次建索引需联网下载 embedding 模型到本地缓存（未设置
+  `EMBED_CACHE_DIR` 时用 fastembed 默认缓存位置）——先在联网机器跑一次建索引，
+  再把模型缓存目录整体拷贝到内网机器并用 `EMBED_CACHE_DIR` 指向它，即可断网全链路使用
+- 损坏文档、扫描件 PDF、老格式（.doc/.xls/.ppt）自动跳过并打 WARNING，不阻塞整库
+- 知识更新：替换/新增文档后重跑该库的 build_kb 命令即可，不碰包签名、免重启
 
 ## 四、日常使用：Skills、自定义工具与领域包
 

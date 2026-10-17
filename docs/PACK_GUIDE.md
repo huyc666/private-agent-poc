@@ -146,6 +146,7 @@ prompt: prompt.md
 | requires_modules | — | pip 依赖，缺失整包不加载（不在运行时自动安装） |
 | env | — | 包级环境变量默认值 |
 | permissions | 建议 | 权限声明（信息性），显示在审批卡片 |
+| allowed_roles | — | 角色白名单（v0.17.18 包级 RBAC，如 `["approver", "admin"]`）：白名单外角色的会话看不到包能力、直接调用也被拒（双重不可用）；未配置则不限制；配置错误（空列表/非法角色名）整包标为错误，不静默失效 |
 | platform | — | true = 平台包（跨领域通用能力，始终加载、运行时不可禁用），普通业务包不要设 |
 | tools / skills / prompt | — | 能力清单（相对路径，逐项校验存在性） |
 | signature | 上线时生成 | HMAC 签名，由 sign_pack 写入，不要手填 |
@@ -192,12 +193,14 @@ tools/skills 数量正确。
 ### 接入步骤（以新领域为例）
 
 ```bash
-# 1. 放文档：Markdown/TXT 放进数据目录（按 # 标题自动切块）
+# 1. 放文档：支持 md/txt/Word/PDF/Excel/PPT/网页（v0.17.24），放入数据目录即可
 mkdir -p kb/finance && cp ~/报销制度.md kb/finance/
-# 2. 建索引（BM25，零第三方依赖；知识更新后重跑本步即可）
+# 2. 建索引（关键词 + 向量混合检索；知识更新后重跑本步即可）
+#    损坏文档/老格式/扫描件 PDF 自动跳过并提示，不阻塞整库
 python tools/build_kb.py kb/finance
 # 3. 做检索工具：复制 packs/kb-demo/tools/search_hr_knowledge.py 到新包，
 #    只改三处——工具名、KB_DIR 环境变量名/默认目录、docstring 库说明
+#    （包内检索工具为自包含混合检索版，不 import server/tools，可独立打包签名）
 # 4. prompt.md 写明：什么问题必须先检索、出处必须标注、检索不到如实说明
 # 5. 测试 → 审计 → 签名 → 启用（同第三章 Step 7）
 ```

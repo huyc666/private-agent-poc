@@ -1,7 +1,8 @@
 # API 认证与多用户设计方案 · Private Agent POC
 
 版本：v1.2（**已全部实施**：v0.14.0 认证基座 / v0.14.1 ACL / v0.14.2 Key 轮换 /
-v0.15.0 密码登录 / v0.16.0 SSO 身份头 / v0.17.4 身份头来源白名单 / v0.17.9 决议权收紧与专属技能域） · 2026-10-10
+v0.15.0 密码登录 / v0.16.0 SSO 身份头 / v0.17.4 身份头来源白名单 / v0.17.9 决议权收紧与专属技能域 /
+v0.17.11 账号部门字段） · 2026-10-17
 关联：CODE_REVIEW.md P2-1（API 无认证 + 审批无身份绑定）——已核销
 
 ## 一、背景与问题
@@ -75,6 +76,9 @@ CREATE TABLE IF NOT EXISTS api_users (
 - 吊销不删除：保留审计痕迹，中间件拒绝 `revoked=1`
 - 管理 CLI：`python tools/manage_users.py add zhangsan --role approver` /
   `revoke zhangsan` / `list`（复用 sign_pack.py 的 CLI 模式）
+- 部门字段（v0.17.11）：`api_users` 增 `department` 列（启动时自动补列迁移），
+  SSO 身份头可透传部门、CLI `setdept <用户> <部门>` 可设置；部门当前仅用于
+  用量计量的部门成本报表归属（调岗改部门即时反映，不回改历史账）
 
 ### 4.3 认证中间件（FastAPI）
 

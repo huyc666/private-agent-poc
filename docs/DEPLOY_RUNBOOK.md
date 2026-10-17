@@ -1,4 +1,4 @@
-# 分步部署执行手册 — GPU + Docker 生产机（v0.17.8）
+# 分步部署执行手册 — GPU + Docker 生产机（v0.17.24）
 
 目标：在一台 Linux GPU 机器上把框架从 zip 包部署到「上线验收通过」。
 每步给出**可复制命令**与**验收点**，任一步验收不过即停下排查，不要带错继续。
@@ -24,12 +24,17 @@ python3 --version               # ≥ 3.11
 ## Step 1 · 解压与依赖
 
 ```bash
-unzip private-agent-poc-v0.17.8.zip -d agent-poc && cd agent-poc
+unzip private-agent-poc-v0.17.24.zip -d agent-poc && cd agent-poc
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt    # 内网环境指向内部 pip 源
 ```
 
 **验收点**：`.venv/bin/python -c "import langgraph, fastapi, httpx"` 无报错。
+
+**知识库准备**（如启用知识库问答）：示例库各跑一次建索引
+`.venv/bin/python tools/build_kb.py kb/common` 与 `.venv/bin/python tools/build_kb.py kb/hr`；
+语义检索默认本地离线推理（fastembed 随 requirements 安装），首次运行需联网下载模型
+到 `EMBED_CACHE_DIR` 缓存目录——内网环境先在联网机器跑一次、把缓存目录整体拷入即可断网全链路使用。
 
 ---
 
@@ -153,6 +158,8 @@ sleep 20 && tail -30 agent.log
 .venv/bin/python tools/manage_users.py add lisi --role approver
 # 浏览器端使用者设置登录密码（交互输入，不回显）
 .venv/bin/python tools/manage_users.py passwd zhangsan
+# 需要部门成本报表时为账号设置部门（v0.17.11）
+.venv/bin/python tools/manage_users.py setdept zhangsan 财务部
 .venv/bin/python tools/manage_users.py list
 ```
 
@@ -163,12 +170,12 @@ sleep 20 && tail -30 agent.log
 
 ## Step 10 · 上线验收（逐项实测）
 
-按 [PRODUCTION.md](PRODUCTION.md) 第五节 11 条用例逐项执行
+按 [PRODUCTION.md](PRODUCTION.md) 第五节 12 条用例逐项执行
 （真实对话 / 工具链 / 审批流 / 审计 / 会话持久化 / 沙箱强制 / 签名强制 /
-未签名拦截 / token 计量 / 网关 fallback / 观测），再按
+未签名拦截 / 计量与金额 / 网关 fallback / 观测 / 知识库问答），再按
 [SECURITY.md](SECURITY.md) 第七章「部署红线」过一遍。
 
-**验收点**：11 条用例全过 + 红线 6 项全勾 → 上线。
+**验收点**：12 条用例全过 + 红线 6 项全勾 → 上线。
 
 ---
 
