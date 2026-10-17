@@ -225,6 +225,21 @@ def set_department(username: str, department: str) -> bool:
             conn.close()
 
 
+def department_map() -> dict:
+    """{username: department} 当前映射（v0.17.21，PLAN 6.2 部门报表用）。
+    查询时聚合口径：调岗即时反映；部门为空串的用户由报表侧计入「未分配」。"""
+    with _lock:
+        conn = _connect()
+        conn.row_factory = sqlite3.Row
+        try:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                "SELECT username, department FROM api_users").fetchall()
+            return {r["username"]: r["department"] for r in rows}
+        finally:
+            conn.close()
+
+
 def login(username: str, password: str) -> dict | None:
     """账号密码登录：验证通过则签发 pat- 令牌（有效期 AUTH_TOKEN_TTL_HOURS）。
     返回 {token, expires_at, identity:{username, role, department}}；失败（用户不存在/

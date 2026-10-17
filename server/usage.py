@@ -20,6 +20,8 @@
 - 会话 session_id：同一对话的多次运行累计
 """
 import contextvars
+import csv
+import io
 import json
 import logging
 import sqlite3
@@ -271,3 +273,64 @@ def summary(user_id: str = "", session_id: str = "", days: int = 0) -> dict:
             "by_user": [_attach_total_cost(r) for r in by_user],
             "by_session": [_attach_total_cost(r) for r in by_session],
             "by_run": [_attach_total_cost(r) for r in by_run]}
+
+
+# 未设置部门/映射外用户的聚合分组名（v0.17.21 部门报表）
+_UNASSIGNED = "未分配"
+
+
+def department_usage(days: int = 0, department_map: dict = None) -> dict:
+    """按部门聚合用量（含金额，v0.17.21 PLAN 6.2）。管理视角视图。
+
+    department_map 为 {user_id: 部门} 映射，由调用方（main.py）从 auth 层注入，
+    usage 模块不反向依赖 auth；跨库（usage.db × state.db）无法 SQL join，
+    Python 侧按当前映射聚合——调岗即时反映，usage_records 结构零改动。
+    无部门/映射外用户计入「未分配」，不丢数据。
+    """
+    where, params = [], []
+    if days > 0:
+        where.append("ts >= ?")
+        params.append(time.time() - days * 86400)
+    cond = (" WHERE " + " AND ".join(where)) if where else ""
+    rows = _query(
+        "SELECT user_id, COUNT(*) AS calls,"
+        " COALESCE(SUM(prompt_tokens),0) AS prompt_tokens,"
+        " COALESCE(SUM(completion_tokens),0) AS completion_tokens,"
+        " COALESCE(SUM(total_tokens),0) AS total_tokens,"
+        f" {_COST_COLS}"
+        f" FROM usage_records{cond} GROUP BY user_id", tuple(params))
+    mapping = department_map or {}
+    grouped = {}
+    for r in rows:
+        dept = mapping.get(r["user_id"]) or _UNASSIGNED
+        d = grouped.setdefault(dept, {"department": dept, "calls": 0,
+                                      "prompt_tokens": 0, "completion_tokens": 0,
+                                      "total_tokens": 0,
+                                      "prompt_cost": 0.0, "completion_cost": 0.0})
+        for k in ("calls", "prompt_tokens", "completion_tokens", "total_tokens"):
+            d[k] += r[k]
+        d["prompt_cost"] += r["prompt_cost"]
+        d["completion_cost"] += r["completion_cost"]
+    out = [_attach_total_cost(d) for d in grouped.values()]
+    out.sort(key=lambda x: x["total_cost"], reverse=True)
+    return {"by_department": out}
+
+
+_CSV_COLUMNS = [("department", "部门"), ("calls", "调用次数"),
+                ("prompt_tokens", "输入 tokens"), ("completion_tokens", "输出 tokens"),
+                ("total_tokens", "总 tokens"), ("prompt_cost", "输入金额（元）"),
+                ("completion_cost", "输出金额（元）"), ("total_cost", "总金额（元）")]
+
+
+def department_csv(days: int = 0, department_map: dict = None) -> tuple:
+    """部门报表 CSV 导出（v0.17.21）：返回 (csv 文本, 建议文件名)。
+    UTF-8 带 BOM（Excel 直开中文不乱码）；文件名含生成日期，服务端固定模式
+    生成（不含用户输入，无路径注入面）。只读查询，不影响计量落账。"""
+    view = department_usage(days=days, department_map=department_map)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([label for _, label in _CSV_COLUMNS])
+    for row in view["by_department"]:
+        writer.writerow([row[key] for key, _ in _CSV_COLUMNS])
+    date_tag = time.strftime("%Y%m%d")
+    return "\ufeff" + buf.getvalue(), f"usage-departments-{date_tag}.csv"

@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from server import (agent, approval, auth, config, custom_tools, packs,
@@ -630,6 +630,36 @@ async def usage_stats(request: Request, user_id: str = "", session_id: str = "",
     if ident and ident["role"] == "user":
         user_id = ident["username"]
     return usage.summary(user_id=user_id, session_id=session_id, days=days)
+
+
+def _dept_report_guard(request: Request):
+    """部门报表 ACL（v0.17.21，PLAN 6.2）：管理视角——user 角色 403；
+    approver/admin 与开放模式（_acl_identity 返回 None）放行，同 /api/usage 口径。"""
+    ident = _acl_identity(request)
+    if ident and ident["role"] == "user":
+        return JSONResponse({"error": "forbidden",
+                             "message": "部门报表仅限管理角色查看"}, status_code=403)
+
+
+@app.get("/api/usage/departments")
+async def usage_departments(request: Request, days: int = 0):
+    """部门维度用量报表（含 6.5 金额列）：按 api_users 当前部门映射聚合，
+    无部门用户计入「未分配」。days>0 只统计最近 N 天。"""
+    denied = _dept_report_guard(request)
+    if denied:
+        return denied
+    return usage.department_usage(days=days, department_map=auth.department_map())
+
+
+@app.get("/api/usage/departments.csv")
+async def usage_departments_csv(request: Request, days: int = 0):
+    """部门成本报表 CSV 导出（UTF-8 带 BOM，Excel 直开不乱码）。"""
+    denied = _dept_report_guard(request)
+    if denied:
+        return denied
+    text, filename = usage.department_csv(days=days, department_map=auth.department_map())
+    return Response(content=text.encode("utf-8"), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 class ApproveRequest(BaseModel):

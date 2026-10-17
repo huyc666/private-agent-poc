@@ -293,6 +293,11 @@ usage.db 是运行数据（v0.17.19 起默认在 `data/` 目录），备份/迁�
 （prompt_cost / completion_cost / total_cost）。未配置单价的模型仅记 token
 不报错；非法配置启动时 WARNING 提示并停用折算，不影响计量主链路。
 
+**部门成本报表（v0.17.21 起）**：`GET /api/usage/departments` 按部门聚合用量
+（调用次数/token/金额），`GET /api/usage/departments.csv?days=N` 导出 CSV
+（UTF-8 带 BOM，Excel 直开不乱码）。部门取账号当前部门（调岗即时反映），
+未设置部门计入「未分配」；管理视角——普通用户角色 403，approver/admin 可用。
+
 ## 五、安全机制说明（评审要点）
 
 | 机制 | 行为 |
