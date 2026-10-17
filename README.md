@@ -2,7 +2,7 @@
 
 **版本：v0.17.24**（2026-10-17）
 
-最小可运行的私有化 Agent 框架：**vLLM（Qwen 27B）+ LangGraph（Agent 循环 + 多 Agent 编排）+ MCP（工具协议）+ Skills（技能系统）+ 对话式自定义工具 + 人工审批流 + 代码沙箱 + Langfuse 观测 + FastAPI（SSE 流式接口）+ 离线聊天前端**。
+最小可运行的私有化 Agent 框架：**vLLM（Qwen 27B）+ LangGraph（Agent 循环 + 多 Agent 编排）+ MCP（工具协议）+ Skills（技能系统）+ 对话式自定义工具 + 人工审批流 + 代码沙箱 + 知识库问答（RAG，五类文档入库 + 混合检索）+ API 认证与多用户（部门/角色/专属域）+ 用量计量（token / 金额 / 健康度 / 部门报表）+ Langfuse 观测 + FastAPI（SSE 流式接口）+ 离线聊天前端**。
 
 ## 版本记录
 
@@ -116,9 +116,10 @@ agent-poc/
 │   ├── skills.py          # Skills 注册中心（内核 skills/ + 领域包 skills 多源合并）
 │   ├── sessions.py        # 会话历史持久化（SQLite/STATE_DB，重启不丢，v0.13.0）
 │   ├── session_lock.py    # 跨进程会话租约锁（STATE_DB 后端，多副本同会话串行化，v0.17.1）
+│   ├── multi_agent.py     # 多 Agent 编排子图（拆题 → Send 并行 → 汇总，v0.6.0；v0.17.19 起通用化）
 │   ├── approval.py        # 审批中心（DB 持久化 + 状态机 + 审批门 require_approval，v0.13.0）
 │   ├── auth.py            # API 认证与多用户（双轨凭据/角色/ACL/SSO 身份头，v0.14.0–v0.16.0）
-│   ├── usage.py           # Token 计量（LangChain 回调采集 + SQLite 存储聚合，v0.11.0）
+│   ├── usage.py           # 用量计量（token/金额/时长/状态落账聚合 + 部门报表，v0.11.0–v0.17.23）
 │   ├── weather.py         # 天气多数据源降级链（MCP 示例服务器共用）
 │   └── config.py          # 全部配置走环境变量
 ├── packs/                 # 包目录（可插拔能力：平台包 + 领域包）
@@ -130,15 +131,19 @@ agent-poc/
 │       ├── prompt.md      #   领域提示词片段（注入系统提示词）
 │       ├── tools/         #   领域工具（get_current_weather）
 │       └── skills/        #   领域技能（weather-report）
-├── custom_tools/          # 对话式创建的自定义工具（.py 即工具，免重启生效）
-├── kb/                    # 知识库源文档（common/ + hr/，tools/build_kb.py 建索引，v0.17.0）
+├── custom_tools/          # 对话式创建的自定义工具（.py 即工具，免重启生效；user 角色的专属工具落 custom_tools_personal/<域>/，v0.17.12）
+├── kb/                    # 知识库源文档（common/ + hr/，tools/build_kb.py 建索引；支持 md/txt/Word/PDF/Excel/PPT/网页，v0.17.24）
+├── data/                  # 运行时 SQLite（state.db/usage.db，旧版根目录遗留库启动时自动迁入）
 ├── tools/
 │   ├── local_tools_server.py  # 示例 MCP Server（stdio）：目录列举、字数统计、MCP 天气
-│   ├── build_kb.py        # 知识库建索引 CLI（纯 Python BM25，零第三方依赖，v0.17.0）
-│   ├── manage_users.py    # 用户管理 CLI（签发/轮换/吊销 Key、passwd，v0.14.0）
+│   ├── build_kb.py        # 知识库建索引 CLI（BM25 + 向量混合，一条命令统一入库，v0.17.0/v0.17.24）
+│   ├── kb_parsers.py      # 文档解析器（Word/PDF/Excel/PPT/网页 → 伪 Markdown 复用中文分块，v0.17.24）
+│   ├── manage_users.py    # 用户管理 CLI（add/rotate/revoke/passwd/setdept/list，v0.14.0–v0.17.11）
 │   ├── load_test.py       # 并发压测（health/chat/session 场景，v0.16.1）
 │   └── sign_pack.py       # 管理员 CLI：包签名（v0.13.0）
 ├── sandbox/               # 代码执行沙箱服务（server.py + Dockerfile + entrypoint.sh 出网封锁，v0.17.1）
+├── tests/                 # 自动化用例（pytest 离线套件 422 个 + 真实链路集成测试门控启用，v0.17.14–v0.17.24）
+├── gateway/               # LiteLLM 网关配置（litellm_config.yaml：模型路由/fallback/限流）
 ├── web/
 │   └── index.html         # 聊天前端（内联样式脚本，内网离线可用）
 ├── docker/                # 全部 docker compose 编排文件
@@ -164,6 +169,11 @@ agent-poc/
 约定：文件名即工具名，文件内定义同名函数，docstring 即工具描述（展示给模型），
 参数带类型注解、返回 `str`（不支持 *args/**kwargs）。配套管理工具：`list_custom_tools` /
 `create_custom_tool` / `delete_custom_tool`（删除同样需审批）。
+
+**专属域**（v0.17.12）：普通账号（user 角色）聊天中创建的自定义工具只归本人可见可用——
+其他普通账号看不到也无法调用，工具文件内容不可读取、不可删除，且不能与通用工具同名
+（创建时即拒绝）；专属工具仅限本人会话、即时生效无需审批，仅在沙箱隔离环境中执行。
+管理员与审批角色创建的仍是通用工具（全员可见），通用工具的创建与删除照旧走审批门。
 
 **执行隔离**（`CUSTOM_TOOLS_EXEC=auto|sandbox|local`，默认 `auto`）：
 配置了 `SANDBOX_URL` 且沙箱可达时，自定义工具**不在 Agent 主进程执行**——
@@ -209,6 +219,7 @@ pack.yaml 完整字段：
 | `requires_modules` | 否 | 依赖的 Python 模块名（pip 依赖声明），缺失整包不加载——私有化环境**不自动安装**，请先装入 Agent venv 或打入沙箱镜像 |
 | `env` | 否 | 包级环境变量默认值：外部（.env/系统）显式设置优先，否则注入包声明的默认值；local 模式注入进程环境，sandbox 模式随 `/run_tool` 透传给隔离子进程（变量名校验 + 值长度限制） |
 | `permissions` | 否 | 权限声明列表（如 `["network", "filesystem"]`）：信息性声明，展示在 `list_packs` 与启用/创建审批卡片上，供审批人知情决策；执行层强制由沙箱与审批门负责 |
+| `allowed_roles` | 否 | 角色白名单（v0.17.18 包级 RBAC，如 `["approver", "admin"]`）：白名单外角色的会话看不到该包能力说明、直接调用也被拒绝（双重不可用）；未配置则不限制；配置错误（空列表/非法角色名）整包标为错误，避免静默失效 |
 | `signature` | 否 | HMAC-SHA256 内容签名（由 create_pack 自动签名 / sign_pack 工具 / tools/sign_pack.py 写入，见下文「信任模型」） |
 | `tools` / `skills` / `prompt` | 否 | 能力声明（相对包目录路径） |
 
@@ -330,7 +341,7 @@ MODEL_NAME=deepseek-chat        # 或 deepseek-reasoner（R1 推理模型）
 | `MODEL_NAME` | `qwen-27b` | vLLM `--served-model-name` |
 | `TEMPERATURE` / `MAX_TOKENS` | `0.7` / `2048` | 采样参数 |
 | `MCP_ENABLED` | `true` | 是否加载 MCP 工具服务 |
-| `TOOL_WORKSPACE` | 项目根目录 | `read_text_file` 的访问边界（防越权） |
+| `TOOL_WORKSPACE` | 项目根目录 | `read_text_file` 的访问边界（防越权）；上传/产出文件按身份分域落 `uploads/<域>/`、`outputs/<域>/`（开放模式 shared/） |
 | `WEATHER_GEOCODING_URL` / `WEATHER_API_URL` | Open-Meteo 官方地址 | 天气主数据源（全球城市，免 key），内网可改为内部代理 |
 | `WEATHER_TIMEOUT` | `10` | 天气接口超时（秒） |
 | `WEATHER_ITBOY_ENABLED` | `true` | 兜底源开关：Open-Meteo 不可达时自动降级到 itboy 免费天气（国内区县，免 key） |
@@ -344,10 +355,14 @@ MODEL_NAME=deepseek-chat        # 或 deepseek-reasoner（R1 推理模型）
 | `SANDBOX_URL` | 空（拒绝执行） | 沙箱服务地址；未配置时 `run_python_code` fail-closed |
 | `SANDBOX_AUTH_TOKEN` | 空 | Agent↔沙箱共享令牌（`X-Sandbox-Token`，v0.17.1）；沙箱侧未配置令牌时默认拒绝执行，仅 `SANDBOX_OPEN_MODE=true` 显式放开（v0.17.4 F3） |
 | `STATE_DB` | `./data/state.db` | 会话/审批/租约锁 SQLite 库（v0.13.0；跨机多副本须换 Postgres） |
-| `USAGE_DB` | `./data/usage.db` | Token 计量 SQLite 库（v0.11.0） |
+| `USAGE_DB` | `./data/usage.db` | 用量计量 SQLite 库（v0.11.0） |
+| `MODEL_PRICES` | 空 | 模型单价 JSON（元/百万 tokens，`{"模型名": {"input": 2.0, "output": 8.0}}`，v0.17.20）；未配置的模型仅记 token |
+| `EMBED_BACKEND` | `local` | 知识库向量引擎（v0.17.24）：`local`=fastembed 进程内离线推理 / `openai`=外部 OpenAI 兼容服务；引擎不可用自动退化纯 BM25 |
+| `EMBED_API_BASE` / `EMBED_API_KEY` | 空 | `EMBED_BACKEND=openai` 时的 embeddings 服务地址与密钥（`EMBED_MODEL` / `EMBED_CACHE_DIR` 可调本地模型与缓存目录） |
 | `CHECKPOINTER` | `memory` | `postgres` 可切换持久化（Windows 开发机仅支持 memory） |
 | `AUTH_ENABLED` | 联动 `MOCK_LLM`（v0.17.6） | Mock=开发者模式默认免登录；真实模式默认要求登录；显式设置可覆盖。true 时 Bearer 凭据 + 三级角色 |
 | `AUTH_IDENTITY_HEADER` | 空 | SSO 身份头（如 `X-Forwarded-User`，v0.16.0）；须配合 `AUTH_PROXY_ALLOWED_IPS` 白名单才生效（v0.17.4 F2） |
+| `AUTH_PROXY_ALLOWED_IPS` | 空 | 受信代理 IP/CIDR 白名单（v0.17.4 F2）：仅来源命中白名单的请求才信任身份头，直连伪造一律忽略（fail-closed） |
 | `SYSTEM_PROMPT` | 见 config.py | 系统提示词（文档上传指引由 `config.UPLOAD_PROMPT` 装配时独立追加，不受覆盖影响） |
 | `UPLOAD_MAX_MB` | `10` | 文档上传/产出单文件大小上限（MB，v0.17.7）；文件按身份分域落 `TOOL_WORKSPACE/uploads/<域>/`、`outputs/<域>/`（v0.17.8），开放模式 shared/ |
 | `CONTEXT_COMPACT_ENABLED` | `true` | 上下文压缩开关（v0.17.7）：超触发线时窗口外旧消息滚动摘要，只改模型视野不动 checkpointer 历史 |
@@ -402,7 +417,25 @@ skills/
 
 Mock 模式可直接演示：「有哪些技能」/「创建一个技能」/「加载 weather-report 技能」。
 
-## Token 计量（按用户 / 任务 / 会话）
+## 知识库问答（RAG as a Tool）
+
+知识库以「平台包 + 领域包」两层组织，检索能力是包内工具，提问即自动检索：
+
+- **两层归属**：`core-knowledge` 平台包（公司通用知识库，跨领域始终在线）+
+  领域包专属库（示例 `kb-demo`：HR 制度库）；一次提问自动并联检索多库、合并作答，
+  答案带「文档名·章节」来源标注（防幻觉可审计）
+- **入库**：源文档放 `kb/<库名>/`，一条命令建索引——`python tools/build_kb.py kb/common`
+  （通用库）/ `python tools/build_kb.py kb/hr`（HR 库）；知识更新后重跑即可，不碰包签名
+- **格式**（v0.17.24）：md/txt/Word/PDF/Excel/PPT/网页——统一转伪 Markdown 后按
+  标题/页/Sheet 分块；损坏文档、扫描件 PDF、老格式（.doc/.xls/.ppt）自动跳过并提示，
+  不阻塞整库索引
+- **检索**：BM25（中文 bigram 分词）+ 向量语义混合排序（RRF 融合），口语化问法
+  （非关键词直配）也能命中；`EMBED_BACKEND=local` 默认 fastembed 进程内离线推理
+  （断网全链路可用，模型文件可预置到 `EMBED_CACHE_DIR` 指向的缓存目录），
+  内网可选 `openai` 接外部 OpenAI 兼容 embedding 服务（`EMBED_API_BASE`）；
+  引擎不可用时自动退化为纯 BM25 检索，不报错
+
+## 用量计量（token / 金额 / 健康度 / 部门）
 
 **每次模型调用的 token 消耗都会落账**（v0.11.0 起，真实模式自动启用，Mock 模式不记录）：
 
@@ -411,9 +444,16 @@ Mock 模式可直接演示：「有哪些技能」/「创建一个技能」/「�
   （worker 消耗在 `worker_tokens` 字段单独标记）
 - **归属**：`/api/chat` 请求携带 `user_id`（缺省 `anonymous`），每次请求生成 `run_id`；
   三个归属维度通过 contextvars 传给回调，嵌套调用同样生效
+- **金额**（v0.17.20）：`MODEL_PRICES` 配置各模型单价（元/百万 tokens，输入/输出分别
+  计价），token 消耗按落账时单价折算金额并固化——价格调整只影响新记录，历史账可审计；
+  未配置单价的模型仅展示 token 不受影响，自建模型可配 0 记内部核算
+- **健康度**（v0.17.22）：每次模型调用记录耗时与成败状态，调用失败也落明细可统计
+  （token/金额记 0）；任务视图输出单次 run 的总时长（各次模型调用耗时之和）与失败次数
 - **存储**：SQLite（`USAGE_DB`，默认 `data/usage.db`），零额外组件；提供方未返回 usage 的调用跳过
 - **查询**：`GET /api/usage?user_id=&session_id=&days=7` 返回
-  总量 + 按用户 / 按会话 / 按任务（run）四组聚合
+  总量 + 按用户 / 按会话 / 按任务（run）/ 按部门 五组聚合（各视图含金额字段）；
+  部门成本报表为管理视角（user 角色不可见，v0.17.21），支持 CSV 导出
+  （UTF-8 带 BOM，Excel 直接打开不乱码，已防公式注入，v0.17.23）
 - **展示**：前端每条回答下方显示「本次 X tokens（输入/输出）· 本会话累计 Y」；
   头部 👤 徽标点击可切换用户标识（或 URL 加 `?user=xxx`）
 
@@ -463,6 +503,10 @@ docker compose -f docker/docker-compose.langfuse.yml up -d
 - ✅ 观测接入：Langfuse 关闭/不可达时主链路不受影响（已验证）；观测栈 Docker Desktop 实测通过——`/api/health` 返回 `langfuse_connected: true`，Mock 对话后 Langfuse 可见 `mock-chat` trace 与 `tool:get_current_weather` 工具 span（含输入输出）
 - ✅ PostgresSaver 持久化：Docker Desktop 实测通过——`setup()` 自动建表（checkpoints/blobs/writes/migrations），跨连接 checkpoint 往返读回成功；Windows 开发机按文档 fail-fast 提示（psycopg 异步与 ProactorEventLoop 不兼容，保持 memory 即可）
 - ✅ 真实模型链路（DeepSeek deepseek-chat 云端实测通过）：模型自主工具调用、interrupt 审批中断→批准→恢复执行→落盘生效、Skills 自主选择加载、天气多数据源降级链（Open-Meteo 直达与 itboy 兜底均实测通过）
+- ✅ 权限体系：审批决议权分离（user 不能批准任何审批）+ 专属技能/专属自定义工具域（user 建的技能/工具仅本人可见可用，他人文件不可读写）+ 包级 RBAC（受限包对无权角色提示层与执行层双重不可用）
+- ✅ 用量计量运营能力：配置 `MODEL_PRICES` 后各视图返回金额（落账时折算固化，历史账可审计）；部门聚合报表 + CSV 导出（防公式注入）；run 健康度（单次调用耗时/成败、run 总时长与失败次数）
+- ✅ 知识库入库管道与混合检索：md/txt/Word/PDF/Excel/PPT/网页一条命令统一入库、BM25+向量混合排序（本地离线 embedding，断网全链路可用）、损坏文档自动跳过不阻塞整库
+- ✅ 自动化测试体系：pytest 离线用例 422 个（无需真实模型/外网即可运行）+ 真实链路集成用例 13 个（环境开关门控启用），核心安全模块分支覆盖 95–100%
 
 **新机器部署请直接看 [DEPLOYMENT.md](docs/DEPLOYMENT.md)（POC 部署手册）。** 生产上机另有 [PRODUCTION.md](docs/PRODUCTION.md)（生产部署清单 + 验收用例）。
 
@@ -482,6 +526,9 @@ docker compose -f docker/docker-compose.langfuse.yml up -d
 12. ~~API 认证与多用户~~：已交付 ✅（v0.14.0–v0.16.0：pak- API Key + pat- 登录令牌双轨凭据、三级角色 user/approver/admin、资源级 ACL、SSO 身份头 + 受信代理校验）
 13. ~~服务无状态化~~：已交付 ✅（v0.13.0 会话/审批迁 SQLite 重启不丢；v0.17.1 跨进程会话租约锁，多副本同会话真正串行化）
 14. ~~包签名/来源校验~~：已交付 ✅（v0.13.0 HMAC-SHA256 内容签名，`PACK_SIGNING_KEY` 强制模式下未签名/篡改整包 fail-closed 不加载）
+15. ~~权限体系收尾~~：已交付 ✅（v0.17.9 审批决议权分离与专属技能、v0.17.12 专属自定义工具域、v0.17.18 包级 RBAC；v0.17.11 账号部门维度为下游前置）
+16. ~~计量运营能力~~：已交付 ✅（v0.17.20 模型单价金额化、v0.17.21 部门成本报表 + CSV 导出、v0.17.22 run 健康度、v0.17.23 计量加固）
+17. ~~知识库 RAG 入库管道~~：已交付 ✅（v0.17.0 BM25 参考实现 → v0.17.24 Word/PDF/Excel/PPT/网页入库 + BM25/向量混合检索；出处细化到段落与多库权限见 docs/PLAN.md 2.2/2.3）
 
 领域包第五期（候选方向，剩余）：包市场（内网私有索引 + 一键安装）、
-包级 RBAC（按角色限制可用包）、沙箱镜像按包依赖自动构建。
+沙箱镜像按包依赖自动构建。后续功能缺口盘点与执行优先级见 docs/PLAN.md。
