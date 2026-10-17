@@ -160,6 +160,65 @@ def chunk_markdown(text: str) -> list[tuple[str, str]]:
     return merged
 
 
+def _agg_anchor(vals: list) -> dict | None:
+    """把一块内的行锚点聚合为单一定位锚点（min~max 区间；xlsx 取首个 Sheet）。"""
+    vals = [v for v in vals if v]
+    if not vals:
+        return None
+    kind = vals[0]["kind"]
+    if kind == "sheet":
+        sheet = vals[0].get("sheet", "")
+        vals = [v for v in vals if v.get("sheet") == sheet]
+    nums = [n for v in vals for n in (v["a"], v.get("b", v["a"]))]
+    agg = {"kind": kind, "a": min(nums), "b": max(nums)}
+    if kind == "sheet":
+        agg["sheet"] = vals[0].get("sheet", "")
+    return agg
+
+
+def chunk_markdown_anchored(text: str, anchors: list) -> list[tuple[str, str, dict | None]]:
+    """锚点版分块：与 chunk_markdown 同算法（标题分层 + 二次合并），
+    返回 (标题路径, 块内容, 聚合锚点 dict 或 None)。锚点由 chunk 内首末行的
+    行锚点聚合而来（见 kb_parsers 锚点约定），无锚点行（空行/分隔行）忽略。"""
+    lines = text.splitlines()
+    groups: list[tuple[str, list[int]]] = []  # (标题, 块内行号列表)
+    heading = "（前言）"
+    buf: list[int] = []
+
+    def flush():
+        idxs = list(buf)
+        buf.clear()
+        if any(lines[i].strip() for i in idxs):
+            groups.append((heading, idxs))
+
+    for i, line in enumerate(lines):
+        m = re.match(r"^(#{1,4})\s+(.*)", line)
+        if m:
+            flush()
+            heading = m.group(2).strip()
+        else:
+            buf.append(i)
+            if sum(len(lines[j]) for j in buf) > CHUNK_MAX:
+                flush()
+    flush()
+    # 二次合并过小的块（同标题下）——与 chunk_markdown 同规则
+    merged: list[tuple[str, list[int]]] = []
+    for h, idxs in groups:
+        if merged and merged[-1][0] == h:
+            prev = "\n".join(lines[j] for j in merged[-1][1]).strip()
+            cur = "\n".join(lines[j] for j in idxs).strip()
+            if len(prev) + len(cur) <= CHUNK_MAX:
+                merged[-1] = (h, merged[-1][1] + idxs)
+                continue
+        merged.append((h, idxs))
+    out: list[tuple[str, str, dict | None]] = []
+    for h, idxs in merged:
+        content = "\n".join(lines[j] for j in idxs).strip()
+        anchor = _agg_anchor([anchors[j] for j in idxs if 0 <= j < len(anchors)])
+        out.append((h, content, anchor))
+    return out
+
+
 # ---------------------------------------------------------------- 建索引
 
 
@@ -176,7 +235,7 @@ def build(kb_dir: Path, embed_fn=_UNSET) -> None:
         return
 
     # ---- 解析：单文档失败跳过 + 记入清单，不阻塞整库 ----
-    parsed: list[tuple[str, str]] = []
+    parsed: list[tuple[str, str, list]] = []  # (文档名, 伪md全文, 行锚点列表)
     failed: list[tuple[str, str]] = []
     limit = kb_parsers.MAX_FILE_MB * 1024 * 1024
     for p in docs:
@@ -186,19 +245,28 @@ def build(kb_dir: Path, embed_fn=_UNSET) -> None:
                     f"超过单文件解析上限 {kb_parsers.MAX_FILE_MB}MB，已跳过")
             if p.suffix.lower() in (".md", ".txt"):
                 text = p.read_text(encoding="utf-8")
+                # md/txt 锚点=源文件行号（kind=line，1 起），与 splitlines 逐行对齐
+                anchors = [{"kind": "line", "a": i + 1}
+                           for i in range(len(text.splitlines()))]
             else:
-                text = kb_parsers.parse_document(p)
-            parsed.append((p.name, text))
+                text, anchors = kb_parsers.parse_document(p)
+            parsed.append((p.name, text, anchors))
         except Exception as e:
             msg = str(e).replace(str(kb_dir), "") or type(e).__name__  # 不回显绝对路径
             failed.append((p.name, msg))
 
-    # ---- 分块 ----
-    chunks_all: list[tuple[str, str, str, int, str]] = []
+    # ---- 分块（锚点聚合到块；锚点生成失败不阻塞，块仍可入库）----
+    chunks_all: list[tuple[str, str, str, int, str, str | None]] = []
     df: dict[str, int] = {}
     total_dl = 0
-    for doc_name, text in parsed:
-        for heading, content in chunk_markdown(text):
+    for doc_name, text, anchors in parsed:
+        try:
+            chunked = chunk_markdown_anchored(text, anchors)
+        except Exception as e:
+            print(f"WARNING：{doc_name} 锚点分块失败，降级无锚点入库"
+                  f"（{type(e).__name__}）")
+            chunked = [(h, c, None) for h, c in chunk_markdown(text)]
+        for heading, content, anchor in chunked:
             terms = tokenize(content)
             if not terms:
                 continue
@@ -208,7 +276,8 @@ def build(kb_dir: Path, embed_fn=_UNSET) -> None:
             for t in tf:
                 df[t] = df.get(t, 0) + 1
             chunks_all.append((doc_name, heading, content, len(terms),
-                               json.dumps(tf, ensure_ascii=False)))
+                               json.dumps(tf, ensure_ascii=False),
+                               json.dumps(anchor, ensure_ascii=False) if anchor else None))
             total_dl += len(terms)
 
     # ---- 向量化（失败退化为纯 BM25）----
@@ -232,17 +301,17 @@ def build(kb_dir: Path, embed_fn=_UNSET) -> None:
         db_path.unlink()
     conn = sqlite3.connect(str(db_path))
     conn.execute("CREATE TABLE chunks (doc TEXT, heading TEXT, content TEXT,"
-                 " dl INTEGER, terms TEXT, vec BLOB)")
+                 " dl INTEGER, terms TEXT, vec BLOB, anchor TEXT)")
     conn.execute("CREATE TABLE df (term TEXT PRIMARY KEY, n INTEGER)")
     conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
 
     n_chunks = len(chunks_all)
-    for i, (doc, heading, content, dl, terms_json) in enumerate(chunks_all):
+    for i, (doc, heading, content, dl, terms_json, anchor_json) in enumerate(chunks_all):
         vec_blob = None
         if vecs is not None:
             vec_blob = np.asarray(vecs[i], dtype="<f4").tobytes()
-        conn.execute("INSERT INTO chunks VALUES (?,?,?,?,?,?)",
-                     (doc, heading, content, dl, terms_json, vec_blob))
+        conn.execute("INSERT INTO chunks VALUES (?,?,?,?,?,?,?)",
+                     (doc, heading, content, dl, terms_json, vec_blob, anchor_json))
     for t, n in df.items():
         conn.execute("INSERT INTO df VALUES (?,?)", (t, n))
     backend = os.environ.get("EMBED_BACKEND", "local").strip().lower()

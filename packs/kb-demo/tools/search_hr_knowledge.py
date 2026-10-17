@@ -24,6 +24,7 @@ import numpy as np
 _KB_DIR = Path(os.environ.get(
     "KB_HR_DIR",
     str(Path(__file__).resolve().parents[3] / "kb" / "hr")))
+_KB_NAME = "hr"  # 库名（pack.yaml knowledge_bases 声明一致；出处逻辑路径用）
 _TOP_K = 3
 _SNIPPET_MAX = 400
 _TOPN = 20        # 每通道参与 RRF 融合的条数
@@ -131,7 +132,7 @@ def search_hr_knowledge(query: str) -> str:
         has_vec = meta.get("has_vec") == "1"
 
         # ---- BM25 通道（k1=1.5, b=0.75）----
-        bm25_top: list[tuple[float, int, str, str, str]] = []
+        bm25_top: list[tuple[float, int, str, str, str, str | None]] = []
         if terms:
             n_chunks = int(meta["n_chunks"])
             avgdl = float(meta["avgdl"])
@@ -140,12 +141,12 @@ def search_hr_knowledge(query: str) -> str:
                 terms))
             if df:
                 rows = conn.execute(
-                    f"SELECT rowid, doc, heading, content, dl, terms FROM chunks"
+                    f"SELECT rowid, doc, heading, content, dl, terms, anchor FROM chunks"
                     f" WHERE EXISTS (SELECT 1 FROM json_each(chunks.terms)"
                     f" WHERE json_each.key IN ({','.join('?' * len(terms))}))",
                     terms).fetchall()
                 k1, b = 1.5, 0.75
-                for rowid, doc, heading, content, dl, terms_json in rows:
+                for rowid, doc, heading, content, dl, terms_json, anchor in rows:
                     tf = json.loads(terms_json)
                     score = 0.0
                     for t in terms:
@@ -155,17 +156,17 @@ def search_hr_knowledge(query: str) -> str:
                         score += idf * tf[t] * (k1 + 1) / (
                             tf[t] + k1 * (1 - b + b * dl / avgdl))
                     if score > 0:
-                        bm25_top.append((score, rowid, doc, heading, content))
+                        bm25_top.append((score, rowid, doc, heading, content, anchor))
         bm25_top.sort(key=lambda x: -x[0])
         bm25_top = bm25_top[:_TOPN]
 
         # ---- 向量通道（点积暴力检索）----
-        vec_top: list[tuple[float, int, str, str, str]] = []
+        vec_top: list[tuple[float, int, str, str, str, str | None]] = []
         if has_vec:
             qv = _embed_texts([query])
             if qv:
                 vrows = conn.execute(
-                    "SELECT rowid, doc, heading, content, vec FROM chunks"
+                    "SELECT rowid, doc, heading, content, vec, anchor FROM chunks"
                     " WHERE vec IS NOT NULL").fetchall()
                 if vrows:
                     mat = np.frombuffer(b"".join(r[4] for r in vrows),
@@ -175,32 +176,59 @@ def search_hr_knowledge(query: str) -> str:
                         dots = mat @ q
                         order = np.argsort(-dots, kind="stable")[:_TOPN]
                         vec_top = [(float(dots[i]), vrows[i][0], vrows[i][1],
-                                    vrows[i][2], vrows[i][3]) for i in order]
+                                    vrows[i][2], vrows[i][3], vrows[i][5])
+                                   for i in order]
     finally:
         conn.close()
 
     # ---- RRF 融合（k=60）：单通道空 → 退化另一通道 ----
     def _rrf(channels):
-        fused: dict[int, tuple[float, str, str, str]] = {}
+        fused: dict[int, tuple[float, str, str, str, str | None]] = {}
         for ch in channels:
             for rank, entry in enumerate(ch, 1):
-                _, rowid, doc, heading, content = entry
+                _, rowid, doc, heading, content, anchor = entry
                 s = fused[rowid][0] if rowid in fused else 0.0
-                fused[rowid] = (s + 1.0 / (_RRF_K + rank), doc, heading, content)
+                fused[rowid] = (s + 1.0 / (_RRF_K + rank), doc, heading, content, anchor)
         ordered = sorted(fused.values(), key=lambda x: -x[0])
-        return [(doc, heading, content) for _, doc, heading, content in ordered]
+        return [(doc, heading, content, anchor)
+                for _, doc, heading, content, anchor in ordered]
 
     if bm25_top and vec_top:
         hits = _rrf([bm25_top, vec_top])
     elif bm25_top:
-        hits = [(doc, heading, content) for _, _, doc, heading, content in bm25_top]
+        hits = [(d, h, c, a) for _, _, d, h, c, a in bm25_top]
     elif vec_top:
-        hits = [(doc, heading, content) for _, _, doc, heading, content in vec_top]
+        hits = [(d, h, c, a) for _, _, d, h, c, a in vec_top]
     else:
         return "知识库中未找到相关规定，可换用更口语化的关键词重试"
 
-    out = []
-    for doc, heading, content in hits[:_TOP_K]:
+    # ---- 输出：人读条文（来源行在前，格式与 v0.17.0 一致）
+    #      + 尾部机器可读出处块（v0.17.25：服务端解析后直推前端出处卡片，
+    #      数据不经模型转写；人读文本不含该块，SSE 侧会剥离）----
+    human_parts: list[str] = []
+    cites: list[dict] = []
+    for doc, heading, content, anchor_json in hits[:_TOP_K]:
         snippet = content if len(content) <= _SNIPPET_MAX else content[:_SNIPPET_MAX] + "……"
-        out.append(f"【来源：{doc} · {heading}】\n{snippet}")
-    return "\n\n".join(out)
+        item = {"kb": _KB_NAME, "doc": doc, "heading": heading,
+                "label": f"{doc} · {heading}"}
+        suffix = ""
+        if anchor_json:
+            try:
+                a = json.loads(anchor_json)
+            except Exception:
+                a = None
+            if isinstance(a, dict) and a.get("kind"):
+                item["kind"] = a["kind"]
+                item["a"] = a.get("a")
+                if a.get("b") is not None:
+                    item["b"] = a.get("b")
+                if a.get("sheet"):
+                    item["sheet"] = a["sheet"]
+            else:
+                suffix = "（无锚点）"
+        else:
+            suffix = "（无锚点）"
+        human_parts.append(f"【来源：{doc} · {heading}】{suffix}\n{snippet}")
+        cites.append(item)
+    block = "<kb-citations>" + json.dumps(cites, ensure_ascii=False) + "</kb-citations>"
+    return "\n\n".join(human_parts) + "\n\n" + block

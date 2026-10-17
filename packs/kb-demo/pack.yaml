@@ -10,6 +10,11 @@ requires_modules: []
 permissions:
   - "读取 HR 知识库（kb/hr，只读）"
 
+# 本包检索工具覆盖的知识库（v0.17.25）：定位端点按「kb 名 → 声明包」校验，
+# 与 allowed_roles 同口径放行（未声明 = 不可定位，fail-closed）
+knowledge_bases:
+  - hr
+
 tools:
   - tools/search_hr_knowledge.py
 prompt: prompt.md

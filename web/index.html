@@ -144,6 +144,14 @@
   #logoutBtn { width: 100%; margin-top: 8px; background: none; border: 1px solid var(--border); color: var(--dim);
     border-radius: 10px; padding: 8px; cursor: pointer; font-size: 13px; }
   #logoutBtn:hover { color: #d64545; border-color: #f3c6c6; }
+  /* 知识库出处卡片（v0.17.25，PLAN 2.2）：消息下方可折叠列表，整行可点 */
+  .kb-card { margin-top: 8px; border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    border-radius: 10px; background: #fff; font-size: 13px; overflow: hidden; }
+  .kb-card summary { cursor: pointer; padding: 7px 12px; color: var(--dim); user-select: none; }
+  .kb-cite { display: block; padding: 7px 12px; border-top: 1px solid var(--border); color: var(--text); text-decoration: none; }
+  a.kb-cite:hover { background: #f0fdf4; }
+  a.kb-cite::after { content: " ↗"; color: var(--dim); font-size: 12px; }
+  .kb-cite.noanchor { color: var(--dim); }
 </style>
 </head>
 <body>
@@ -367,7 +375,7 @@ async function checkHealth() {
 checkHealth();
 setInterval(checkHealth, 5000);
 
-function addMsg(role, text) {
+function addMsg(role, text, citations) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
   // 下载链接（/api/files/xxx）渲染为可点击元素：认证模式下 <a href> 不带
@@ -390,9 +398,54 @@ function addMsg(role, text) {
   } else {
     div.textContent = text;
   }
+  if (citations && citations.length) renderCitations(div, citations);
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
   return div;
+}
+
+// ---- 知识库出处卡片（v0.17.25，PLAN 2.2）----
+// citations 由服务端解析工具输出的结构化块后经独立 SSE 事件直推（数据不经
+// 模型转写，链接参数可信），并随 assistant 消息持久化——历史回放同样渲染。
+function citeUrl(c) {
+  const p = new URLSearchParams({
+    kb: c.kb || '', doc: c.doc || '', kind: c.kind || 'line',
+    a: c.a || 1, b: c.b || c.a || 1
+  });
+  if (c.sheet) p.set('sheet', c.sheet);
+  return '/api/kb/source?' + p.toString();
+}
+
+function renderCitations(msgDiv, cites) {
+  // 同轮多次工具调用的出处合并去重（库+文档+章节+锚点相同视为一条）
+  const items = [];
+  const seen = new Set();
+  for (const c of (cites || [])) {
+    const key = [c.kb, c.doc, c.heading, c.a, c.b, c.sheet].join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push(c);
+  }
+  if (!items.length) return;
+  const card = document.createElement('details');
+  card.className = 'kb-card';
+  const summary = document.createElement('summary');
+  summary.textContent = '📚 出处 · ' + items.length + ' 条（点击展开定位原文）';
+  card.appendChild(summary);
+  for (const c of items) {
+    const row = document.createElement(c.a ? 'a' : 'div');
+    row.className = 'kb-cite' + (c.a ? '' : ' noanchor');
+    row.textContent = '📄 ' + (c.label || ((c.doc || '') + ' · ' + (c.heading || '')))
+      + (c.a ? '' : '（无锚点）');
+    if (c.a) {
+      row.href = citeUrl(c);
+      row.target = '_blank';
+      row.rel = 'noopener';
+      row.title = '在新标签页打开原文定位';
+    }
+    card.appendChild(row);
+  }
+  msgDiv.appendChild(card);
 }
 
 async function downloadFile(path) {
@@ -518,6 +571,7 @@ async function send() {
   addMsg('user', text);
   let bubble = null;  // 延迟到首个 token 再创建，保证工具调用标签显示在回答之前
   const getBubble = () => bubble || (bubble = addMsg('assistant', ''));
+  let streamCites = [];  // 本轮出处（citations 事件累积，流结束挂到回答气泡下）
 
   try {
     const resp = await fetch('/api/chat', {
@@ -565,6 +619,7 @@ async function send() {
         }
         else if (ev.type === 'token') { closeThink(); getBubble().textContent += ev.content; chat.scrollTop = chat.scrollHeight; }
         else if (ev.type === 'tool') { closeThink(); addToolChip(ev); }
+        else if (ev.type === 'citations') { streamCites.push(...(ev.citations || [])); }
         else if (ev.type === 'approval_required') addApprovalCard(ev);
         else if (ev.type === 'done') { closeThink(); addUsageNote(ev.usage); }
         else if (ev.type === 'error') { closeThink(); getBubble().textContent += '\n\n⚠️ ' + ev.content; }
@@ -574,6 +629,7 @@ async function send() {
     getBubble().textContent += '\n\n⚠️ 请求失败: ' + e.message + '（已切换到离线状态，自动重连中）';
     checkHealth();  // 立刻刷新状态灯
   }
+  if (streamCites.length) { renderCitations(getBubble(), streamCites); streamCites = []; }
   sendBtn.disabled = !serverOnline;
   input.disabled = !serverOnline;      // 流式期间锁输入，防止并发消息插队
   attachBtn.disabled = !serverOnline;
@@ -669,7 +725,7 @@ async function loadHistory() {
     const msgs = d.messages || [];
     if (!msgs.length) { renderWelcome(); return; }
     addDivider(`已恢复 ${msgs.length} 条历史消息（会话 ${sessionId}）`);
-    for (const m of msgs) addMsg(m.role === 'user' ? 'user' : 'assistant', m.content);
+    for (const m of msgs) addMsg(m.role === 'user' ? 'user' : 'assistant', m.content, m.citations);
   } catch (e) { renderWelcome(); /* 历史恢复失败不影响正常使用 */ }
 }
 loadHistory();

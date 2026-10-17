@@ -12,6 +12,7 @@
 私有化部署零额外组件；生产跨机多副本须替换为 Postgres——SQLite 的
 WAL + busy_timeout 只支持同机多进程共享同一库文件，不适合网络共享存储。
 """
+import json
 import sqlite3
 import threading
 import time
@@ -47,19 +48,26 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             ts REAL NOT NULL
         )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id)")
+    # 出处标注（v0.17.25，PLAN 2.2）：assistant 消息附带的 citations JSON，
+    # 随消息持久化以便历史回放重渲染出处卡片（老库自动补列，不丢数据）
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
+    if "extra" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN extra TEXT")
 
 
-def append(session_id: str, user_id: str, role: str, content: str) -> None:
-    """追加一条消息。content 过长时截断（对话记录不需要超大 payload）。"""
+def append(session_id: str, user_id: str, role: str, content: str,
+           extra: str | None = None) -> None:
+    """追加一条消息。content 过长时截断（对话记录不需要超大 payload）。
+    extra：可选附加 JSON（assistant 消息的 citations 出处列表）。"""
     with _lock:
         conn = _connect()
         try:
             _ensure_schema(conn)
             conn.execute(
-                "INSERT INTO messages (session_id, user_id, role, content, ts)"
-                " VALUES (?,?,?,?,?)",
+                "INSERT INTO messages (session_id, user_id, role, content, ts, extra)"
+                " VALUES (?,?,?,?,?,?)",
                 (session_id, user_id or "anonymous", role,
-                 content[:20_000], time.time()))
+                 content[:20_000], time.time(), extra))
             conn.commit()
         finally:
             conn.close()
@@ -74,10 +82,19 @@ def history(session_id: str, limit: int = 0) -> list[dict]:
         try:
             _ensure_schema(conn)
             rows = conn.execute(
-                "SELECT role, content, ts, user_id FROM messages"
+                "SELECT role, content, ts, user_id, extra FROM messages"
                 " WHERE session_id = ? ORDER BY id DESC LIMIT ?",
                 (session_id, n)).fetchall()
-            return [dict(r) for r in reversed(rows)]
+            out = [dict(r) for r in reversed(rows)]
+            for m in out:  # citations 仅 assistant 消息可能携带；坏 JSON 视为无
+                raw = m.pop("extra", None)
+                try:
+                    m["citations"] = json.loads(raw) if raw else []
+                    if not isinstance(m["citations"], list):
+                        m["citations"] = []
+                except (ValueError, TypeError):
+                    m["citations"] = []
+            return out
         finally:
             conn.close()
 

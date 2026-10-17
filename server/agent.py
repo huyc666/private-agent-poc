@@ -12,12 +12,38 @@
 Mock 模式：MOCK_LLM=true 时不依赖任何 GPU/模型，用于验证全链路。
 """
 import asyncio
+import json
+import re
 import sys
 import threading
 from typing import AsyncIterator
 
 from . import approval, config, custom_tools, packs, skills, telemetry, usage, tools_admin
 from .state import STATE
+
+
+# ---------------------------------------------------------------- 出处块解析
+
+_CITE_TAG = re.compile(r"<kb-citations>(\[.*?\])</kb-citations>", re.S)
+
+
+def parse_citations(text: str) -> tuple[str, list | None]:
+    """从知识库检索工具输出剥离机器可读出处块（v0.17.25，PLAN 2.2）。
+
+    工具输出 = 人读条文 + 尾部 <kb-citations>[...]</kb-citations>。本函数
+    拆出两部分：给人看的文本（SSE/落库用，不再含标签）与 citations 结构
+    （经服务端解析后以独立 SSE 事件直推前端出处卡片——出处数据不经模型
+    转写，链接参数可信）。坏 JSON / 非 list 视为无出处，原样保留输出。"""
+    m = _CITE_TAG.search(text)
+    if not m:
+        return text, None
+    try:
+        cites = json.loads(m.group(1))
+    except ValueError:
+        return text, None
+    if not isinstance(cites, list):
+        return text, None
+    return (text[:m.start()] + text[m.end():]).rstrip(), cites
 
 
 # ---------------------------------------------------------------- MCP 工具
@@ -80,11 +106,13 @@ def _rebuild_graph():
     from langgraph.prebuilt import create_react_agent
 
     # checkpointer 是 interrupt 审批流的前提（中断现场需要落盘才能恢复）
-    # 静态系统提示词 = 基础 + 通用技能索引 + 上传说明（图重建时刷新）；
-    # 领域包片段 PLAN 1.2 起随 _dynamic_prompt 按角色每轮注入（包级 RBAC 提示层）；
-    # 本人专属技能索引按请求身份在 _dynamic_prompt 里每轮动态注入（v0.17.9）
+    # 静态系统提示词 = 基础 + 通用技能索引 + 上传说明 + 知识库问答规范
+    # （图重建时刷新）；领域包片段 PLAN 1.2 起随 _dynamic_prompt 按角色每轮
+    # 注入（包级 RBAC 提示层）；本人专属技能索引按请求身份在 _dynamic_prompt
+    # 里每轮动态注入（v0.17.9）
     STATE.system_prompt_static = (
-        config.SYSTEM_PROMPT + skills.skill_index_prompt() + config.UPLOAD_PROMPT)
+        config.SYSTEM_PROMPT + skills.skill_index_prompt()
+        + config.UPLOAD_PROMPT + config.KB_QA_PROMPT)
     STATE.agent = create_react_agent(STATE.llm, tools, prompt=_dynamic_prompt,
                                      checkpointer=STATE.checkpointer,
                                      pre_model_hook=_pre_model_hook)
@@ -102,7 +130,8 @@ def _dynamic_prompt(state: dict) -> list:
     from . import auth
 
     system = getattr(STATE, "system_prompt_static", "") or (
-        config.SYSTEM_PROMPT + skills.skill_index_prompt() + config.UPLOAD_PROMPT)
+        config.SYSTEM_PROMPT + skills.skill_index_prompt()
+        + config.UPLOAD_PROMPT + config.KB_QA_PROMPT)
     fragments = packs.prompt_fragments(role=auth.current_role())
     if fragments:
         system += "\n\n" + fragments
@@ -451,9 +480,15 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
                 elif kind == "on_tool_end":
                     output = event["data"].get("output")
                     text = getattr(output, "content", output)
+                    # 知识库检索工具输出尾部的机器可读出处块：剥离后以独立
+                    # citations 事件直推前端（v0.17.25），工具文本不含标签；
+                    # 截断在剥离之后进行，出处行保持完整
+                    clean, cites = parse_citations(str(text))
+                    if cites:
+                        yield {"type": "citations", "citations": cites}
                     yield {"type": "tool", "status": "end",
                            "name": event.get("name", "?"),
-                           "result": str(text)[:2000]}
+                           "result": clean[:2000]}
         except Exception as e:
             # resume 轮抛错：executed_at 不标记，记录保持「已批准但未执行」
             # （审计可见，绝不让失败被误报为已执行）

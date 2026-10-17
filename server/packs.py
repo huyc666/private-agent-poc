@@ -23,6 +23,7 @@ import yaml
 from . import config, custom_tools, packsign, skills
 
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,49}$")
+KB_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")  # 知识库库名（pack.yaml 声明）
 
 # 运行时被禁用的包名（内存态，重启后以 ENABLED_PACKS 为准）
 _disabled: set[str] = set()
@@ -142,6 +143,24 @@ def _parse_pack(pack_dir: Path) -> dict:
                              "（合法值: user / approver / admin）")
             return info
         info["allowed_roles"] = sorted(set(roles))
+
+    # 知识库声明（PLAN 2.2）：本包检索工具覆盖的库名（kb/<库名>）。
+    # 定位端点按「kb 名 → 声明包」归属校验，与 allowed_roles 同口径放行；
+    # fail-closed：库名格式非法判清单错误，未声明 = 不可定位。
+    raw_bases = data.get("knowledge_bases")
+    if raw_bases is None:
+        info["knowledge_bases"] = []
+    else:
+        if isinstance(raw_bases, str):
+            raw_bases = [raw_bases]
+        if (not isinstance(raw_bases, list) or not raw_bases
+                or any(not isinstance(b, str) or not KB_NAME_PATTERN.match(b)
+                       for b in raw_bases)):
+            info["status"] = "error"
+            info["error"] = ("knowledge_bases 必须是非空库名字符串列表"
+                             "（小写字母/数字/连字符/下划线，≤64 字符）")
+            return info
+        info["knowledge_bases"] = sorted(set(raw_bases))
 
     # 可信签名校验（v0.13.0）：强制模式下未签名/签名无效/内容被篡改 → 整包不可用
     info["signature"] = str(data.get("signature", "") or "")
@@ -275,6 +294,7 @@ def list_packs() -> list[dict]:
         "trust": p.get("trust", "unsigned"),
         "permissions": p.get("permissions", []),
         "allowed_roles": p.get("allowed_roles", []),
+        "knowledge_bases": p.get("knowledge_bases", []),
     } for p in scan_packs()]
 
 

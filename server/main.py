@@ -14,18 +14,22 @@ import json
 import os
 import re
 import sys
+import unicodedata
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               Response, StreamingResponse)
 from pydantic import BaseModel
 
 from server import (agent, approval, auth, config, custom_tools, packs,
                     session_lock, sessions, skills, telemetry, usage)
+from tools import kb_parsers  # 定位端点按锚点重解析文档（服务器侧，不进包）
 
 
 def _bearer_token(request: Request) -> str:
@@ -237,6 +241,7 @@ async def chat(req: ChatRequest, request: Request):
                                         "user", req.message)
                 try:
                     yield f"data: {json.dumps({'type': 'session', 'session_id': session_id, 'run_id': run_id}, ensure_ascii=False)}\n\n"
+                    citations: list[dict] = []  # 本轮 run 的出处（多工具合并）
                     async for ev in agent.stream_reply(new_message, session_id=session_id,
                                                        user_id=user_id, run_id=run_id):
                         if lease.lost:
@@ -247,6 +252,10 @@ async def chat(req: ChatRequest, request: Request):
                             break
                         if ev["type"] == "token":
                             collected.append(ev["content"])
+                        elif ev["type"] == "citations":
+                            # 出处卡片数据（v0.17.25）：随 assistant 消息持久化，
+                            # 历史回放可重渲染；同轮多次工具调用由前端去重
+                            citations.extend(ev.get("citations") or [])
                         yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
                     else:
                         finished = True
@@ -259,7 +268,9 @@ async def chat(req: ChatRequest, request: Request):
                             text += ("\n\n（会话租约被其他进程接管，回复中止）"
                                      if lease.lost else "\n\n（连接中断，回复不完整）")
                         await asyncio.to_thread(
-                            sessions.append, session_id, user_id, "assistant", text)
+                            sessions.append, session_id, user_id, "assistant", text,
+                            extra=(json.dumps(citations, ensure_ascii=False)
+                                   if citations else None))
             finally:
                 await lease.__aexit__()  # 停心跳 + 释放租约（与 __aenter__ 配对）
 
@@ -608,6 +619,218 @@ async def upload_delete(request: Request, name: str):
         return JSONResponse({"error": "文件不存在"}, status_code=404)
     target.unlink()
     return {"deleted": rel}
+
+
+# ---------------------------------------------------------------- 知识库定位（v0.17.25，PLAN 2.2）
+
+@app.get("/vendor/{name}")
+def vendor_file(name: str):
+    """本地 vendor 静态资源（离线前端约束：mammoth 等第三方库 vendor 到
+    web/vendor/，内网断网可用，不引 CDN）。仅纯文件名，防穿越。"""
+    if not name or name != Path(name).name or ".." in name \
+            or "/" in name or "\\" in name:
+        return JSONResponse({"error": "非法资源名"}, status_code=404)
+    p = config.PROJECT_ROOT / "web" / "vendor" / name
+    if not p.is_file():
+        return JSONResponse({"error": "资源不存在"}, status_code=404)
+    media = "application/javascript" if name.endswith(".js") else \
+        "text/css" if name.endswith(".css") else "application/octet-stream"
+    return FileResponse(str(p), media_type=media)
+
+
+def _kb_home() -> Path:
+    """知识库根目录（kb/<库名>/<文档名>）。独立函数便于测试替身注入。"""
+    return Path(__file__).resolve().parents[1] / "kb"
+
+
+def _declared_kb_packs() -> list[dict]:
+    """启用包中声明了 knowledge_bases 的清单（kb 名 → 包归属 + 包级 RBAC）。
+    独立函数便于测试替身注入。"""
+    return [p for p in packs.enabled_packs() if p.get("knowledge_bases")]
+
+
+def kb_allowed(kb: str, role: str | None,
+               packs_list: list[dict] | None = None) -> bool:
+    """定位端点权限（fail-closed）：kb 名必须被启用包 knowledge_bases 声明，
+    且该包 allowed_roles 放行当前角色（未配置 = 放行，与工具层/提示层同口径；
+    role=None 视为开放模式放行）。堵住「包 RBAC 挡了检索工具、
+    定位端点仍可枚举翻库」的旁路（PLAN 2.2 澄清 4）。"""
+    for p in (packs_list if packs_list is not None else _declared_kb_packs()):
+        if kb in (p.get("knowledge_bases") or []):
+            if role is None:
+                return True  # 开放模式（认证关闭）
+            allowed = p.get("allowed_roles") or []
+            return (not allowed) or role in allowed
+    return False
+
+
+_KB_DOC_MAX = 200  # 文档名长度上限（防超长名资源浪费；正常文档名远小于此）
+
+
+def _source_page(title: str, body: str) -> HTMLResponse:
+    """片段视图公共壳：纯内联样式（离线前端约束），命中行 .hl 高亮。"""
+    return HTMLResponse(
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        f"<title>{title}</title><style>"
+        "body{font-family:system-ui,'Segoe UI','Microsoft YaHei',sans-serif;"
+        "margin:24px;color:#1f2937;max-width:900px}"
+        "h1{font-size:16px}.path{color:#6b7280;font-size:13px;margin-bottom:16px}"
+        ".kb-line{display:flex;gap:12px;padding:2px 8px;line-height:1.7;"
+        "border-left:3px solid transparent}"
+        ".kb-line.hl{background:#fef9c3;border-left-color:#eab308}"
+        ".ln{color:#9ca3af;min-width:3em;text-align:right;user-select:none;"
+        "font-size:12px;padding-top:3px}"
+        "p{margin:4px 0;line-height:1.7}"
+        "p.hl{background:#fef9c3;outline:2px solid #eab308}"
+        "</style></head><body>"
+        f"<h1>知识库原文</h1><div class='path'>{title}</div>{body}</body></html>")
+
+
+@app.get("/api/kb/source")
+async def kb_source(request: Request, kb: str, doc: str, kind: str = "line",
+                    a: int = 0, b: int = 0, sheet: str = "", raw: int = 0):
+    """知识库原文定位视图（只读）：出处卡片点击后按锚点打开对应格式。
+
+    分流（spec 2.2 澄清 2 分层排版还原）：
+    - kind=page 且 pdf → 原始 pdf 流（浏览器原生查看器 #page=N 跳页，真实排版）
+    - kind=para 且 docx → raw=1 返回原始二进制（mammoth 前端还原语义排版）；
+      否则返回渲染页（本地 vendor mammoth + 服务端文本片段作降级兜底）
+    - kind=line/sheet/slide（md/txt/html/xlsx/pptx）→ 文本片段页
+      （命中行 ±5 上下文、高亮标记）
+    权限：认证开启时须登录，角色跟随声明包 allowed_roles；kb 未声明/文档名
+    非法/文件不存在一律 404（不区分「不存在」与「无权」，不暴露库清单）。
+    逻辑路径 kb/<库名>/<文档名>，错误信息不含服务器绝对路径。"""
+    if auth.enabled():
+        ident = _acl_identity(request)
+        if not ident:
+            return JSONResponse({"error": "未登录"}, status_code=401)
+        role = ident.get("role", "")
+    else:
+        role = None  # 开放模式：与现有开放部署行为一致
+    if not kb_allowed(kb, role):
+        return JSONResponse({"error": "知识库不存在"}, status_code=404)
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", kb or ""):
+        return JSONResponse({"error": "知识库不存在"}, status_code=404)
+    # 文档名防御：NFC 归一化后必须为纯文件名（穿越/控制字符一律 404）
+    doc = unicodedata.normalize("NFC", doc or "")
+    if (not doc or len(doc) > _KB_DOC_MAX or doc != Path(doc).name
+            or "/" in doc or "\\" in doc or ".." in doc
+            or any(ord(c) < 32 for c in doc)):
+        return JSONResponse({"error": "文档不存在"}, status_code=404)
+    path = _kb_home() / kb / doc
+    if not path.is_file():
+        return JSONResponse({"error": "文档不存在"}, status_code=404)
+
+    logical = f"kb/{kb}/{doc}"
+    if b < a:
+        b = a
+    ext = path.suffix.lower()
+
+    # ---- pdf：原始流（原生查看器跳页由前端链接 #page=N 附加）----
+    if kind == "page" and ext == ".pdf":
+        return FileResponse(str(path), media_type="application/pdf")
+
+    # ---- docx：mammoth 渲染页（raw=1 给前端 fetch 原始二进制）----
+    if kind == "para" and ext == ".docx":
+        if raw:
+            return FileResponse(str(path), filename=doc)
+        try:
+            text, _anchors = await asyncio.to_thread(kb_parsers.parse_document, path)
+        except kb_parsers.KbParseError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        rows = [(ln, anc) for ln, anc in zip(text.splitlines(), _anchors)
+                if ln.strip()]
+        fallback = "".join(
+            f"<p class='hl' data-a='{(anc or {}).get('a', '')}'>{ln}</p>"
+            if anc and a <= (anc.get("a") or 0) <= b else f"<p>{ln}</p>"
+            for ln, anc in rows)
+        src_url = f"/api/kb/source?kb={quote(kb)}&doc={quote(doc)}&kind=para&a={a}&raw=1"
+        page = (
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            f"<title>{doc}</title><style>"
+            "body{font-family:system-ui,'Segoe UI','Microsoft YaHei',sans-serif;"
+            "margin:24px;color:#1f2937;max-width:860px;line-height:1.75}"
+            "h1{font-size:16px}.path{color:#6b7280;font-size:13px;margin-bottom:16px}"
+            "table{border-collapse:collapse}td,th{border:1px solid #d1d5db;"
+            "padding:4px 10px}.hl{background:#fef9c3}"
+            "#fallback{display:none;border:1px dashed #d1d5db;padding:12px;"
+            "border-radius:8px}"
+            "</style></head><body>"
+            f"<h1>知识库原文（Word 还原）</h1><div class='path'>{logical}</div>"
+            "<div id='content'>加载中……</div>"
+            "<div id='fallback'><p>浏览器还原失败，显示提取文本：</p>"
+            + fallback + "</div>"
+            "<script src='/vendor/mammoth.browser.min.js'></script>"
+            "<script>(function(){"
+            "var mark=function(root){var lo=" + str(a) + ",hi=" + str(b) + ";"
+            "var ps=root.querySelectorAll('p');for(var i=0;i<ps.length;i++){"
+            "if(ps[i].getAttribute('data-a')&&+ps[i].getAttribute('data-a')>=lo"
+            "&&+ps[i].getAttribute('data-a')<=hi){ps[i].classList.add('hl');"
+            "if(!window.__scrolled){window.__scrolled=1;"
+            "ps[i].scrollIntoView({block:'center'});}}}};"
+            "fetch('" + src_url + "').then(function(r){if(!r.ok)throw 0;"
+            "return r.arrayBuffer()}).then(function(buf){"
+            "mammoth.convertToHtml({arrayBuffer:buf})"
+            ".then(function(res){document.getElementById('content').innerHTML=res.value;"
+            "mark(document);})"
+            ".catch(function(){document.getElementById('content').style.display='none';"
+            "document.getElementById('fallback').style.display='block';});})"
+            ".catch(function(){document.getElementById('content').style.display='none';"
+            "document.getElementById('fallback').style.display='block';});})();</script>"
+            "</body></html>")
+        return HTMLResponse(page)
+
+    # ---- 其余：文本片段页（md/txt 原文件行号；xlsx/pptx/html 解析器行锚点）----
+    try:
+        if kind == "line" and ext in (".md", ".txt"):
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            rows = [(i + 1, ln, {"kind": "line", "a": i + 1})
+                    for i, ln in enumerate(lines)]
+        else:
+            text, anchors = await asyncio.to_thread(kb_parsers.parse_document, path)
+            rows = [(i + 1, ln, anchors[i])
+                    for i, ln in enumerate(text.splitlines())]
+    except kb_parsers.KbParseError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+
+    hit: set[int] = set()       # 高亮行号（片段视图坐标系）
+    shown: list[tuple[int, str]] = []
+    if kind == "line":
+        for n, ln, _anc in rows:
+            if a - 5 <= n <= b + 5:
+                shown.append((n, ln))
+                if a <= n <= b:
+                    hit.add(n)
+    else:
+        for n, ln, anc in rows:
+            k = (anc or {}).get("kind")
+            if k == "para" and a <= (anc.get("a") or 0) <= b + 5:
+                if a - 5 <= (anc.get("a") or 0) <= b:
+                    hit.add(n)
+                shown.append((n, ln))
+            elif k == "sheet" and (anc.get("sheet") or "") == sheet \
+                    and a - 3 <= (anc.get("a") or 0) <= b + 3:
+                if a <= (anc.get("a") or 0) <= b:
+                    hit.add(n)
+                shown.append((n, ln))
+            elif k == "slide" and a <= (anc.get("a") or 0) <= b:
+                hit.add(n)
+                shown.append((n, ln))
+    if not shown:
+        return JSONResponse({"error": "锚点无法定位（文档可能已更新，请重建索引后重试）"},
+                            status_code=404)
+    body = "".join(
+        f"<div class='kb-line{' hl' if n in hit else ''}' id='L{n}'>"
+        f"<span class='ln'>{n}</span><span>{_esc(ln)}</span></div>"
+        for n, ln in shown)
+    return _source_page(logical, body)
+
+
+def _esc(s: str) -> str:
+    """HTML 转义（片段视图防注入：文档内容先转义再入页）。"""
+    return (s.replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;")
+            .replace("'", "&#39;"))
 
 
 @app.get("/api/approvals")
