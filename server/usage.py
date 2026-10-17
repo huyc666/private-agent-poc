@@ -10,12 +10,18 @@
 存储：SQLite（USAGE_DB，默认 data/usage.db 运行时目录），私有化部署零额外组件；
 生产可替换为 Postgres（表结构见 _ensure_schema）。
 
+金额折算：MODEL_PRICES 配置模型单价（元/百万 tokens，输入/输出分开），落账时按
+当时单价折算 prompt_cost / completion_cost 并固化（价格调整只影响新记录）；
+缺单价或配置非法的模型仅记 token（WARNING 提示），绝不因折算阻塞落账。
+
 维度定义：
 - 用户 user_id：请求方标识（API 认证落地前由调用方传入，缺省 anonymous）
 - 任务 run_id：一次 /api/chat 请求的完整运行（可能含多轮模型调用与 worker 子调用）
 - 会话 session_id：同一对话的多次运行累计
 """
 import contextvars
+import json
+import logging
 import sqlite3
 import threading
 import time
@@ -23,12 +29,48 @@ from pathlib import Path
 
 from . import config
 
+logger = logging.getLogger(__name__)
+
 # 请求上下文（stream_reply 设置，UsageCallback 读取）
 current_user = contextvars.ContextVar("usage_user", default="anonymous")
 current_session = contextvars.ContextVar("usage_session", default="")
 current_run = contextvars.ContextVar("usage_run", default="")
 
 _lock = threading.Lock()
+
+
+def parse_model_prices(raw: str) -> dict:
+    """解析 MODEL_PRICES（JSON：{"模型名": {"input": 输入单价, "output": 输出单价}}，
+    单位 元/百万 tokens）。空串 = 未配置；非法 JSON / 非对象 / 条目不合法时
+    WARNING 并跳过——宁可不折算，不折错。"""
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        logger.warning("[usage] MODEL_PRICES 不是合法 JSON，金额折算停用（token 照常记录）")
+        return {}
+    if not isinstance(data, dict):
+        logger.warning("[usage] MODEL_PRICES 需为 {模型名: {input, output}} JSON 对象，"
+                       "金额折算停用（token 照常记录）")
+        return {}
+    prices = {}
+    for name, item in data.items():
+        def _num(v):
+            return isinstance(v, (int, float)) and not isinstance(v, bool)
+        if (not name.strip() or not isinstance(item, dict)
+                or not _num(item.get("input")) or not _num(item.get("output"))
+                or item["input"] < 0 or item["output"] < 0):
+            logger.warning("[usage] MODEL_PRICES 条目非法（需非负 input/output 单价），"
+                           "模型 %s 不折算（token 照常记录）", name)
+            continue
+        prices[name] = {"input": float(item["input"]), "output": float(item["output"])}
+    return prices
+
+
+# 进程内价格表：启动时解析固化，价格调整重启生效（历史账按落账时单价固化）
+_PRICES: dict = parse_model_prices(config.MODEL_PRICES)
 
 
 def _db_path() -> Path:
@@ -60,8 +102,16 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             source TEXT NOT NULL,
             prompt_tokens INTEGER NOT NULL,
             completion_tokens INTEGER NOT NULL,
-            total_tokens INTEGER NOT NULL
+            total_tokens INTEGER NOT NULL,
+            prompt_cost REAL NOT NULL DEFAULT 0,
+            completion_cost REAL NOT NULL DEFAULT 0
         )""")
+    # 老库迁移：无金额列则补齐（幂等；历史行按默认 0 计入，token 数据不动）
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(usage_records)")}
+    if cols and "prompt_cost" not in cols:
+        conn.execute("ALTER TABLE usage_records ADD COLUMN prompt_cost REAL NOT NULL DEFAULT 0")
+    if cols and "completion_cost" not in cols:
+        conn.execute("ALTER TABLE usage_records ADD COLUMN completion_cost REAL NOT NULL DEFAULT 0")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_records(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_run ON usage_records(run_id)")
@@ -69,25 +119,31 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def record(model: str, usage: dict, source: str = "main") -> None:
-    """记录一次模型调用的 token 消耗（归属信息取自 contextvars）。
-    usage 为空或全零（提供方未返回 usage）时跳过。"""
+    """记录一次模型调用的 token 消耗与金额折算（归属信息取自 contextvars）。
+    usage 为空或全零（提供方未返回 usage）时跳过；缺单价模型金额记 0。"""
     pt = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
     ct = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
     tt = int(usage.get("total_tokens") or pt + ct)
     if tt <= 0:
         return
     now = time.time()
+    resolved_model = model or config.MODEL_NAME
+    price = _PRICES.get(resolved_model)
+    # 单位 元/百万 tokens；落账时折算并固化，round 6 位防浮点噪声累积
+    prompt_cost = round(pt / 1e6 * price["input"], 6) if price else 0.0
+    completion_cost = round(ct / 1e6 * price["output"], 6) if price else 0.0
     row = (now, time.strftime("%Y-%m-%d", time.localtime(now)),
            current_user.get(), current_session.get(), current_run.get(),
-           model or config.MODEL_NAME, source, pt, ct, tt)
+           resolved_model, source, pt, ct, tt, prompt_cost, completion_cost)
     with _lock:
         conn = _connect()
         try:
             _ensure_schema(conn)
             conn.execute(
                 "INSERT INTO usage_records (ts, date, user_id, session_id, run_id,"
-                " model, source, prompt_tokens, completion_tokens, total_tokens)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?)", row)
+                " model, source, prompt_tokens, completion_tokens, total_tokens,"
+                " prompt_cost, completion_cost)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", row)
             conn.commit()
         finally:
             conn.close()
@@ -132,31 +188,48 @@ def _query(sql: str, params: tuple = ()) -> list[dict]:
             conn.close()
 
 
+_COST_COLS = ("COALESCE(SUM(prompt_cost),0) AS prompt_cost,"
+              " COALESCE(SUM(completion_cost),0) AS completion_cost")
+
+
+def _attach_total_cost(row: dict) -> dict:
+    """视图行补 total_cost（明细金额 SUM，round 6 位防浮点噪声）。"""
+    row["total_cost"] = round(row.get("prompt_cost", 0.0)
+                              + row.get("completion_cost", 0.0), 6)
+    return row
+
+
 def run_usage(run_id: str) -> dict:
-    """单次任务（一次 /api/chat 运行）的消耗合计。"""
+    """单次任务（一次 /api/chat 运行）的消耗合计（含金额）。"""
     rows = _query(
         "SELECT COUNT(*) AS calls, COALESCE(SUM(prompt_tokens),0) AS prompt_tokens,"
         " COALESCE(SUM(completion_tokens),0) AS completion_tokens,"
-        " COALESCE(SUM(total_tokens),0) AS total_tokens"
+        " COALESCE(SUM(total_tokens),0) AS total_tokens,"
+        f" {_COST_COLS}"
         " FROM usage_records WHERE run_id = ?", (run_id,))
-    return rows[0] if rows else {"calls": 0, "prompt_tokens": 0,
-                                 "completion_tokens": 0, "total_tokens": 0}
+    row = rows[0] if rows else {"calls": 0, "prompt_tokens": 0,
+                                "completion_tokens": 0, "total_tokens": 0,
+                                "prompt_cost": 0.0, "completion_cost": 0.0}
+    return _attach_total_cost(row)
 
 
 def session_usage(session_id: str) -> dict:
-    """一个会话的累计消耗。"""
+    """一个会话的累计消耗（含金额）。"""
     rows = _query(
         "SELECT COUNT(*) AS calls, COALESCE(SUM(prompt_tokens),0) AS prompt_tokens,"
         " COALESCE(SUM(completion_tokens),0) AS completion_tokens,"
-        " COALESCE(SUM(total_tokens),0) AS total_tokens"
+        " COALESCE(SUM(total_tokens),0) AS total_tokens,"
+        f" {_COST_COLS}"
         " FROM usage_records WHERE session_id = ?", (session_id,))
-    return rows[0] if rows else {"calls": 0, "prompt_tokens": 0,
-                                 "completion_tokens": 0, "total_tokens": 0}
+    row = rows[0] if rows else {"calls": 0, "prompt_tokens": 0,
+                                "completion_tokens": 0, "total_tokens": 0,
+                                "prompt_cost": 0.0, "completion_cost": 0.0}
+    return _attach_total_cost(row)
 
 
 def summary(user_id: str = "", session_id: str = "", days: int = 0) -> dict:
-    """聚合视图：总量 + 按用户 / 按会话 / 按任务（run）分组。
-    days>0 时只统计最近 N 天。"""
+    """聚合视图：总量 + 按用户 / 按会话 / 按任务（run）分组（含金额字段）。
+    days>0 时只统计最近 N 天。total_cost 只含已折算部分（缺单价模型 cost=0）。"""
     where, params = [], []
     if user_id:
         where.append("user_id = ?")
@@ -173,22 +246,28 @@ def summary(user_id: str = "", session_id: str = "", days: int = 0) -> dict:
     total = _query(
         "SELECT COUNT(*) AS calls, COALESCE(SUM(prompt_tokens),0) AS prompt_tokens,"
         " COALESCE(SUM(completion_tokens),0) AS completion_tokens,"
-        " COALESCE(SUM(total_tokens),0) AS total_tokens"
+        " COALESCE(SUM(total_tokens),0) AS total_tokens,"
+        f" {_COST_COLS}"
         f" FROM usage_records{cond}", tuple(params))
     by_user = _query(
         "SELECT user_id, COUNT(*) AS calls, SUM(total_tokens) AS total_tokens,"
-        " SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens"
+        " SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens,"
+        f" {_COST_COLS}"
         f" FROM usage_records{cond} GROUP BY user_id ORDER BY total_tokens DESC LIMIT 50",
         tuple(params))
     by_session = _query(
-        "SELECT session_id, user_id, COUNT(*) AS calls, SUM(total_tokens) AS total_tokens"
+        "SELECT session_id, user_id, COUNT(*) AS calls, SUM(total_tokens) AS total_tokens,"
+        f" {_COST_COLS}"
         f" FROM usage_records{cond} GROUP BY session_id ORDER BY total_tokens DESC LIMIT 50",
         tuple(params))
     by_run = _query(
         "SELECT run_id, session_id, user_id, date, COUNT(*) AS calls,"
         " SUM(total_tokens) AS total_tokens,"
-        " SUM(CASE WHEN source='worker' THEN total_tokens ELSE 0 END) AS worker_tokens"
+        " SUM(CASE WHEN source='worker' THEN total_tokens ELSE 0 END) AS worker_tokens,"
+        f" {_COST_COLS}"
         f" FROM usage_records{cond} GROUP BY run_id ORDER BY MAX(ts) DESC LIMIT 50",
         tuple(params))
-    return {"total": total[0] if total else {}, "by_user": by_user,
-            "by_session": by_session, "by_run": by_run}
+    return {"total": _attach_total_cost(total[0]) if total else {},
+            "by_user": [_attach_total_cost(r) for r in by_user],
+            "by_session": [_attach_total_cost(r) for r in by_session],
+            "by_run": [_attach_total_cost(r) for r in by_run]}

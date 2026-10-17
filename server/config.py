@@ -140,6 +140,9 @@ def _migrate_legacy_db(name: str) -> None:
 
 # ---- Token 计量（按用户/任务/会话，SQLite 零依赖存储）----
 USAGE_DB = os.environ.get("USAGE_DB", str(_DATA_DIR / "usage.db"))
+# 模型单价（元/百万 tokens）：JSON {"模型名": {"input": 输入单价, "output": 输出单价}}。
+# 落账时按当时单价折算金额并固化；缺单价模型仅记 token 不折算；自建 vLLM 可配 0。
+MODEL_PRICES = os.environ.get("MODEL_PRICES", "")
 
 # ---- 领域包（Domain Pack）：通用内核 + 可插拔领域能力 ----
 # 每个包是 packs/ 下的一个目录（pack.yaml + tools/ + skills/ + prompt.md），

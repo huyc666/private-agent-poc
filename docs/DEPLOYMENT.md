@@ -287,6 +287,12 @@ Agent 服务确保完全生效。
 注意：vLLM 与 DeepSeek 均会返回 usage；若某提供方不返回，该次调用跳过不计。
 usage.db 是运行数据（v0.17.19 起默认在 `data/` 目录），备份/迁移时随该目录一并处理即可。
 
+**成本金额化（v0.17.20 起）**：配置 `MODEL_PRICES`（JSON，元/百万 tokens，
+输入/输出分开，见 `.env.example` 样例）后，落账时按当时单价折算金额并固化
+（价格调整只影响新记录，历史账可审计）；`/api/usage` 各视图新增金额字段
+（prompt_cost / completion_cost / total_cost）。未配置单价的模型仅记 token
+不报错；非法配置启动时 WARNING 提示并停用折算，不影响计量主链路。
+
 ## 五、安全机制说明（评审要点）
 
 | 机制 | 行为 |
