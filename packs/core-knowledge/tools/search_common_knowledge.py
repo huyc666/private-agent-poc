@@ -1,7 +1,13 @@
 """core-knowledge 平台包工具：search_common_knowledge。
 
-检索公司通用知识库（kb/common，BM25 索引），返回带来源标注的相关条文。
-索引由 tools/build_kb.py 生成；知识更新后重跑建索引即可（数据在包外，不碰签名）。
+检索公司通用知识库（kb/common），BM25 + 向量双通道混合排序（RRF 融合），
+返回带来源标注的相关条文。索引由 tools/build_kb.py 生成；知识更新后重跑
+建索引即可（数据在包外，不碰签名）。
+
+混合检索：BM25（中文 bigram，k1=1.5/b=0.75）与语义向量（EMBED_BACKEND：
+local=fastembed 进程内离线推理 / openai=外部 OpenAI 兼容 /v1/embeddings）
+双通道各取 top20，RRF(k=60) 融合；单通道无结果自动退化另一通道；向量
+通道不可用时退化为纯 BM25。
 
 本文件是「知识库检索工具模板」：复制到其他领域包时只需改三处——
 工具名、KB_DIR 环境变量名/默认目录、docstring 中的库说明。
@@ -12,7 +18,10 @@ import math
 import os
 import re
 import sqlite3
+import sys
 from pathlib import Path
+
+import numpy as np
 
 # 数据目录：环境变量优先，默认 <项目根>/kb/common（本文件位于 packs/<包>/tools/ 下）
 _KB_DIR = Path(os.environ.get(
@@ -20,6 +29,8 @@ _KB_DIR = Path(os.environ.get(
     str(Path(__file__).resolve().parents[3] / "kb" / "common")))
 _TOP_K = 3
 _SNIPPET_MAX = 400
+_TOPN = 20        # 每通道参与 RRF 融合的条数
+_RRF_K = 60       # RRF 平滑常数
 
 _CJK = re.compile(r"[一-鿿]")
 _WORD = re.compile(r"[a-z0-9]+")
@@ -48,6 +59,63 @@ def _tokenize(text: str) -> list[str]:
     return terms
 
 
+# ---- 向量引擎（与 tools/build_kb.py 同一套 EMBED_* 配置；进程内缓存）----
+
+_ENGINE = None
+_WARNED = False
+
+
+def _embed_model() -> str:
+    return os.environ.get("EMBED_MODEL", "BAAI/bge-small-zh-v1.5")
+
+
+def _get_engine():
+    global _ENGINE
+    if _ENGINE is None:
+        from fastembed import TextEmbedding
+        _ENGINE = TextEmbedding(model_name=_embed_model(),
+                                cache_dir=os.environ.get("EMBED_CACHE_DIR") or None)
+    return _ENGINE
+
+
+def _embed_openai(texts: list[str]) -> list[list[float]]:
+    import urllib.request
+    base = os.environ.get("EMBED_API_BASE", "").rstrip("/")
+    if not base:
+        raise ValueError("EMBED_BACKEND=openai 需配置 EMBED_API_BASE")
+    key = os.environ.get("EMBED_API_KEY", "")
+    out: list[list[float]] = []
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    for i in range(0, len(texts), 32):
+        req = urllib.request.Request(
+            base + "/embeddings",
+            data=json.dumps({"model": _embed_model(),
+                             "input": texts[i:i + 32]}).encode("utf-8"),
+            headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        out.extend(item["embedding"] for item in data["data"])
+    return out
+
+
+def _embed_texts(texts: list[str]) -> list[list[float]] | None:
+    """按 EMBED_BACKEND 向量化；任何失败返回 None（调用方退化为 BM25）。"""
+    global _WARNED
+    backend = os.environ.get("EMBED_BACKEND", "local").strip().lower()
+    try:
+        if backend == "openai":
+            return _embed_openai(texts)
+        return [v.tolist() for v in _get_engine().embed(list(texts), batch_size=32)]
+    except Exception as e:
+        if not _WARNED:
+            print(f"WARNING：向量通道不可用，检索退化为 BM25（{type(e).__name__}）",
+                  file=sys.stderr)
+            _WARNED = True
+        return None
+
+
 def search_common_knowledge(query: str) -> str:
     """检索公司通用制度知识库（信息安全、行政流程等全员适用的规定）。
     query 为自然语言问题或关键词，例如「长期离岗设备怎么处理」。
@@ -63,40 +131,79 @@ def search_common_knowledge(query: str) -> str:
     conn = sqlite3.connect(str(db))
     try:
         meta = dict(conn.execute("SELECT key, value FROM meta"))
-        n_chunks = int(meta["n_chunks"])
-        avgdl = float(meta["avgdl"])
-        df = dict(conn.execute(
-            f"SELECT term, n FROM df WHERE term IN ({','.join('?' * len(terms))})",
-            terms))
-        if not df:
-            return "知识库中未找到相关规定（没有词项命中），可换用更口语化的关键词重试"
-        rows = conn.execute(
-            f"SELECT doc, heading, content, dl, terms FROM chunks"
-            f" WHERE EXISTS (SELECT 1 FROM json_each(chunks.terms)"
-            f" WHERE json_each.key IN ({','.join('?' * len(terms))}))",
-            terms).fetchall()
+        has_vec = meta.get("has_vec") == "1"
+
+        # ---- BM25 通道（k1=1.5, b=0.75）----
+        bm25_top: list[tuple[float, int, str, str, str]] = []
+        if terms:
+            n_chunks = int(meta["n_chunks"])
+            avgdl = float(meta["avgdl"])
+            df = dict(conn.execute(
+                f"SELECT term, n FROM df WHERE term IN ({','.join('?' * len(terms))})",
+                terms))
+            if df:
+                rows = conn.execute(
+                    f"SELECT rowid, doc, heading, content, dl, terms FROM chunks"
+                    f" WHERE EXISTS (SELECT 1 FROM json_each(chunks.terms)"
+                    f" WHERE json_each.key IN ({','.join('?' * len(terms))}))",
+                    terms).fetchall()
+                k1, b = 1.5, 0.75
+                for rowid, doc, heading, content, dl, terms_json in rows:
+                    tf = json.loads(terms_json)
+                    score = 0.0
+                    for t in terms:
+                        if t not in tf or t not in df:
+                            continue
+                        idf = math.log((n_chunks - df[t] + 0.5) / (df[t] + 0.5) + 1.0)
+                        score += idf * tf[t] * (k1 + 1) / (
+                            tf[t] + k1 * (1 - b + b * dl / avgdl))
+                    if score > 0:
+                        bm25_top.append((score, rowid, doc, heading, content))
+        bm25_top.sort(key=lambda x: -x[0])
+        bm25_top = bm25_top[:_TOPN]
+
+        # ---- 向量通道（点积暴力检索）----
+        vec_top: list[tuple[float, int, str, str, str]] = []
+        if has_vec:
+            qv = _embed_texts([query])
+            if qv:
+                vrows = conn.execute(
+                    "SELECT rowid, doc, heading, content, vec FROM chunks"
+                    " WHERE vec IS NOT NULL").fetchall()
+                if vrows:
+                    mat = np.frombuffer(b"".join(r[4] for r in vrows),
+                                        dtype="<f4").reshape(len(vrows), -1)
+                    q = np.asarray(qv[0], dtype="<f4")
+                    if mat.shape[1] == len(q):
+                        dots = mat @ q
+                        order = np.argsort(-dots, kind="stable")[:_TOPN]
+                        vec_top = [(float(dots[i]), vrows[i][0], vrows[i][1],
+                                    vrows[i][2], vrows[i][3]) for i in order]
     finally:
         conn.close()
 
-    # BM25 打分（k1=1.5, b=0.75）
-    k1, b = 1.5, 0.75
-    scored = []
-    for doc, heading, content, dl, terms_json in rows:
-        tf = json.loads(terms_json)
-        score = 0.0
-        for t in terms:
-            if t not in tf or t not in df:
-                continue
-            idf = math.log((n_chunks - df[t] + 0.5) / (df[t] + 0.5) + 1.0)
-            score += idf * tf[t] * (k1 + 1) / (tf[t] + k1 * (1 - b + b * dl / avgdl))
-        if score > 0:
-            scored.append((score, doc, heading, content))
-    if not scored:
+    # ---- RRF 融合（k=60）：单通道空 → 退化另一通道 ----
+    def _rrf(channels):
+        fused: dict[int, tuple[float, str, str, str]] = {}
+        for ch in channels:
+            for rank, entry in enumerate(ch, 1):
+                _, rowid, doc, heading, content = entry
+                s = fused[rowid][0] if rowid in fused else 0.0
+                fused[rowid] = (s + 1.0 / (_RRF_K + rank), doc, heading, content)
+        ordered = sorted(fused.values(), key=lambda x: -x[0])
+        return [(doc, heading, content) for _, doc, heading, content in ordered]
+
+    if bm25_top and vec_top:
+        hits = _rrf([bm25_top, vec_top])
+    elif bm25_top:
+        hits = [(doc, heading, content) for _, _, doc, heading, content in bm25_top]
+    elif vec_top:
+        hits = [(doc, heading, content) for _, _, doc, heading, content in vec_top]
+    else:
         return "知识库中未找到相关规定，可换用更口语化的关键词重试"
-    scored.sort(key=lambda x: -x[0])
 
     out = []
-    for score, doc, heading, content in scored[:_TOP_K]:
+    for doc, heading, content in hits[:_TOP_K]:
         snippet = content if len(content) <= _SNIPPET_MAX else content[:_SNIPPET_MAX] + "……"
         out.append(f"【来源：{doc} · {heading}】\n{snippet}")
     return "\n\n".join(out)
