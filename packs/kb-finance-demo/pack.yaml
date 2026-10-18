@@ -1,0 +1,25 @@
+# kb-finance-demo 领域包：财务部门专属知识库（kb/finance）检索
+name: kb-finance-demo
+version: 1.0.0
+description: 财务领域知识库样例包：报销/差旅制度检索工具与领域提示词（部门专属库参考实现）
+core_version: ">=0.12.0"
+
+requires_env: []
+requires_modules: []
+
+permissions:
+  - "读取财务知识库（kb/finance，只读）"
+
+# 本包检索工具覆盖的知识库（v0.17.25）：定位端点按「kb 名 → 声明包」校验
+knowledge_bases:
+  - finance
+
+# 部门白名单（v0.17.26 PLAN 2.3）：本包仅财务部门可用——财务库（kb/finance）只对
+# 财务部门账号开放（提示层不注入本包片段、工具执行入口拦截、定位端点 404）；
+# 未分配部门的账号不可用。与 allowed_roles（未配置 = 不限角色）为 AND 关系。
+allowed_departments:
+  - finance
+
+tools:
+  - tools/search_finance_knowledge.py
+prompt: prompt.md

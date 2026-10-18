@@ -15,6 +15,12 @@ permissions:
 knowledge_bases:
   - hr
 
+# 部门白名单（v0.17.26 PLAN 2.3）：本包仅人事部门可用——人事库（kb/hr）只对
+# 人事部门账号开放（提示层不注入本包片段、工具执行入口拦截、定位端点 404）；
+# 未分配部门的账号不可用。与 allowed_roles（未配置 = 不限角色）为 AND 关系。
+allowed_departments:
+  - hr
+
 tools:
   - tools/search_hr_knowledge.py
 prompt: prompt.md

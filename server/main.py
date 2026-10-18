@@ -649,18 +649,26 @@ def _declared_kb_packs() -> list[dict]:
     return [p for p in packs.enabled_packs() if p.get("knowledge_bases")]
 
 
-def kb_allowed(kb: str, role: str | None,
+def kb_allowed(kb: str, role: str | None, department: str | None = None,
                packs_list: list[dict] | None = None) -> bool:
     """定位端点权限（fail-closed）：kb 名必须被启用包 knowledge_bases 声明，
-    且该包 allowed_roles 放行当前角色（未配置 = 放行，与工具层/提示层同口径；
-    role=None 视为开放模式放行）。堵住「包 RBAC 挡了检索工具、
-    定位端点仍可枚举翻库」的旁路（PLAN 2.2 澄清 4）。"""
+    且该包按「角色 + 部门」双重校验通过（任一维度未配置 = 该维度放行，与工具层/
+    提示层同口径；role=None 视为开放模式放行；admin 全局视图跨部门放行；未分配
+    部门不命中白名单）。堵住「包 RBAC 挡了检索工具、定位端点仍可枚举翻库」的
+    旁路（PLAN 2.2 澄清 4），并把部门维度纳入同一判定（PLAN 2.3）。"""
     for p in (packs_list if packs_list is not None else _declared_kb_packs()):
         if kb in (p.get("knowledge_bases") or []):
             if role is None:
                 return True  # 开放模式（认证关闭）
-            allowed = p.get("allowed_roles") or []
-            return (not allowed) or role in allowed
+            if custom_tools.pack_role_denied(
+                    p.get("name", kb), p.get("allowed_roles") or [], role=role):
+                return False
+            depts = p.get("allowed_departments") or []
+            if not depts or role == "admin":
+                return True  # 未配置部门限制 / admin 全局视图
+            norm = (department or "").strip().casefold()
+            return bool(norm) and norm in {
+                str(d).strip().casefold() for d in depts}
     return False
 
 
@@ -697,17 +705,20 @@ async def kb_source(request: Request, kb: str, doc: str, kind: str = "line",
       否则返回渲染页（本地 vendor mammoth + 服务端文本片段作降级兜底）
     - kind=line/sheet/slide（md/txt/html/xlsx/pptx）→ 文本片段页
       （命中行 ±5 上下文、高亮标记）
-    权限：认证开启时须登录，角色跟随声明包 allowed_roles；kb 未声明/文档名
-    非法/文件不存在一律 404（不区分「不存在」与「无权」，不暴露库清单）。
-    逻辑路径 kb/<库名>/<文档名>，错误信息不含服务器绝对路径。"""
+    权限：认证开启时须登录，可见性跟随声明包的 allowed_roles + allowed_departments
+    （两维 AND，PLAN 2.3；部门取请求身份——SSO 部门头优先，与请求级 ACL 同口径）；
+    kb 未声明/文档名非法/文件不存在一律 404（不区分「不存在」与「无权」，
+    不暴露库清单）。逻辑路径 kb/<库名>/<文档名>，错误信息不含服务器绝对路径。"""
     if auth.enabled():
         ident = _acl_identity(request)
         if not ident:
             return JSONResponse({"error": "未登录"}, status_code=401)
         role = ident.get("role", "")
+        department = ident.get("department", "") or ""
     else:
         role = None  # 开放模式：与现有开放部署行为一致
-    if not kb_allowed(kb, role):
+        department = None
+    if not kb_allowed(kb, role, department):
         return JSONResponse({"error": "知识库不存在"}, status_code=404)
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", kb or ""):
         return JSONResponse({"error": "知识库不存在"}, status_code=404)

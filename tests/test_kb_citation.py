@@ -392,15 +392,16 @@ def test_ac6_kb_not_declared(client, tmp_path, monkeypatch):
 
 def test_ac6_rbac_follow(monkeypatch):
     """kb_allowed 纯函数：包 allowed_roles 跟随（user 被拒、approver 放行、
-    未配置默认放行、kb 未声明拒绝）。"""
+    未配置默认放行、kb 未声明拒绝）。v0.17.26 起签名增 department 参数，
+    调用侧一律用关键字传参（packs_list=）。"""
     from server.main import kb_allowed
     packs = [{"name": "p1", "knowledge_bases": ["hr"], "allowed_roles": ["approver"]},
              {"name": "p2", "knowledge_bases": ["common"], "allowed_roles": []}]
-    assert kb_allowed("hr", "approver", packs) is True
-    assert kb_allowed("hr", "user", packs) is False
-    assert kb_allowed("common", "user", packs) is True
-    assert kb_allowed("unknown", "admin", packs) is False
-    assert kb_allowed("hr", None, packs) is True          # 开放模式放行
+    assert kb_allowed("hr", "approver", packs_list=packs) is True
+    assert kb_allowed("hr", "user", packs_list=packs) is False
+    assert kb_allowed("common", "user", packs_list=packs) is True
+    assert kb_allowed("unknown", "admin", packs_list=packs) is False
+    assert kb_allowed("hr", None, packs_list=packs) is True   # 开放模式放行
 
 
 # ---------------------------------------------------------------- AC7 无锚点降级

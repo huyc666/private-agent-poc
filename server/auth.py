@@ -371,6 +371,20 @@ def current_role() -> str:
     return (user_by_name(u) or {}).get("role") or "user"
 
 
+def current_department() -> str:
+    """当前对话上下文的部门（工具执行层/提示层的部门判定用，v0.17.26，PLAN 2.3）。
+    从 usage.current_user 查用户表取 department；开放模式/匿名 → ""（无部门概念，
+    跨部门放行由 current_role 的 admin 契约负责）；用户不存在或已吊销 → ""
+    （最小权限，fail-closed：不命中任何部门白名单）。
+    口径说明：HTTP 端点用请求身份（SSO 部门头优先，见 resolve_identity）；本函数
+    与 current_role 同源，仅供对话内判定，与 6.2 部门报表口径一致。"""
+    from . import usage   # 函数内导入：避免模块级循环依赖
+    u = usage.current_user.get() or ""
+    if not enabled() or not u or u == "anonymous":
+        return ""
+    return (user_by_name(u) or {}).get("department") or ""
+
+
 def proxy_ip_allowed(remote_host: str | None) -> bool:
     """身份头来源校验（v0.17.4 安全审计 F2）：仅当请求来源 IP 命中
     AUTH_PROXY_ALLOWED_IPS 受信代理白名单时，中间件才允许身份头生效。

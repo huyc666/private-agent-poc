@@ -162,6 +162,29 @@ def _parse_pack(pack_dir: Path) -> dict:
             return info
         info["knowledge_bases"] = sorted(set(raw_bases))
 
+    # 部门白名单（PLAN 2.3）：与 allowed_roles 并列的第二维度，两维 AND。
+    # 未配置 = 不限制部门（向后兼容，存量包零改动）；fail-closed：显式空列表、
+    # 非列表、含空串/超长(>64)/控制字符 → 整包错误，防「部门名拼错或带空格 =
+    # 永不匹配 = 包静默不可用」。命中比较在判定函数内归一化（strip + casefold）。
+    raw_depts = data.get("allowed_departments")
+    if raw_depts is None:
+        info["allowed_departments"] = []
+    else:
+        if not isinstance(raw_depts, list) or not raw_depts:
+            info["status"] = "error"
+            info["error"] = ("allowed_departments 必须是非空部门名列表"
+                             "（不限制请删除该字段）")
+            return info
+        bad = [str(d) for d in raw_depts
+               if not isinstance(d, str) or not d.strip() or len(d.strip()) > 64
+               or any(ord(ch) < 32 for ch in d)]
+        if bad:
+            info["status"] = "error"
+            info["error"] = (f"allowed_departments 含非法部门名 {bad}"
+                             "（须为非空字符串，≤64 字符，不含控制字符）")
+            return info
+        info["allowed_departments"] = sorted({d.strip() for d in raw_depts})
+
     # 可信签名校验（v0.13.0）：强制模式下未签名/签名无效/内容被篡改 → 整包不可用
     info["signature"] = str(data.get("signature", "") or "")
     info["trust"] = packsign.trust_status(pack_dir, info["signature"])
@@ -294,6 +317,7 @@ def list_packs() -> list[dict]:
         "trust": p.get("trust", "unsigned"),
         "permissions": p.get("permissions", []),
         "allowed_roles": p.get("allowed_roles", []),
+        "allowed_departments": p.get("allowed_departments", []),
         "knowledge_bases": p.get("knowledge_bases", []),
     } for p in scan_packs()]
 
@@ -373,7 +397,8 @@ def load_pack_tools() -> list:
                 print(f"[packs] 非法工具名「{name}」（包 {pack['name']}），跳过")
                 continue
             tool = custom_tools.build_tool(path, pack=pack["name"], env=eff_env,
-                                           allowed_roles=pack.get("allowed_roles"))
+                                           allowed_roles=pack.get("allowed_roles"),
+                                           allowed_departments=pack.get("allowed_departments"))
             if tool is None:
                 print(f"[packs] {pack['name']}/{name} 构建失败，跳过")
                 continue
@@ -386,17 +411,25 @@ def load_pack_tools() -> list:
     return tools
 
 
-def prompt_fragments(role: str | None = None) -> str:
+def prompt_fragments(role: str | None = None,
+                     department: str | None = None) -> str:
     """拼接全部启用包的 prompt.md 片段（注入系统提示词）。
     v0.17.18 包级 RBAC（PLAN 1.2）：role 给定时按 allowed_roles 过滤（提示层
     ——模型不看到受限包的用法说明；真正拦截在工具执行入口，防提示词注入绕过）。
+    v0.17.26 部门维度（PLAN 2.3）：role 给定时同步按 allowed_departments 过滤
+    （department 未显式给出则取当前对话上下文部门）。
     role=None 不过滤（管理/兼容口径）。"""
+    dept = department
+    if role and dept is None:
+        from . import auth   # 函数内导入：避免模块级循环依赖
+        dept = auth.current_department()
     parts = []
     for pack in enabled_packs():
         if pack["prompt"]:
-            if (role and pack.get("allowed_roles")
-                    and custom_tools.pack_role_denied(
-                        pack["name"], pack["allowed_roles"], role=role)):
+            if role and custom_tools.pack_scope_denied(
+                    pack["name"], pack.get("allowed_roles") or [],
+                    pack.get("allowed_departments") or [],
+                    role=role, department=dept):
                 continue
             try:
                 text = Path(pack["prompt"]).read_text(

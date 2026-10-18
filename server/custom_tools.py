@@ -384,17 +384,54 @@ def pack_role_denied(pack: str, allowed_roles: list | None,
             "当前身份无权限调用")
 
 
-def _guard_pack_tool(tool, pack: str, allowed_roles: list | None):
+def _norm_dept(value: str | None) -> str:
+    """部门值归一化（strip + casefold，PLAN 2.3）：防空格/大小写差异造成
+    「部门名看似相同却不匹配」的静默失效。"""
+    return (value or "").strip().casefold()
+
+
+def pack_scope_denied(pack: str, allowed_roles: list | None,
+                      allowed_departments: list | None = None,
+                      role: str | None = None,
+                      department: str | None = None) -> str | None:
+    """包级 RBAC 双维度执行侧校验（PLAN 1.2 角色 + PLAN 2.3 部门，两维 AND）。
+    返回拒绝文案或 None（放行）。语义：任一维度未配置 = 该维度不限制；admin
+    全局视图对两个维度均放行（开放模式/匿名按 auth.current_role 契约同为
+    admin，行为等同不限制）；部门命中用归一化比较（strip + casefold），
+    未分配部门（空串）不命中任何白名单（fail-closed，最小权限）。执行入口
+    校验是最终权限边界——提示层过滤只防误触，防不了提示词注入。"""
+    denied = pack_role_denied(pack, allowed_roles, role=role)
+    if denied:
+        return denied
+    if not allowed_departments:
+        return None
+    if role is None:
+        from . import auth
+        role = auth.current_role()
+    if role == "admin":
+        return None  # 全局视图：跨部门放行
+    if department is None:
+        from . import auth
+        department = auth.current_department()
+    norm = _norm_dept(department)
+    if norm and norm in {_norm_dept(d) for d in allowed_departments}:
+        return None
+    shown = "、".join(str(d) for d in allowed_departments)
+    return (f"领域包「{pack}」仅限 {shown} 部门使用，当前身份无权限调用")
+
+
+def _guard_pack_tool(tool, pack: str, allowed_roles: list | None,
+                     allowed_departments: list | None = None):
     """包级 RBAC 执行侧包装：替换 StructuredTool 的执行入口（func/coroutine），
-    调用前先做 allowed_roles 校验。args_schema 与描述已按原函数构建，
+    调用前先做角色+部门校验（PLAN 2.3）。args_schema 与描述已按原函数构建，
     仅替换执行函数不影响参数定义；同步/异步两条路径分别包装。"""
-    if tool is None or not allowed_roles:
+    if tool is None or not (allowed_roles or allowed_departments):
         return tool
     if tool.func is not None:
         orig = tool.func
 
         def _guarded(*args, **kwargs):
-            denied = pack_role_denied(pack, allowed_roles)
+            denied = pack_scope_denied(pack, allowed_roles, allowed_departments)
             if denied:
                 return denied
             return orig(*args, **kwargs)
@@ -404,7 +441,7 @@ def _guard_pack_tool(tool, pack: str, allowed_roles: list | None):
         orig_coro = tool.coroutine
 
         async def _guarded_async(*args, **kwargs):
-            denied = pack_role_denied(pack, allowed_roles)
+            denied = pack_scope_denied(pack, allowed_roles, allowed_departments)
             if denied:
                 return denied
             return await orig_coro(*args, **kwargs)
@@ -414,12 +451,14 @@ def _guard_pack_tool(tool, pack: str, allowed_roles: list | None):
 
 
 def build_tool(path: Path, pack: str = "", env: dict | None = None,
-               allowed_roles: list | None = None):
+               allowed_roles: list | None = None,
+               allowed_departments: list | None = None):
     """按当前执行模式构建单个工具的 StructuredTool（领域包加载复用）。
     返回 None 表示构建失败（sandbox-down / 签名提取失败 / 本地导入失败）。
     env 为包级环境变量生效值，仅沙箱模式随请求透传（local 模式已注入进程环境）。
-    allowed_roles 非空时在执行入口外包一层角色校验（包级 RBAC，主图工具
-    绑定是静态的，schema 无法按角色摘除，故以执行侧拦截为权限边界）。"""
+    allowed_roles / allowed_departments 非空时在执行入口外包一层校验
+    （包级 RBAC 双维度，v0.17.18/2.3；主图工具绑定是静态的，schema 无法按
+    角色/部门摘除，故以执行侧拦截为权限边界）。"""
     mode = exec_mode()
     if mode == "sandbox-down":
         return None
@@ -429,8 +468,9 @@ def build_tool(path: Path, pack: str = "", env: dict | None = None,
             print(f"[custom-tools] {path.name} 签名提取失败，跳过")
             return None
         return _guard_pack_tool(_make_sandbox_tool(meta, pack, env),
-                                pack, allowed_roles)
-    return _guard_pack_tool(make_local_tool(path), pack, allowed_roles)
+                                pack, allowed_roles, allowed_departments)
+    return _guard_pack_tool(make_local_tool(path), pack, allowed_roles,
+                            allowed_departments)
 
 
 def load_langchain_tools() -> list:

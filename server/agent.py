@@ -132,7 +132,8 @@ def _dynamic_prompt(state: dict) -> list:
     system = getattr(STATE, "system_prompt_static", "") or (
         config.SYSTEM_PROMPT + skills.skill_index_prompt()
         + config.UPLOAD_PROMPT + config.KB_QA_PROMPT)
-    fragments = packs.prompt_fragments(role=auth.current_role())
+    fragments = packs.prompt_fragments(role=auth.current_role(),
+                                       department=auth.current_department())
     if fragments:
         system += "\n\n" + fragments
     extra = skills.personal_index_prompt(skills.current_scope())

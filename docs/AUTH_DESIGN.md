@@ -77,8 +77,11 @@ CREATE TABLE IF NOT EXISTS api_users (
 - 管理 CLI：`python tools/manage_users.py add zhangsan --role approver` /
   `revoke zhangsan` / `list`（复用 sign_pack.py 的 CLI 模式）
 - 部门字段（v0.17.11）：`api_users` 增 `department` 列（启动时自动补列迁移），
-  SSO 身份头可透传部门、CLI `setdept <用户> <部门>` 可设置；部门当前仅用于
-  用量计量的部门成本报表归属（调岗改部门即时反映，不回改历史账）
+  SSO 身份头可透传部门、CLI `setdept <用户> <部门>` 可设置；部门用于用量计量的
+  部门成本报表归属（调岗改部门即时反映，不回改历史账），并作为包级 RBAC 的第二个
+  维度（v0.17.26 PLAN 2.3：`allowed_departments` 与 `allowed_roles` 两维 AND，同一
+  判定同时作用于提示层、工具执行入口与出处原文定位；未分配部门不命中白名单，
+  admin/开放模式为全局视图放行；两侧值比较归一化 strip + casefold）
 
 ### 4.3 认证中间件（FastAPI）
 

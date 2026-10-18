@@ -248,8 +248,9 @@ WEATHER_API_URL=http://<内部代理>/v1/forecast
 ```
 # 源文档放入 kb/<库名>/（支持 md/txt/Word/PDF/Excel/PPT/网页）
 # 示例库：
-.venv/bin/python tools/build_kb.py kb/common    # 通用知识库（平台包）
-.venv/bin/python tools/build_kb.py kb/hr        # HR 知识库（kb-demo 包）
+.venv/bin/python tools/build_kb.py kb/common    # 通用知识库（平台包，全员可用）
+.venv/bin/python tools/build_kb.py kb/hr        # HR 知识库（kb-demo 包，仅人事部门）
+.venv/bin/python tools/build_kb.py kb/finance   # 财务知识库（kb-finance-demo 包，仅财务部门）
 ```
 
 - 检索为「关键词 + 语义」混合排序；语义引擎默认本地离线推理，未配置或引擎
@@ -259,6 +260,11 @@ WEATHER_API_URL=http://<内部代理>/v1/forecast
   再把模型缓存目录整体拷贝到内网机器并用 `EMBED_CACHE_DIR` 指向它，即可断网全链路使用
 - 损坏文档、扫描件 PDF、老格式（.doc/.xls/.ppt）自动跳过并打 WARNING，不阻塞整库
 - 知识更新：替换/新增文档后重跑该库的 build_kb 命令即可，不碰包签名、免重启
+- **部门专属库**（v0.17.26）：领域包用 `pack.yaml` 的 `allowed_departments` 声明可见
+  部门（示例 `kb-demo` 仅 `hr`、`kb-finance-demo` 仅 `finance`）；账号侧用
+  `python tools/manage_users.py setdept <用户> <部门>` 设置部门（SSO 部门头透传同一
+  字段）。未分配部门的账号检索不到任何部门专属库，通用库不受影响；调岗后改部门
+  的下一轮对话即生效，无需重启或重新登录
 
 ## 四、日常使用：Skills、自定义工具与领域包
 
