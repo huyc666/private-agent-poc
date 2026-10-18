@@ -1,6 +1,6 @@
 ---
 name: spec-first
-description: 启动 PLAN.md 研发任务前先产出 spec 文档（背景目标/需求分析与约束澄清/技术选型/验收标准），经用户确认后按测试驱动开发——先依验收标准写功能与安全测试再编码。Use when the user asks to start or implement a PLAN task（开始开发、实现某项、做 6.2 等）or explicitly asks for a spec or TDD flow. Do not use for 与 PLAN 任务无关的问答、纯 bugfix 或用户明确说跳过的场合。
+description: 启动 PLAN.md 研发任务前先产出 spec 文档（背景目标/需求分析与约束澄清/技术选型/验收标准），经用户确认后按测试驱动开发——先依验收标准写功能与安全测试再编码，全量回归通过后执行代码评审（TRAE-code-review）再提交。Use when the user asks to start or implement a PLAN task（开始开发、实现某项、做 6.2 等）or explicitly asks for a spec or TDD flow. Do not use for 与 PLAN 任务无关的问答、纯 bugfix 或用户明确说跳过的场合。
 ---
 
 # Spec First + TDD
@@ -44,7 +44,8 @@ description: 启动 PLAN.md 研发任务前先产出 spec 文档（背景目标/
    - 离线可跑为主（沿用 tests/conftest.py 隔离体系）；需真实环境的走既有门控（RUN_LLM_TESTS / RUN_DOCKER_TESTS）
    - 跑一遍确认新用例按预期失败（红），失败原因与 spec 预期一致
 6. **开发实现（绿）**：以让测试通过为完成定义来编码；不为未出现的用例过度设计。全部新用例转绿后跑全量回归，确认无既有用例破坏。
-7. **收尾**：实现若偏离 spec（选型变化、砍范围），先更新 spec 并说明。提交时 spec、测试、实现同一 commit；汇报按验收标准逐条对照；PLAN 行同步标注交付状态。
+7. **代码评审**：全量回归通过后、提交之前，对本次变更执行一次通用代码评审，产出结构化问题清单（正确性、安全边界与拒绝路径、可维护性、性能）。执行方式：调用 TRAE-code-review skill 对本次变更差异评审；变更较大或触及安全边界（认证/权限/沙箱/文件隔离等）时，按 v0.17.13 既有做法再做一轮独立交叉验证。评审确认的问题修复后重跑全量回归；判定为误报或有意保留的，在汇报中写明理由。评审结论（发现问题数、修复情况）随本次提交一并汇报。
+8. **收尾**：实现若偏离 spec（选型变化、砍范围），先更新 spec 并说明。提交时 spec、测试、实现同一 commit；汇报按验收标准逐条对照；PLAN 行同步标注交付状态。
 
 ## 红线
 
@@ -52,3 +53,4 @@ description: 启动 PLAN.md 研发任务前先产出 spec 文档（背景目标/
 - spec 里的「待澄清问题」必须得到用户回答，不得用假设替代
 - 验收标准不得写成「工作正常」这类不可检验的表述
 - 功能代码不得先于测试用例；没有对应测试的验收标准视为未完成
+- 未经代码评审的变更不得提交；评审确认的问题未修复又未在汇报中说明的，视为未完成
