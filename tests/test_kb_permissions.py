@@ -29,6 +29,10 @@ TOOL_SRC = ('def greet(name: str) -> str:\n'
             '    """问候"""\n'
             '    return f"hi {name}"\n')
 
+TOOL_SRC2 = ('def greet2(name: str) -> str:\n'
+             '    """问候2"""\n'
+             '    return f"hi2 {name}"\n')
+
 
 # ---------------------------------------------------------------- 工具函数
 
@@ -201,7 +205,8 @@ def test_ac7_department_value_normalized(packs_dir):
 
 def test_ac8_department_change_takes_effect_next_round(packs_dir):
     _mk_pack(packs_dir, "hr-pack", departments=["hr"])
-    _mk_pack(packs_dir, "fin-pack", departments=["finance"])
+    _mk_pack(packs_dir, "fin-pack", departments=["finance"],
+             tools=("tools/greet2.py",), files={"tools/greet2.py": TOOL_SRC2})
     _login("alice", role="user", department="hr")
     assert "hr-pack 的领域提示词片段" in packs.prompt_fragments(
         role="user", department=auth.current_department())
@@ -212,8 +217,11 @@ def test_ac8_department_change_takes_effect_next_round(packs_dir):
     view = packs.prompt_fragments(role="user", department=dept)
     assert "hr-pack 的领域提示词片段" not in view
     assert "fin-pack 的领域提示词片段" in view
+    # 两包工具名不同（greet/greet2），端到端 invoke 断言无同名合并歧义：
+    # 调岗后人事包工具被拒、财务包工具放行
     tools = _pack_tools()
-    assert "部门" in tools["greet"].invoke({"name": "b"}) or True  # 工具名冲突时以包名合并
+    assert "部门" in tools["greet"].invoke({"name": "b"})
+    assert tools["greet2"].invoke({"name": "b"}) == "hi2 b"
     # 直接判定：当前部门下 hr-pack 被拒、fin-pack 放行
     assert custom_tools.pack_scope_denied("hr-pack", [], ["hr"]) is not None
     assert custom_tools.pack_scope_denied("fin-pack", [], ["finance"]) is None

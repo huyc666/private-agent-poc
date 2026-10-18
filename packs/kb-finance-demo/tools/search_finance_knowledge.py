@@ -115,8 +115,8 @@ def _embed_texts(texts: list[str]) -> list[list[float]] | None:
 
 
 def search_finance_knowledge(query: str) -> str:
-    """检索财务制度知识库（请假、考勤、加班调休等人事规定）。
-    query 为自然语言问题或关键词，例如「年假有几天」「请假超过一周要交接吗」。
+    """检索财务制度知识库（报销、差旅、备用金等财务制度）。
+    query 为自然语言问题或关键词，例如「差旅报销标准是多少」「备用金如何借支」。
     返回带来源标注（文档名/章节）的相关条文，未检索到时会明确说明。"""
     db = _KB_DIR / "kb.db"
     if not db.is_file():

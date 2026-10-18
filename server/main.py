@@ -660,15 +660,12 @@ def kb_allowed(kb: str, role: str | None, department: str | None = None,
         if kb in (p.get("knowledge_bases") or []):
             if role is None:
                 return True  # 开放模式（认证关闭）
-            if custom_tools.pack_role_denied(
-                    p.get("name", kb), p.get("allowed_roles") or [], role=role):
-                return False
-            depts = p.get("allowed_departments") or []
-            if not depts or role == "admin":
-                return True  # 未配置部门限制 / admin 全局视图
-            norm = (department or "").strip().casefold()
-            return bool(norm) and norm in {
-                str(d).strip().casefold() for d in depts}
+            # 角色+部门判定复用 pack_scope_denied（与提示层/执行层同一实现，防口径漂移）；
+            # department=None 归一为 "" 保持本函数纯函数语义（不回落上下文，fail-closed）
+            return custom_tools.pack_scope_denied(
+                p.get("name", kb), p.get("allowed_roles") or [],
+                p.get("allowed_departments") or [],
+                role=role, department=department or "") is None
     return False
 
 
