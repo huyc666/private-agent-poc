@@ -233,10 +233,17 @@ def _parse_pack(pack_dir: Path) -> dict:
     # 平台包标记：跨领域通用能力（治理规则见 is_enabled/disable_pack）
     info["platform"] = bool(data.get("platform"))
 
-    # 能力清单（相对路径逐项校验存在性，缺失项跳过并告警）
+    # 能力清单（相对路径逐项校验存在性，缺失项跳过并告警；
+    # 工具按 stem 去重——加载器以 stem 为工具名且包内重名本就静默跳过，
+    # 清单重复条目不应进入跨包冲突判定造成误报，v0.17.27）
+    tool_stems: set[str] = set()
     for rel in data.get("tools") or []:
         p = pack_dir / str(rel)
         if p.is_file() and p.suffix == ".py":
+            if p.stem in tool_stems:
+                print(f"[packs] {name}: 工具名重复，跳过: {rel}")
+                continue
+            tool_stems.add(p.stem)
             info["tools"].append(p)
         else:
             print(f"[packs] {name}: 工具文件不存在，跳过: {rel}")
@@ -272,8 +279,50 @@ def scan_packs() -> list[dict]:
         for sub in sorted(_packs_dir().iterdir()):
             if sub.is_dir() and not sub.name.startswith((".", "_")):
                 result.append(_parse_pack(sub))
+        _mark_shared_kb_tool_conflicts(result)
         _scan_cache = result
     return list(_scan_cache)
+
+
+def _mark_shared_kb_tool_conflicts(result: list[dict]) -> None:
+    """PLAN 2.4 校验层强约束（fail-closed）：多包声明**同一知识库**且存在**同名
+    工具**时，相关包整包 status=error。共享库场景下重名检索工具会被加载器静默
+    跳过（先加载者生效），导致其中一个包的检索能力悄然缺失——与其靠告警自觉，
+    不如拒绝加载（spec 2.4 澄清 1 选 B；与 2.3 AC6 的配置错误 fail-closed 先例
+    一致）。不共享库的同名工具不受影响（维持加载器既有「跳过 + 告警」）。
+    判定覆盖全部扫描到的正常包（含被 ENABLED_PACKS 排除的）：运行时随时可能
+    启用，扫描期把冲突暴露为显式错误更可预期。以包名作键（扫描期内唯一，
+    评审修复：id() 作键对 dict 拷贝/重建易碎）。"""
+    ok = [p for p in result if p["status"] == "ok"]
+    kb_packs: dict[str, list[str]] = {}    # 库名 -> 声明它的正常包名
+    by_name = {p["name"]: p for p in ok}
+    for p in ok:
+        for kb in p.get("knowledge_bases") or []:
+            kb_packs.setdefault(kb, []).append(p["name"])
+    shared = {kb for kb, names in kb_packs.items() if len(names) > 1}
+    if not shared:
+        return
+    tool_owners: dict[str, list[str]] = {}  # 工具名 -> 声明它的正常包名
+    for p in ok:
+        for t in p["tools"]:
+            tool_owners.setdefault(t.stem, []).append(p["name"])
+    reasons: dict[str, str] = {}  # 包名 -> 错误说明（可能多条拼接）
+    for kb in sorted(shared):
+        names = set(kb_packs[kb])
+        for tool, owners in tool_owners.items():
+            group = sorted(set(owners) & names)
+            if len(group) < 2:
+                continue
+            for name in group:
+                others = "、".join(n for n in group if n != name)
+                msg = (f"与包「{others}」共享知识库「{kb}」但存在同名工具"
+                       f"「{tool}」——共享库各包必须使用不同的检索工具名"
+                       "（重名工具会被静默跳过）")
+                reasons[name] = f"{reasons[name]}；{msg}" if name in reasons else msg
+    for name, msg in reasons.items():
+        p = by_name[name]
+        p["status"] = "error"
+        p["error"] = msg
 
 
 def _env_enabled(name: str) -> bool:

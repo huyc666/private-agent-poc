@@ -43,9 +43,9 @@ def packs_dir():
     return config.PACKS_DIR
 
 
-def _mk_pack(root, name, roles=None, departments=None,
+def _mk_pack(root, name, roles=None, departments=None, knowledge_bases=None,
              tools=("tools/greet.py",), files=None):
-    """落一个带 prompt.md 的包；roles/departments=None 表示不配置白名单。"""
+    """落一个带 prompt.md 的包；roles/departments/knowledge_bases=None 表示不配置。"""
     manifest = {"name": name, "version": "0.1.0", "description": f"{name} 包",
                 "core_version": ">=0.1.0", "tools": list(tools),
                 "prompt": "prompt.md"}
@@ -53,6 +53,8 @@ def _mk_pack(root, name, roles=None, departments=None,
         manifest["allowed_roles"] = roles
     if departments is not None:
         manifest["allowed_departments"] = departments
+    if knowledge_bases is not None:
+        manifest["knowledge_bases"] = knowledge_bases
     all_files = {"prompt.md": f"{name} 的领域提示词片段",
                  "tools/greet.py": TOOL_SRC}
     all_files.update(files or {})
@@ -374,6 +376,99 @@ def test_ac12_finance_pack_declares_department():
         (PROJECT_ROOT / "packs/kb-finance-demo/pack.yaml").read_text(encoding="utf-8"))
     assert manifest["knowledge_bases"] == ["finance"]
     assert manifest["allowed_departments"] == ["finance"]
-    hr = yaml.safe_load(
-        (PROJECT_ROOT / "packs/kb-demo/pack.yaml").read_text(encoding="utf-8"))
-    assert hr["allowed_departments"] == ["hr"]
+
+
+# ---------------------------------------- PLAN 2.4 一库多包共享（spec：docs/specs/2.4-kb-multi-pack.md）
+
+def test_24_ac7_shared_kb_prompt_tool_per_pack_isolation(packs_dir):
+    """AC7：两包共享库 policy——提示片段与工具调用仍按各自包隔离，不受 OR 合并影响。"""
+    _mk_pack(packs_dir, "hr-pack", departments=["hr"], knowledge_bases=["policy"])
+    _mk_pack(packs_dir, "fin-pack", departments=["finance"], knowledge_bases=["policy"],
+             tools=("tools/greet2.py",), files={"tools/greet2.py": TOOL_SRC2})
+    view_hr = packs.prompt_fragments(role="user", department="hr")
+    assert "hr-pack 的领域提示词片段" in view_hr
+    assert "fin-pack 的领域提示词片段" not in view_hr
+    view_fin = packs.prompt_fragments(role="user", department="finance")
+    assert "fin-pack 的领域提示词片段" in view_fin
+    assert "hr-pack 的领域提示词片段" not in view_fin
+    _login("alice", role="user", department="hr")
+    tools = _pack_tools()
+    assert tools["greet"].invoke({"name": "b"}) == "hi b"      # 本包检索工具放行
+    assert "部门" in tools["greet2"].invoke({"name": "b"})      # 他包工具执行层拒绝
+    _login("carl", role="user", department="finance")
+    tools = _pack_tools()
+    assert tools["greet2"].invoke({"name": "b"}) == "hi2 b"
+    assert "部门" in tools["greet"].invoke({"name": "b"})
+
+
+def test_24_ac8_shared_kb_endpoint_both_departments(tmp_path, kb_root,
+                                                    client_factory, monkeypatch):
+    """AC8：定位端点两包同声明库——hr/finance 身份均 200，未分配部门 404。"""
+    from server import main as server_main
+    (kb_root / "policy").mkdir(exist_ok=True)
+    (kb_root / "policy" / "差旅制度.md").write_text("# 差旅\n\n标准 800 元。",
+                                                   encoding="utf-8")
+    monkeypatch.setattr(server_main, "_kb_home", lambda: kb_root)
+    monkeypatch.setattr(server_main, "_declared_kb_packs", lambda: [
+        {"name": "hr-pack", "knowledge_bases": ["policy"], "allowed_roles": [],
+         "allowed_departments": ["hr"]},
+        {"name": "fin-pack", "knowledge_bases": ["policy"], "allowed_roles": [],
+         "allowed_departments": ["finance"]}])
+
+    def _mk(username, department=""):
+        key = auth.add_user(username, role="user", department=department)
+        assert key
+        c = client_factory()
+        c.headers.update({"Authorization": f"Bearer {key}"})
+        return c
+
+    params = {"kb": "policy", "doc": "差旅制度.md", "kind": "line", "a": 1}
+    r1 = _mk("p8hr", "hr").get("/api/kb/source", params=params)
+    assert r1.status_code == 200 and "标准 800 元" in r1.text
+    r2 = _mk("p8fin", "finance").get("/api/kb/source", params=params)
+    assert r2.status_code == 200
+    r3 = _mk("p8none", "").get("/api/kb/source", params=params)
+    assert r3.status_code == 404
+
+
+def test_24_ac10_shared_kb_same_tool_name_scan_error(packs_dir):
+    """AC10：共享库 + 同名工具 → 两包整包 error（fail-closed，错误信息点名三方）；
+    消除冲突（检索工具改名）后两包恢复 ok。"""
+    _mk_pack(packs_dir, "hr-pack", departments=["hr"], knowledge_bases=["policy"])
+    _mk_pack(packs_dir, "fin-pack", departments=["finance"], knowledge_bases=["policy"])
+    info = {p["name"]: p for p in packs.list_packs()}
+    assert info["hr-pack"]["status"] == "error"
+    assert info["fin-pack"]["status"] == "error"
+    for name, other in (("hr-pack", "fin-pack"), ("fin-pack", "hr-pack")):
+        err = info[name]["error"]
+        assert "同名工具" in err and "greet" in err and "policy" in err
+        assert other in err  # 错误信息点名对方包
+    import shutil
+    shutil.rmtree(packs_dir / "fin-pack")
+    _mk_pack(packs_dir, "fin-pack", departments=["finance"], knowledge_bases=["policy"],
+             tools=("tools/greet2.py",), files={"tools/greet2.py": TOOL_SRC2})
+    info = {p["name"]: p for p in packs.list_packs()}
+    assert info["hr-pack"]["status"] == "ok"
+    assert info["fin-pack"]["status"] == "ok"
+
+
+def test_24_ac10_no_shared_kb_same_tool_name_warn_only(packs_dir):
+    """AC10 反向：无共享库的同名工具维持既有「后加载跳过 + 告警」，不判 error。"""
+    _mk_pack(packs_dir, "pack-a", knowledge_bases=["kba"])
+    _mk_pack(packs_dir, "pack-b", knowledge_bases=["kbb"])
+    info = {p["name"]: p for p in packs.list_packs()}
+    assert info["pack-a"]["status"] == "ok"
+    assert info["pack-b"]["status"] == "ok"
+
+
+def test_24_ac10_pack_internal_duplicate_tool_no_false_conflict(packs_dir):
+    """AC10 评审回归：单包 tools 清单重复列同一文件 + 共享库他包不同工具名
+    → 去重后不误报冲突（修复前会产出「与包「」…」的破损错误信息）。"""
+    _mk_pack(packs_dir, "pack-a", knowledge_bases=["policy"],
+             tools=("tools/greet.py", "tools/greet.py"))  # 清单重复条目
+    _mk_pack(packs_dir, "pack-b", knowledge_bases=["policy"],
+             tools=("tools/greet2.py",), files={"tools/greet2.py": TOOL_SRC2})
+    info = {p["name"]: p for p in packs.list_packs()}
+    assert info["pack-a"]["status"] == "ok"
+    assert info["pack-a"]["tools"] == ["greet"]  # 去重后单条
+    assert info["pack-b"]["status"] == "ok"

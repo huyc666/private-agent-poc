@@ -534,3 +534,62 @@ def test_ac11_pack_tools_self_contained():
                 if node.module.split(".")[0] in ("server", "tools"):
                     banned.append(node.module)
         assert not banned, f"{which} 包工具不得 import server/tools：{banned}"
+
+
+# --------------------------------- PLAN 2.4 一库多包共享（spec：docs/specs/2.4-kb-multi-pack.md）
+
+
+def _24_packs():
+    """两包声明同一库 policy，部门白名单互斥（hr / finance）。"""
+    return [{"name": "hr-pack", "knowledge_bases": ["policy"], "allowed_roles": [],
+             "allowed_departments": ["hr"]},
+            {"name": "fin-pack", "knowledge_bases": ["policy"], "allowed_roles": [],
+             "allowed_departments": ["finance"]}]
+
+
+def test_24_ac1_multi_pack_or_merge():
+    """AC1：库被两包声明，各部门身份经各自包放行（首包生效缺口修复）。"""
+    from server.main import kb_allowed
+    assert kb_allowed("policy", "user", "hr", packs_list=_24_packs()) is True
+    assert kb_allowed("policy", "user", "finance", packs_list=_24_packs()) is True
+
+
+def test_24_ac2_single_pack_deny_regression():
+    """AC2：库仅单包声明时跨部门/未分配部门仍拒（2.3 行为回归）。"""
+    from server.main import kb_allowed
+    packs = [{"name": "hr-pack", "knowledge_bases": ["hr"], "allowed_roles": [],
+              "allowed_departments": ["hr"]}]
+    assert kb_allowed("hr", "user", "finance", packs_list=packs) is False
+    assert kb_allowed("hr", "user", "", packs_list=packs) is False
+
+
+def test_24_ac3_mixed_authorization():
+    """AC3：包 A（roles+depts 双限）+ 包 B 不限——user/hr 经 B 放行，
+    approver/hr 经 A 或 B 放行，user/finance 经 B 放行。"""
+    from server.main import kb_allowed
+    packs = [{"name": "pa", "knowledge_bases": ["policy"],
+              "allowed_roles": ["approver"], "allowed_departments": ["hr"]},
+             {"name": "pb", "knowledge_bases": ["policy"], "allowed_roles": [],
+              "allowed_departments": []}]
+    assert kb_allowed("policy", "user", "hr", packs_list=packs) is True
+    assert kb_allowed("policy", "approver", "hr", packs_list=packs) is True
+    assert kb_allowed("policy", "user", "finance", packs_list=packs) is True
+
+
+def test_24_ac4_all_deny_fail_closed_admin_global():
+    """AC4：全部声明包拒绝（未分配部门）→ False；admin 经任一声明包放行。"""
+    from server.main import kb_allowed
+    assert kb_allowed("policy", "user", "", packs_list=_24_packs()) is False
+    assert kb_allowed("policy", "admin", "", packs_list=_24_packs()) is True
+
+
+def test_24_ac5_undeclared_kb_still_false():
+    """AC5：未被任何包声明的库 → False（回归）。"""
+    from server.main import kb_allowed
+    assert kb_allowed("nope", "admin", "", packs_list=_24_packs()) is False
+
+
+def test_24_ac6_open_mode_multi_pack():
+    """AC6：开放模式（role=None）多包声明库放行（回归）。"""
+    from server.main import kb_allowed
+    assert kb_allowed("policy", None, None, packs_list=_24_packs()) is True
