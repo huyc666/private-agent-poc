@@ -225,6 +225,25 @@ def set_department(username: str, department: str) -> bool:
             conn.close()
 
 
+def set_role(username: str, role: str) -> bool:
+    """设置用户角色（v0.17.29，PLAN 3.1 控制台补齐——CLI 无此能力）。
+    角色非法或用户不存在/已吊销返回 False；「admin 不把自己改为非 admin」的
+    自保护在端点层判定（需要操作者上下文，CLI 保持原行为）。"""
+    if role not in ROLES:
+        return False
+    with _lock:
+        conn = _connect()
+        try:
+            _ensure_schema(conn)
+            cur = conn.execute(
+                "UPDATE api_users SET role = ? WHERE username = ? AND revoked = 0",
+                (role, username.strip()))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
 def department_map() -> dict:
     """{username: department} 当前映射（v0.17.21，PLAN 6.2 部门报表用）。
     查询时聚合口径：调岗即时反映；部门为空串的用户由报表侧计入「未分配」。"""

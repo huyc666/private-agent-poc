@@ -20,7 +20,7 @@ import zipfile
 
 import pytest
 
-from server import approval, auth, config, custom_tools, packs, skills, tools_builtin
+from server import approval, auth, config, custom_tools, packs, sessions, skills, tools_builtin
 
 
 @pytest.fixture
@@ -212,12 +212,24 @@ def test_session_delete_user_forbidden(client_factory, make_user):
     assert r.status_code == 403
 
 
-def test_session_delete_approver_allowed(client_factory, make_user):
+def test_session_delete_approver_forbidden_on_others(client_factory, make_user):
+    """v0.17.29 收紧（PLAN 3.1 人工测试反馈）：approver 不再拥有会话全局
+    视图，删除他人/无主会话 → 403（此前放行）。"""
     key = make_user("u-appr", role="approver")
     c = client_factory()
     r = c.delete("/api/sessions/any-session",
                  headers={"Authorization": f"Bearer {key}"})
-    assert r.status_code == 200 and not r.json()["deleted"]
+    assert r.status_code == 403
+
+
+def test_session_delete_approver_own_allowed(client_factory, make_user):
+    """approver 对「全部消息都属于自己」的会话仍可删除（收紧不伤及本人）。"""
+    key = make_user("u-appr", role="approver")
+    sessions.append("s-own-appr", "u-appr", "user", "你好")
+    c = client_factory()
+    r = c.delete("/api/sessions/s-own-appr",
+                 headers={"Authorization": f"Bearer {key}"})
+    assert r.status_code == 200 and r.json()["deleted"]
 
 
 def test_session_delete_open_mode_no_acl(client_factory, make_user, monkeypatch):

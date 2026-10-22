@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Private Agent 控制台</title>
+<!-- 样式 = 本地共享 token（/tokens.css，与聊天页同源）+ 页面内联；脚本内联；无任何外部 CDN 依赖 -->
+<link rel="stylesheet" href="/tokens.css">
+<style>
+  body {
+    background: linear-gradient(180deg, #eef1f9 0%, var(--bg) 240px);
+    color: var(--text); font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    padding: 12px 24px; border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,.82); backdrop-filter: blur(8px);
+    display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 16.5px; font-weight: 700; letter-spacing: .3px;
+    display: flex; align-items: center; gap: 7px; }
+  header h1 .logo {
+    width: 26px; height: 26px; border-radius: var(--radius-s); flex: none;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: inline-flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 14px; font-weight: 400;
+  }
+  header h1 .h1-text {
+    background: linear-gradient(100deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .badge { font-size: 12px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--dim); background: #fff; }
+  .badge.role-admin { color: var(--accent); border-color: #c9d8ff; background: #f0f4ff; }
+  .badge.online { color: var(--success); border-color: var(--success-border); background: var(--success-bg); }
+  .badge.online::before { content: "● "; }
+  .badge.offline { color: var(--danger); border-color: var(--danger-border); background: var(--danger-bg); animation: pulse 1.2s infinite; }
+  .badge.offline::before { content: "● "; }
+  @keyframes pulse { 50% { opacity: .45; } }
+  .nav-btn { cursor: pointer; }
+  .nav-btn:hover { color: var(--accent); border-color: var(--accent); }
+  main { max-width: 1200px; margin: 0 auto; padding: 26px 24px 40px; }
+  .page-head h2 { font-size: 20px; margin-bottom: 6px; }
+  .page-head p { color: var(--dim); font-size: 13px; line-height: 1.7; }
+  .toolbar { display: flex; align-items: center; gap: 10px; margin: 18px 0 12px; }
+  .btn { border: 1px solid var(--border); background: #fff; color: var(--text);
+    border-radius: var(--radius-s); padding: 7px 14px; font-size: 13px; cursor: pointer;
+    transition: all .15s; }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn:focus-visible { box-shadow: var(--focus-ring); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { filter: brightness(1.06); color: #fff; }
+  .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .btn.danger:hover { filter: brightness(1.06); color: #fff; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+  .btn.sm { padding: 4px 10px; font-size: 12.5px; }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--dim); }
+  .btn.ghost:hover { color: var(--accent); background: #f0f4ff; }
+  .btn.ghost.danger-text { color: var(--danger); }
+  .btn.ghost.danger-text:hover { background: var(--danger-bg); border-color: transparent; color: var(--danger); }
+  .card { background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius-l); box-shadow: var(--shadow); overflow: hidden; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 980px; }
+  th { text-align: left; padding: 11px 14px; color: var(--dim); font-weight: 600;
+    font-size: 12.5px; border-bottom: 1px solid var(--border); background: #fafbfe;
+    white-space: nowrap; }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #fafbff; }
+  td .uname { font-weight: 600; }
+  td .self-tag { color: var(--dim); font-size: 11.5px; margin-left: 6px; }
+  .pill { display: inline-block; font-size: 12px; padding: 2px 10px;
+    border-radius: 999px; border: 1px solid var(--border); background: #f6f7fb;
+    color: var(--dim); white-space: nowrap; }
+  .pill.role-admin { color: var(--accent); border-color: #c9d8ff; background: #f0f4ff; }
+  .pill.st-ok { color: var(--success); border-color: var(--success-border); background: var(--success-bg); }
+  .pill.st-expired { color: var(--warning); border-color: var(--warning-border); background: var(--warning-bg); }
+  .pill.st-revoked { color: var(--danger); border-color: var(--danger-border); background: var(--danger-bg); }
+  .muted { color: var(--dim); }
+  .nowrap { white-space: nowrap; }
+  .ops { display: flex; gap: 2px; flex-wrap: nowrap; }
+  .cell-edit { display: inline-flex; align-items: center; gap: 4px; }
+  .cell-edit input { width: 110px; border: 1.5px solid var(--accent); border-radius: 6px;
+    padding: 3px 8px; font-size: 12.5px; outline: none; }
+  .cell-edit input:focus { box-shadow: var(--focus-ring); }
+  .cell-edit .ok, .cell-edit .cancel { border: none; background: transparent; cursor: pointer;
+    font-size: 13px; padding: 2px 4px; border-radius: 5px; }
+  .cell-edit .ok { color: var(--success); }
+  .cell-edit .cancel { color: var(--dim); }
+  select.inline { border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px;
+    font-size: 12.5px; background: #fff; color: var(--text); cursor: pointer; }
+  select.inline:focus { border-color: var(--accent); box-shadow: var(--focus-ring); outline: none; }
+  select.inline:disabled { opacity: .5; cursor: not-allowed; }
+  .foot-note { color: var(--dim); font-size: 12px; margin-top: 12px; line-height: 1.7; }
+  .foot-note strong { color: var(--danger); font-weight: 600; }
+  /* ---- 模态 ---- */
+  .modal-mask { position: fixed; inset: 0; background: rgba(43, 48, 64, .45);
+    display: none; align-items: center; justify-content: center; z-index: 20; padding: 20px; }
+  .modal-mask.open { display: flex; }
+  .modal { background: var(--panel); border-radius: var(--radius-l); box-shadow: 0 10px 40px rgba(28, 38, 80, .25);
+    width: 420px; max-width: 100%; padding: 22px 24px; max-height: 90vh; overflow-y: auto; }
+  .modal h3 { font-size: 16.5px; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; }
+  .modal .close { border: none; background: transparent; color: var(--dim); font-size: 16px;
+    cursor: pointer; padding: 2px 6px; border-radius: 6px; }
+  .modal .close:hover { color: var(--text); background: #f0f2f8; }
+  .field { margin-bottom: 13px; }
+  .field label { display: block; font-size: 12.5px; color: var(--dim); margin-bottom: 5px; }
+  .field input, .field select { width: 100%; border: 1.5px solid var(--border); border-radius: var(--radius-s);
+    padding: 8px 12px; font-size: 13.5px; color: var(--text); background: #fff; outline: none;
+    font-family: inherit; }
+  .field input:focus, .field select:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
+  .field .help { color: var(--dim); font-size: 11.5px; margin-top: 4px; }
+  .modal .btns { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+  .modal .err { color: var(--danger); font-size: 12.5px; min-height: 16px; margin-top: 4px; }
+  .key-box { display: flex; align-items: center; gap: 8px; background: #f6f8fd;
+    border: 1px solid var(--border); border-radius: var(--radius-s); padding: 10px 12px; }
+  .key-box code { font-family: "Cascadia Code", Consolas, "Courier New", monospace;
+    font-size: 13px; word-break: break-all; flex: 1; }
+  .warn-strip { background: var(--warning-bg); border: 1px solid var(--warning-border);
+    color: var(--warning); border-radius: var(--radius-s); padding: 9px 12px;
+    font-size: 12.5px; line-height: 1.6; margin-top: 12px; }
+  .danger-strip { background: var(--danger-bg); border: 1px solid var(--danger-border);
+    color: var(--danger); border-radius: var(--radius-s); padding: 9px 12px;
+    font-size: 12.5px; line-height: 1.6; margin-top: 12px; }
+  .consequence { color: var(--dim); font-size: 13px; line-height: 1.9; margin: 4px 0 10px; }
+  .ok-icon { width: 40px; height: 40px; border-radius: 999px; background: var(--success-bg);
+    border: 1px solid var(--success-border); color: var(--success); font-size: 20px;
+    display: flex; align-items: center; justify-content: center; margin: 2px auto 10px; }
+  /* ---- 全局提示与权限视图 ---- */
+  #toast { position: fixed; left: 50%; bottom: 32px; transform: translateX(-50%);
+    background: #333a4d; color: #fff; font-size: 13px; padding: 9px 18px;
+    border-radius: 999px; box-shadow: 0 6px 20px rgba(0,0,0,.18);
+    opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 30; max-width: 80vw; }
+  #toast.show { opacity: 1; }
+  #denyBox { display: none; text-align: center; padding: 80px 20px; }
+  #denyBox h2 { margin-bottom: 10px; }
+  #denyBox p { color: var(--dim); margin-bottom: 18px; }
+  /* ---- 登录遮罩（与聊天页同构）---- */
+  #loginMask { position: fixed; inset: 0; background: rgba(43, 48, 64, .45);
+    backdrop-filter: blur(3px); display: none; align-items: center; justify-content: center; z-index: 40; }
+  #loginMask.open { display: flex; }
+  #loginBox { background: var(--panel); border-radius: var(--radius-l); box-shadow: 0 10px 40px rgba(28, 38, 80, .25);
+    width: 340px; padding: 26px 28px; }
+  #loginBox h2 { font-size: 17px; margin-bottom: 16px; }
+  #loginBox label { display: block; font-size: 12.5px; color: var(--dim); margin: 10px 0 5px; }
+  #loginBox input { width: 100%; border: 1.5px solid var(--border); border-radius: var(--radius-s);
+    padding: 9px 12px; font-size: 14px; outline: none; }
+  #loginBox input:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
+  .login-btn { width: 100%; margin-top: 14px; background: var(--accent); color: #fff;
+    border: none; border-radius: var(--radius-s); padding: 9px; font-size: 14px; cursor: pointer; }
+  .login-btn:hover { filter: brightness(1.06); }
+  .login-btn.gray { background: #59606f; }
+  #loginErr { color: var(--danger); font-size: 12.5px; min-height: 16px; margin-top: 8px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="logo">⚙</span><span class="h1-text">Private Agent 控制台</span></h1>
+  <span class="badge role-admin" id="roleBadge" style="display:none">管理员</span>
+  <span class="badge" id="statusBadge">连接中…</span>
+  <span style="flex:1"></span>
+  <span class="badge" id="userBadge"></span>
+  <span class="badge nav-btn" id="backBtn" title="返回对话页面">← 返回对话</span>
+</header>
+
+<main>
+  <div id="mainView" style="display:none">
+    <div class="page-head">
+      <h2>用户与 Key 管理</h2>
+      <p>建用户、轮换 Key、重置密码、设角色/部门、吊销——全生命周期管理。明文 Key 仅在创建/轮换时显示一次。</p>
+    </div>
+    <div class="toolbar">
+      <button class="btn primary" id="createBtn">＋ 新建用户</button>
+    </div>
+    <div class="card">
+      <div class="table-wrap">
+        <table id="console-table">
+          <thead>
+            <tr>
+              <th>用户名</th><th>角色</th><th>部门</th><th>状态</th>
+              <th>密码</th><th>Key 过期时间</th><th>创建时间</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="userRows"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="foot-note">吊销立即生效且<strong>不可恢复</strong>；误吊销需换用户名重建。Key 轮换后旧 Key 立即失效。</div>
+  </div>
+
+  <div id="denyBox">
+    <h2>🚫 无权访问</h2>
+    <p id="denyMsg">管理控制台仅对管理员开放。</p>
+    <button class="btn" onclick="location.href='/'">← 返回对话</button>
+  </div>
+</main>
+
+<!-- 新建用户表单模态 -->
+<div class="modal-mask" id="createMask">
+  <div class="modal">
+    <h3>新建用户 <button class="close" data-close="createMask">✕</button></h3>
+    <div class="field">
+      <label>用户名</label>
+      <input id="fUsername" placeholder="如 alice" maxlength="64">
+    </div>
+    <div class="field">
+      <label>角色</label>
+      <select id="fRole">
+        <option value="user">user（普通用户）</option>
+        <option value="approver">approver（审批人）</option>
+        <option value="admin">admin（管理员）</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>部门（可选）</label>
+      <input id="fDept" placeholder="如 财务部（可留空）" maxlength="64">
+    </div>
+    <div class="field">
+      <label>Key 有效期（天）</label>
+      <input id="fDays" type="number" min="0" max="3650" value="0">
+      <div class="help">0 = 永不过期（最长 10 年）</div>
+    </div>
+    <div class="err" id="createErr"></div>
+    <div class="btns">
+      <button class="btn" data-close="createMask">取消</button>
+      <button class="btn primary" id="createOk">创建并签发 Key</button>
+    </div>
+  </div>
+</div>
+
+<!-- 一次性 Key 结果模态 -->
+<div class="modal-mask" id="keyMask">
+  <div class="modal">
+    <h3 id="keyTitle">操作成功 <button class="close" data-close="keyMask">✕</button></h3>
+    <div class="ok-icon">✓</div>
+    <div class="key-box">
+      <code id="keyValue"></code>
+      <button class="btn sm" id="copyKey">复制</button>
+    </div>
+    <div class="warn-strip">明文 Key 仅显示这一次，请立即保存。关闭后无法再次查看。</div>
+    <div class="btns">
+      <button class="btn primary" id="keyDone">我已保存，关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 重置密码模态 -->
+<div class="modal-mask" id="passMask">
+  <div class="modal">
+    <h3 id="passTitle">重置密码 <button class="close" data-close="passMask">✕</button></h3>
+    <div class="field">
+      <label>新密码（至少 8 位）</label>
+      <input id="fPassword" type="text" autocomplete="off" placeholder="输入新密码或点击随机生成">
+      <div class="help"><a href="javascript:void(0)" id="genPass">🎲 随机生成</a></div>
+    </div>
+    <div class="err" id="passErr"></div>
+    <div class="btns">
+      <button class="btn" data-close="passMask">取消</button>
+      <button class="btn primary" id="passOk">确认重置</button>
+    </div>
+  </div>
+</div>
+
+<!-- 吊销确认模态 -->
+<div class="modal-mask" id="revokeMask">
+  <div class="modal">
+    <h3 id="revokeTitle">吊销账号 <button class="close" data-close="revokeMask">✕</button></h3>
+    <div class="consequence" id="revokeUser"></div>
+    <div class="consequence">吊销后立即生效：① 其 API Key 立即失效　② 其登录令牌立即失效　③ <strong style="color:var(--danger)">吊销不可恢复</strong>（误吊销需换用户名重建）</div>
+    <div class="danger-strip">此操作不可撤销，请确认。</div>
+    <div class="err" id="revokeErr"></div>
+    <div class="btns">
+      <button class="btn" data-close="revokeMask">取消</button>
+      <button class="btn danger" id="revokeOk">确认吊销</button>
+    </div>
+  </div>
+</div>
+
+<!-- 轮换确认模态 -->
+<div class="modal-mask" id="rotateMask">
+  <div class="modal">
+    <h3>轮换 Key <button class="close" data-close="rotateMask">✕</button></h3>
+    <div class="consequence" id="rotateUser"></div>
+    <div class="consequence">轮换后：① 签发新 Key ② <strong style="color:var(--warning)">旧 Key 立即失效</strong>（正在使用旧 Key 的客户端将 401）</div>
+    <div class="field" style="margin-top:10px">
+      <label>新 Key 有效期（天）</label>
+      <input id="fRotateDays" type="number" min="0" max="3650" value="0">
+      <div class="help">0 = 永不过期（最长 10 年）</div>
+    </div>
+    <div class="err" id="rotateErr"></div>
+    <div class="btns">
+      <button class="btn" data-close="rotateMask">取消</button>
+      <button class="btn primary" id="rotateOk">确认轮换</button>
+    </div>
+  </div>
+</div>
+
+<!-- 登录遮罩 -->
+<div id="loginMask">
+  <div id="loginBox">
+    <h2>🔐 管理控制台登录</h2>
+    <label>用户名</label>
+    <input id="loginUser" autocomplete="username">
+    <label>密码</label>
+    <input id="loginPass" type="password" autocomplete="current-password">
+    <button class="login-btn" id="loginBtn">登 录</button>
+    <div class="divider-line" style="text-align:center;color:var(--dim);font-size:11.5px;margin-top:12px">开发者通道</div>
+    <input id="loginKey" placeholder="pak- 开头的 API Key" style="margin-top:8px">
+    <button class="login-btn gray" id="keyBtn">用 Key 进入</button>
+    <div id="loginErr"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ---- 凭据（与聊天页同源 localStorage：poc_key）----
+let apiKey = localStorage.getItem('poc_key') || '';
+let me = null;   // {username, role, department}
+let lastLoadedUser = null;   // v0.17.29 修复问题4：仅身份变化时重建列表，
+                             // 避免 health 5s 轮询销毁行内编辑框/弹窗
+function authHdr(extra) {
+  const h = Object.assign({}, extra || {});
+  if (apiKey) h['Authorization'] = 'Bearer ' + apiKey;
+  return h;
+}
+const $ = id => document.getElementById(id);
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+function fmtTime(v) {
+  if (!v) return '—';
+  const d = new Date(v * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function openModal(id) { $(id).classList.add('open'); }
+function closeModal(id) { $(id).classList.remove('open'); }
+document.querySelectorAll('[data-close]').forEach(b =>
+  b.onclick = () => closeModal(b.dataset.close));
+
+// ---- 健康检查与身份判定（AC1：仅 admin 有控制台）----
+async function checkHealth() {
+  const status = $('statusBadge');
+  try {
+    const r = await fetch('/api/health', { cache: 'no-store', headers: authHdr() });
+    if (!r.ok) throw new Error(r.status);
+    const h = await r.json();
+    status.textContent = h.mode === 'mock' ? '演示模式' : '已连接';
+    status.className = 'badge online';
+    if (h.auth_enabled && !h.identity) {        // 未登录 → 登录遮罩
+      // 登录框已打开时不重复弹（与 index.html 同一教训：否则 5s 轮询
+      // 每轮抢一次焦点、清一次错误提示——用户正输密码时焦点被跳回用户名框）
+      if (!$('loginMask').classList.contains('open')) showLogin();
+      return;
+    }
+    me = h.identity || { username: 'anonymous', role: 'admin', department: '' };
+    $('loginMask').classList.remove('open');
+    $('userBadge').textContent = '👤 ' + me.username;
+    if (me.role !== 'admin') {                  // user/approver → 拒绝视图
+      $('mainView').style.display = 'none';
+      $('roleBadge').style.display = 'none';
+      $('denyBox').style.display = 'block';
+      $('denyMsg').textContent = `当前身份「${me.username}（${me.role}）」无权访问管理控制台，请联系管理员。`;
+      return;
+    }
+    $('denyBox').style.display = 'none';
+    $('roleBadge').style.display = '';
+    $('mainView').style.display = '';
+    if (lastLoadedUser !== me.username) {   // 仅首次或切换账号后加载一次
+      lastLoadedUser = me.username;
+      loadUsers();
+    }
+  } catch (e) {
+    status.textContent = '服务离线，每 5 秒自动重连';
+    status.className = 'badge offline';
+  }
+}
+
+// ---- 登录（账号密码 → pat-；或 pak- Key）----
+function showLogin(msg) {
+  $('loginErr').textContent = msg || '';
+  $('loginMask').classList.add('open');
+  setTimeout(() => $('loginUser').focus(), 50);
+}
+async function doLogin() {
+  const u = $('loginUser').value.trim(), p = $('loginPass').value;
+  if (!u || !p) { $('loginErr').textContent = '请输入用户名和密码'; return; }
+  const btn = $('loginBtn');
+  btn.disabled = true; $('loginErr').textContent = '';
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: u, password: p })
+    });
+    if (!r.ok) { $('loginErr').textContent = r.status === 401 ? '用户名或密码错误' : '登录失败（' + r.status + '）'; return; }
+    const d = await r.json();
+    $('loginPass').value = '';
+    apiKey = d.token;
+    localStorage.setItem('poc_key', apiKey);
+    $('loginMask').classList.remove('open');
+    checkHealth();
+  } catch (e) { $('loginErr').textContent = '网络错误，请稍后再试'; }
+  finally { btn.disabled = false; }
+}
+$('loginBtn').onclick = doLogin;
+$('loginPass').onkeydown = e => { if (e.key === 'Enter') doLogin(); };
+$('keyBtn').onclick = () => {
+  const v = $('loginKey').value.trim();
+  if (!v) { $('loginErr').textContent = '请输入 API Key'; return; }
+  apiKey = v;
+  localStorage.setItem('poc_key', apiKey);
+  $('loginMask').classList.remove('open');
+  checkHealth();
+};
+$('backBtn').onclick = () => { location.href = '/'; };
+
+// ---- 用户列表（AC2）----
+async function api(path, opts) {
+  const r = await fetch(path, Object.assign({ headers: authHdr(
+    opts && opts.body ? { 'Content-Type': 'application/json' } : {}) }, opts));
+  let d = {};
+  try { d = await r.json(); } catch (e) {}
+  return { ok: r.ok, status: r.status, data: d };
+}
+async function loadUsers() {
+  const { ok, status, data } = await api('/api/admin/users');
+  if (status === 401) { apiKey = ''; localStorage.removeItem('poc_key'); showLogin('凭据无效，请重新登录'); return; }
+  if (status === 403) { $('mainView').style.display = 'none'; $('denyBox').style.display = 'block'; return; }
+  if (!ok) { toast('加载用户列表失败'); return; }
+  renderRows(data.users || []);
+}
+function statusOf(u) {
+  if (u.revoked) return ['st-revoked', '已吊销'];
+  if (u.expires_at && u.expires_at <= Date.now() / 1000) return ['st-expired', '已过期'];
+  return ['st-ok', '正常'];
+}
+function renderRows(users) {
+  const tb = $('userRows');
+  tb.innerHTML = '';
+  for (const u of users) {
+    const self = u.username === me.username;
+    const [stCls, stText] = statusOf(u);
+    const tr = document.createElement('tr');
+    let ops = '';
+    if (u.revoked) {
+      ops = '<span class="muted" style="font-size:12px">已吊销不可恢复</span>';
+    } else {
+      ops =
+        `<button class="btn ghost sm" data-act="rotate" data-u="${esc(u.username)}">轮换 Key</button>` +
+        `<button class="btn ghost sm" data-act="passwd" data-u="${esc(u.username)}">重置密码</button>`;
+      if (self) {
+        ops += '<span class="muted" style="font-size:12px;align-self:center">不能操作自己（角色/吊销）</span>';
+      } else {
+        ops += `<button class="btn ghost sm danger-text" data-act="revoke" data-u="${esc(u.username)}">吊销</button>`;
+      }
+    }
+    const roleCell = self || u.revoked
+      ? `<span class="pill ${u.role === 'admin' ? 'role-admin' : ''}">${esc(u.role)}</span>`
+      : `<select class="inline" data-act="role" data-u="${esc(u.username)}">
+           ${['user', 'approver', 'admin'].map(r =>
+             `<option value="${r}"${r === u.role ? ' selected' : ''}>${r}</option>`).join('')}
+         </select>`;
+    const deptCell = u.revoked || self
+      ? (esc(u.department) || '<span class="muted">—</span>')
+      : `<span class="cell-edit" data-u="${esc(u.username)}" data-dept="${esc(u.department)}">
+           <span class="dept-text">${esc(u.department) || '<span class="muted">— 点击设置</span>'}</span>
+         </span>`;
+    tr.innerHTML =
+      `<td><span class="uname">${esc(u.username)}</span>${self ? '<span class="self-tag">（当前登录）</span>' : ''}</td>` +
+      `<td>${roleCell}</td><td>${deptCell}</td>` +
+      `<td><span class="pill ${stCls}">${stText}</span></td>` +
+      `<td>${u.has_password ? '<span class="pill">已设置</span>' : '<span class="muted">未设置</span>'}</td>` +
+      `<td class="nowrap">${u.expires_at ? fmtTime(u.expires_at) : '永不过期'}</td>` +
+      `<td class="nowrap">${fmtTime(u.created)}</td>` +
+      `<td><div class="ops">${ops}</div></td>`;
+    tb.appendChild(tr);
+    if (!u.revoked && !self) bindDeptEdit(tr.querySelector('.cell-edit'));
+  }
+}
+
+// ---- 行内编辑：部门（AC7）----
+function bindDeptEdit(cell) {
+  if (!cell) return;
+  cell.style.cursor = 'pointer';
+  cell.title = '点击编辑部门';
+  cell.onclick = () => {
+    if (cell.querySelector('input')) return;
+    const cur = cell.dataset.dept || '';
+    const u = cell.dataset.u;
+    cell.innerHTML =
+      `<input value="${esc(cur)}" maxlength="64">` +
+      `<button class="ok" title="保存">✓</button><button class="cancel" title="取消">✕</button>`;
+    const input = cell.querySelector('input');
+    input.focus(); input.select();
+    const save = async () => {
+      const { ok, data } = await api(`/api/admin/users/${encodeURIComponent(u)}/department`,
+        { method: 'POST', body: JSON.stringify({ department: input.value }) });
+      if (!ok) { toast(data.error || '设置失败'); renderRowRestore(cell, cur); return; }
+      toast('部门已更新');
+      loadUsers();
+    };
+    const cancel = () => renderRowRestore(cell, cur);
+    cell.querySelector('.ok').onclick = e => { e.stopPropagation(); save(); };
+    cell.querySelector('.cancel').onclick = e => { e.stopPropagation(); cancel(); };
+    input.onkeydown = e => {
+      if (e.key === 'Enter') save();
+      if (e.key === 'Escape') cancel();
+    };
+  };
+}
+function renderRowRestore(cell, cur) {
+  cell.innerHTML = `<span class="dept-text">${esc(cur) || '<span class="muted">— 点击设置</span>'}</span>`;
+}
+
+// ---- 行内编辑：角色（AC6）----
+$('userRows').addEventListener('change', async e => {
+  const sel = e.target.closest('select[data-act="role"]');
+  if (!sel) return;
+  const u = sel.dataset.u, role = sel.value;
+  const { ok, data } = await api(`/api/admin/users/${encodeURIComponent(u)}/role`,
+    { method: 'POST', body: JSON.stringify({ role }) });
+  if (!ok) { toast(data.error || '设置失败'); }
+  else { toast(`角色已更新为 ${role}`); _auditLocal('设角色', `${u} → ${role}`); }
+  loadUsers();
+});
+
+// 客户端操作留痕（AC10 服务端日志的页面对照；审计表随 6.3 落库）
+function _auditLocal(action, detail) { console.info(`[admin-ui] ${action} ${detail}`); }
+
+// ---- 操作分发 ----
+$('userRows').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const u = btn.dataset.u;
+  if (btn.dataset.act === 'rotate') { $('rotateUser').textContent = `将轮换用户「${u}」的 API Key。`; $('rotateErr').textContent = ''; $('rotateOk').dataset.u = u; openModal('rotateMask'); }
+  if (btn.dataset.act === 'passwd') { $('passTitle').firstChild.textContent = `重置密码「${u}」 `; $('fPassword').value = ''; $('passErr').textContent = ''; $('passOk').dataset.u = u; openModal('passMask'); }
+  if (btn.dataset.act === 'revoke') { $('revokeTitle').firstChild.textContent = `吊销账号「${u}」 `; $('revokeUser').textContent = `将吊销用户「${u}」。`; $('revokeErr').textContent = ''; $('revokeOk').dataset.u = u; openModal('revokeMask'); }
+});
+
+// ---- 新建用户（AC3）----
+$('createBtn').onclick = () => {
+  $('fUsername').value = ''; $('fDept').value = ''; $('fDays').value = '0';
+  $('fRole').value = 'user'; $('createErr').textContent = '';
+  openModal('createMask');
+  setTimeout(() => $('fUsername').focus(), 50);
+};
+$('createOk').onclick = async () => {
+  const body = {
+    username: $('fUsername').value.trim(),
+    role: $('fRole').value,
+    department: $('fDept').value.trim(),
+    days: Math.max(0, parseInt($('fDays').value || '0', 10))
+  };
+  const { ok, status, data } = await api('/api/admin/users',
+    { method: 'POST', body: JSON.stringify(body) });
+  if (!ok) { $('createErr').textContent = (status === 403) ? '需要管理员角色' : (data.error || '创建失败'); return; }
+  closeModal('createMask');
+  showKeyModal(`用户「${body.username}」已创建`, data.key);
+  _auditLocal('创建用户', body.username);
+};
+
+// ---- 轮换 Key（AC4）----
+$('rotateOk').onclick = async () => {
+  const u = $('rotateOk').dataset.u;
+  const days = Math.max(0, parseInt($('fRotateDays').value || '0', 10));
+  const { ok, status, data } = await api(`/api/admin/users/${encodeURIComponent(u)}/rotate`,
+    { method: 'POST', body: JSON.stringify({ days }) });
+  if (!ok) { $('rotateErr').textContent = (status === 403) ? '需要管理员角色' : (data.error || '轮换失败'); return; }
+  closeModal('rotateMask');
+  showKeyModal(`用户「${u}」的 Key 已轮换`, data.key);
+  _auditLocal('轮换 Key', u);
+};
+
+// ---- 重置密码（AC5）----
+$('genPass').onclick = () => {
+  const chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  const arr = new Uint32Array(12);
+  crypto.getRandomValues(arr);
+  $('fPassword').value = Array.from(arr, n => chars[n % chars.length]).join('');
+};
+$('passOk').onclick = async () => {
+  const u = $('passOk').dataset.u;
+  const password = $('fPassword').value;
+  const { ok, status, data } = await api(`/api/admin/users/${encodeURIComponent(u)}/password`,
+    { method: 'POST', body: JSON.stringify({ password }) });
+  if (!ok) { $('passErr').textContent = (status === 403) ? '需要管理员角色' : (data.error || '设置失败'); return; }
+  $('passErr').textContent = '';
+  toast(`「${u}」的密码已重置`);
+  closeModal('passMask');
+  _auditLocal('重置密码', u);
+};
+
+// ---- 吊销（AC8）----
+$('revokeOk').onclick = async () => {
+  const u = $('revokeOk').dataset.u;
+  const { ok, status, data } = await api(`/api/admin/users/${encodeURIComponent(u)}/revoke`,
+    { method: 'POST' });
+  if (!ok) { $('revokeErr').textContent = (status === 403) ? '需要管理员角色' : (data.error || '吊销失败'); return; }
+  closeModal('revokeMask');
+  toast(`「${u}」已吊销，其 Key 与登录令牌立即失效`);
+  _auditLocal('吊销账号', u);
+  loadUsers();
+};
+
+// ---- 一次性 Key 展示（AC3/AC4 共用）----
+function showKeyModal(title, key) {
+  $('keyTitle').firstChild.textContent = title + ' ';
+  $('keyValue').textContent = key;
+  openModal('keyMask');
+  loadUsers();   // 列表即时反映新用户/新过期时间
+}
+$('copyKey').onclick = async () => {
+  const v = $('keyValue').textContent;
+  try { await navigator.clipboard.writeText(v); toast('已复制到剪贴板'); }
+  catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = v; document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); ta.remove(); toast('已复制到剪贴板');
+  }
+};
+$('keyDone').onclick = () => closeModal('keyMask');
+
+checkHealth();
+setInterval(checkHealth, 5000);
+</script>
+</body>
+</html>

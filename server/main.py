@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi import FastAPI, Request
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                Response, StreamingResponse)
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from server import (agent, approval, auth, config, custom_tools, packs,
                     session_lock, sessions, skills, telemetry, usage)
@@ -160,6 +160,160 @@ async def logout_endpoint(request: Request):
     return {"ok": True}
 
 
+# ---- PLAN 3.1 管理控制台：用户与 Key 管理（admin 专属，CLI 能力收口到页面）----
+
+def _admin_guard(request: Request):
+    """管理端点统一守卫（七端点复用；与包级 RBAC 同构的双层拦截——前端隐藏
+    入口只是体验层，服务端判定才是防线）。返回 JSONResponse 表示拦截。"""
+    if not auth.enabled():
+        return JSONResponse(
+            {"error": "开放模式无用户体系，管理端点不可用"}, status_code=400)
+    if request.state.user is None:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if request.state.user.get("role") != "admin":
+        return JSONResponse({"error": "需要管理员角色"}, status_code=403)
+    return None
+
+
+def _audit(operator: str, action: str, target: str) -> None:
+    """管理动作结构化日志（AC10）。统一审计表随 PLAN 6.3 落库；
+    绝不打印明文 Key 等敏感值。"""
+    print(f"[admin] {operator} {action} {target}")
+
+
+class AdminUserCreate(BaseModel):
+    username: str
+    role: str = "user"
+    # 上界 10 年：防止超大值写出永不触发的 expires_at（评审问题3；CLI 暂未加）
+    days: int = Field(default=0, ge=0, le=3650)
+    department: str = ""
+
+
+class AdminUserOption(BaseModel):
+    days: int = Field(default=0, ge=0, le=3650)
+
+
+class AdminPasswordSet(BaseModel):
+    password: str
+
+
+class AdminRoleSet(BaseModel):
+    role: str
+
+
+class AdminDepartmentSet(BaseModel):
+    department: str = ""
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(request: Request):
+    """用户全量清单（AC2）：口径与 CLI list 一致，状态判定（正常/已过期/已吊销）
+    由前端按 revoked / expires_at 呈现。"""
+    if err := _admin_guard(request):
+        return err
+    return {"users": auth.list_users()}
+
+
+@app.post("/api/admin/users")
+async def admin_create_user(request: Request, req: AdminUserCreate):
+    """建用户（AC3）：响应携带一次性明文 Key，服务端不落日志不复存。"""
+    if err := _admin_guard(request):
+        return err
+    key = auth.add_user(req.username, role=req.role, days=req.days,
+                        department=req.department)
+    if key is None:
+        return JSONResponse(
+            {"error": "创建失败：用户名已存在、为保留名（shared）、超长（>64 字）或角色非法"},
+            status_code=400)
+    _audit(request.state.user["username"], "创建用户", req.username.strip())
+    return {"key": key}
+
+
+@app.post("/api/admin/users/{username}/rotate")
+async def admin_rotate_key(request: Request, username: str,
+                           req: AdminUserOption):
+    """轮换 Key（AC4）：旧 Key 立即失效。已吊销用户拒绝轮换——rotate 会清
+    吊销位，须封死「借轮换复活」的口子（吊销不可恢复，spec 澄清 4）。"""
+    if err := _admin_guard(request):
+        return err
+    # 评审问题1：路径参数先归一化（auth 层 set_role 等会 strip），否则带空格
+    # 变体（如 %20admin）可绕过「不能操作自己」的自保护比较
+    username = (username or "").strip()
+    if auth.user_by_name(username) is None:
+        return JSONResponse({"error": "用户不存在或已吊销"}, status_code=404)
+    key = auth.rotate_user(username, days=req.days)
+    if key is None:
+        return JSONResponse({"error": "用户不存在"}, status_code=404)
+    _audit(request.state.user["username"], "轮换 Key", username)
+    return {"key": key}
+
+
+@app.post("/api/admin/users/{username}/password")
+async def admin_reset_password(request: Request, username: str,
+                               req: AdminPasswordSet):
+    """重置密码（AC5）：长度服务端强校验，明文不落日志。"""
+    if err := _admin_guard(request):
+        return err
+    username = (username or "").strip()
+    if auth.user_by_name(username) is None:
+        return JSONResponse({"error": "用户不存在或已吊销"}, status_code=404)
+    if len(req.password or "") < auth.MIN_PASSWORD_LEN:
+        return JSONResponse(
+            {"error": f"密码至少 {auth.MIN_PASSWORD_LEN} 位"}, status_code=400)
+    if not auth.set_password(username, req.password):
+        return JSONResponse({"error": "密码设置失败"}, status_code=400)
+    _audit(request.state.user["username"], "重置密码", username)
+    return {"ok": True}
+
+
+@app.post("/api/admin/users/{username}/role")
+async def admin_set_role(request: Request, username: str, req: AdminRoleSet):
+    """设角色（AC6）：立即生效；admin 不能把自己的角色改为非 admin
+    （防最后一个管理员自锁，端点层判定——CLI 保持原行为）。"""
+    if err := _admin_guard(request):
+        return err
+    username = (username or "").strip()
+    if req.role not in auth.ROLES:
+        return JSONResponse({"error": "非法角色"}, status_code=400)
+    operator = request.state.user["username"]
+    if operator == username and req.role != "admin":
+        return JSONResponse(
+            {"error": "不能把自己的角色改为非 admin"}, status_code=400)
+    if not auth.set_role(username, req.role):
+        return JSONResponse({"error": "用户不存在或已吊销"}, status_code=404)
+    _audit(operator, "设角色", f"{username} → {req.role}")
+    return {"ok": True}
+
+
+@app.post("/api/admin/users/{username}/department")
+async def admin_set_department(request: Request, username: str,
+                               req: AdminDepartmentSet):
+    """设部门（AC7）：空串清除；调岗即时生效（报表/知识库分库权限按新部门）。"""
+    if err := _admin_guard(request):
+        return err
+    username = (username or "").strip()
+    if not auth.set_department(username, req.department):
+        return JSONResponse({"error": "用户不存在或已吊销"}, status_code=404)
+    _audit(request.state.user["username"], "设部门",
+           f"{username} → {req.department.strip() or '（清空）'}")
+    return {"ok": True}
+
+
+@app.post("/api/admin/users/{username}/revoke")
+async def admin_revoke_user(request: Request, username: str):
+    """吊销账号（AC8）：pak- Key 与 pat- 令牌立即失效，不可恢复（无解禁）。"""
+    if err := _admin_guard(request):
+        return err
+    username = (username or "").strip()
+    operator = request.state.user["username"]
+    if operator == username:
+        return JSONResponse({"error": "不能吊销自己"}, status_code=400)
+    if not auth.revoke_user(username):
+        return JSONResponse({"error": "用户不存在或已吊销"}, status_code=404)
+    _audit(operator, "吊销账号", username)
+    return {"ok": True}
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
@@ -169,6 +323,21 @@ class ChatRequest(BaseModel):
 @app.get("/")
 async def index():
     return FileResponse(config.PROJECT_ROOT / "web" / "index.html")
+
+
+@app.get("/console")
+async def console_page():
+    """管理控制台页面（v0.17.29，PLAN 3.1）。页面级路径不受认证中间件拦截
+    （与 / 同口径），登录态由页面自行经 /api/health 判定后展示遮罩或跳转。"""
+    return FileResponse(config.PROJECT_ROOT / "web" / "console.html")
+
+
+@app.get("/tokens.css")
+async def tokens_css():
+    """共享设计 token（v0.17.28 快赢体系落盘，聊天页与控制台共用单一来源）。
+    白名单式静态文件，不做任意路径文件服务。"""
+    return FileResponse(config.PROJECT_ROOT / "web" / "tokens.css",
+                        media_type="text/css")
 
 
 @app.get("/api/health")
@@ -280,15 +449,19 @@ async def chat(req: ChatRequest, request: Request):
 def _acl_identity(request: Request) -> dict | None:
     """资源级 ACL（v0.14.1）：返回当前身份 {username, role}；
     开放模式返回 None（不过滤，行为同旧版）。
-    使用规则：role == 'user' 只能访问自己的资源；approver/admin 全局视图。"""
+    使用规则：role == 'user'/'approver' 只能访问自己的资源（v0.17.29 会话
+    隐私收紧，approver 由全局视图改为仅本人）；admin 全局视图。"""
     if not auth.enabled():
         return None
     return request.state.user
 
 
 def _can_access_session(identity: dict, session_id: str) -> bool:
-    """user 角色只能访问全部消息都属于自己（或开放模式遗留 anonymous）的会话。"""
-    if identity["role"] in ("admin", "approver"):
+    """user/approver 角色只能访问全部消息都属于自己（或开放模式遗留
+    anonymous）的会话；admin 保留全局视图（管理职责）。v0.17.29（PLAN 3.1
+    人工测试反馈）：approver 由全局视图收紧为仅本人——会话内容属用户隐私，
+    审批所需信息经审批单流转，无需读取会话原文。"""
+    if identity["role"] == "admin":
         return True
     owners = sessions.session_users(session_id)
     return bool(owners) and owners <= {identity["username"], "anonymous"}
@@ -297,9 +470,9 @@ def _can_access_session(identity: dict, session_id: str) -> bool:
 @app.get("/api/sessions")
 async def session_list(request: Request, limit: int = 50):
     """会话列表（对话记录来自 SQLite，重启后仍在）。
-    user 角色只列自己的会话；approver/admin 列全部。"""
+    user/approver 只列自己的会话（v0.17.29 收紧）；admin 列全部。"""
     ident = _acl_identity(request)
-    uid = ident["username"] if ident and ident["role"] == "user" else ""
+    uid = ident["username"] if ident and ident["role"] in ("user", "approver") else ""
     # limit<=0 回退默认（全项目评审问题3：SQLite LIMIT 负数 = 全量返回，防绕过 200 条上限）
     return {"sessions": sessions.list_sessions(
         limit=min(limit if limit > 0 else 50, 200), user_id=uid)}

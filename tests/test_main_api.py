@@ -99,6 +99,31 @@ def test_history_forbidden_for_other_user(api):
     assert r.status_code == 403
 
 
+def test_sessions_acl_approver_only_own(api):
+    """v0.17.29 收紧（PLAN 3.1 人工测试反馈）：approver 会话列表只列本人
+    会话，且拉他人会话历史 → 403（此前 approver 为全局视图）。"""
+    tok_ap = _login(api, _mk_user("appr1", role="approver"))
+    tok_u = _login(api, _mk_user("u9"))
+    sessions.append("s-own-appr", "appr1", "user", "你好")
+    sessions.append("s-other", "u9", "user", "你好")
+    names = [s["session_id"] for s in
+             api.get("/api/sessions", headers=_hdr(tok_ap)).json()["sessions"]]
+    assert "s-own-appr" in names and "s-other" not in names
+    r = api.get("/api/sessions/s-other/history", headers=_hdr(tok_ap))
+    assert r.status_code == 403
+
+
+def test_sessions_acl_admin_global_view(api):
+    """admin 保留全局视图（管理职责）：列表含全部会话，可读他人历史。"""
+    tok_ad = _login(api, _mk_user("root9", role="admin"))
+    sessions.append("s-admin-view", "u9", "user", "你好")
+    names = [s["session_id"] for s in
+             api.get("/api/sessions", headers=_hdr(tok_ad)).json()["sessions"]]
+    assert "s-admin-view" in names
+    r = api.get("/api/sessions/s-admin-view/history", headers=_hdr(tok_ad))
+    assert r.status_code == 200
+
+
 def test_history_negative_limit_falls_back(api):
     tok1 = _login(api, _mk_user("u1"))
     sessions.append("s1", "u1", "user", "你好")
