@@ -135,6 +135,25 @@
   #denyBox { display: none; text-align: center; padding: 80px 20px; }
   #denyBox h2 { margin-bottom: 10px; }
   #denyBox p { color: var(--dim); margin-bottom: 18px; }
+  /* ---- 页签条（v0.17.30，PLAN 6.3：用户管理 / 审计日志 双视图）---- */
+  .ctabs { display: flex; gap: 6px; padding: 0 4px; margin-bottom: 14px;
+    border-bottom: 1px solid var(--border); }
+  .ctab { padding: 9px 16px 10px; font-size: 13.5px; color: var(--dim); cursor: pointer;
+    border-bottom: 2px solid transparent; user-select: none; }
+  .ctab:hover { color: var(--text); }
+  .ctab.active { color: var(--accent); font-weight: 600; border-bottom-color: var(--accent); }
+  .view { display: none; }
+  .view.active { display: block; }
+  /* ---- 审计日志视图 ---- */
+  .audit-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 12px; }
+  .audit-filters .af { display: flex; flex-direction: column; gap: 4px; }
+  .audit-filters label { font-size: 12px; color: var(--dim); }
+  .audit-filters input, .audit-filters select { border: 1.5px solid var(--border);
+    border-radius: var(--radius-s); padding: 7px 10px; font-size: 13px; outline: none; background: #fff; }
+  .audit-filters input:focus, .audit-filters select:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
+  .audit-count { color: var(--dim); font-size: 12.5px; align-self: center; margin-left: auto; }
+  .audit-empty { text-align: center; color: var(--dim); font-size: 13px; padding: 42px 10px; line-height: 1.7; }
+  td.detail-cell { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* ---- 登录遮罩（与聊天页同构）---- */
   #loginMask { position: fixed; inset: 0; background: rgba(43, 48, 64, .45);
     backdrop-filter: blur(3px); display: none; align-items: center; justify-content: center; z-index: 40; }
@@ -165,6 +184,11 @@
 
 <main>
   <div id="mainView" style="display:none">
+    <div class="ctabs">
+      <span class="ctab active" data-view="view-users">用户与 Key 管理</span>
+      <span class="ctab" data-view="view-audit">审计日志</span>
+    </div>
+    <div class="view active" id="view-users">
     <div class="page-head">
       <h2>用户与 Key 管理</h2>
       <p>建用户、轮换 Key、重置密码、设角色/部门、吊销——全生命周期管理。明文 Key 仅在创建/轮换时显示一次。</p>
@@ -186,6 +210,54 @@
       </div>
     </div>
     <div class="foot-note">吊销立即生效且<strong>不可恢复</strong>；误吊销需换用户名重建。Key 轮换后旧 Key 立即失效。</div>
+    </div><!-- /view-users -->
+
+    <div class="view" id="view-audit">
+      <div class="page-head">
+        <h2>审计日志</h2>
+        <p>登录、管理动作、审批决议、文件操作统一落审计表——who / when / what 可查，仅管理员可见。</p>
+      </div>
+      <div class="audit-filters">
+        <div class="af"><label>操作人</label><input id="afActor" placeholder="如 alice" maxlength="64"></div>
+        <div class="af"><label>动作类型</label>
+          <select id="afAction">
+            <option value="">全部</option>
+            <option value="登录成功">登录成功</option>
+            <option value="登录失败">登录失败</option>
+            <option value="创建用户">创建用户</option>
+            <option value="轮换 Key">轮换 Key</option>
+            <option value="重置密码">重置密码</option>
+            <option value="设角色">设角色</option>
+            <option value="设部门">设部门</option>
+            <option value="吊销账号">吊销账号</option>
+            <option value="审批通过">审批通过</option>
+            <option value="审批驳回">审批驳回</option>
+            <option value="文件上传">文件上传</option>
+            <option value="文件下载">文件下载</option>
+            <option value="文件删除">文件删除</option>
+            <option value="技能包导入">技能包导入</option>
+            <option value="工具保存文件">工具保存文件</option>
+            <option value="工具删除文件">工具删除文件</option>
+          </select>
+        </div>
+        <button class="btn primary" id="afQuery">查询</button>
+        <button class="btn" id="afReset">重置</button>
+        <span class="audit-count" id="afCount"></span>
+        <button class="btn" id="afExport">导出 CSV</button>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>时间</th><th>操作人</th><th>角色</th><th>动作</th><th>目标</th><th>详情</th></tr>
+            </thead>
+            <tbody id="auditRows"></tbody>
+          </table>
+        </div>
+        <div class="audit-empty" id="auditEmpty" style="display:none">暂无匹配记录<br>调整过滤条件或点击重置后再试</div>
+      </div>
+      <div class="foot-note">审计容量上限 10 万条，超限自动裁剪最旧记录；导出 CSV 最多含最近 1000 条。</div>
+    </div><!-- /view-audit -->
   </div>
 
   <div id="denyBox">
@@ -438,6 +510,68 @@ async function loadUsers() {
   if (!ok) { toast('加载用户列表失败'); return; }
   renderRows(data.users || []);
 }
+// ---- 审计日志（PLAN 6.3）：页签切换 + 过滤查询 + CSV 导出 ----
+document.querySelectorAll('.ctab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.ctab').forEach(x => x.classList.toggle('active', x === t));
+  document.querySelectorAll('.view').forEach(v =>
+    v.classList.toggle('active', v.id === t.dataset.view));
+  if (t.dataset.view === 'view-audit' && !$('auditRows').children.length) loadAudit();
+});
+const AUDIT_PILL = {
+  '登录成功': 'pill st-ok', '审批通过': 'pill st-ok',
+  '登录失败': 'pill st-revoked', '吊销账号': 'pill st-revoked', '审批驳回': 'pill st-revoked',
+  '创建用户': 'pill role-admin', '轮换 Key': 'pill role-admin', '重置密码': 'pill role-admin',
+  '设角色': 'pill role-admin', '设部门': 'pill role-admin',
+};
+async function loadAudit() {
+  const params = new URLSearchParams();
+  if ($('afActor').value.trim()) params.set('actor', $('afActor').value.trim());
+  if ($('afAction').value) params.set('action', $('afAction').value);
+  params.set('limit', 500);
+  const { ok, status, data } = await api('/api/audit?' + params.toString());
+  if (status === 401) { apiKey = ''; localStorage.removeItem('poc_key'); showLogin('凭据无效，请重新登录'); return; }
+  if (!ok) { toast('加载审计日志失败'); return; }
+  const rows = data.records || [];
+  const tb = $('auditRows');
+  tb.innerHTML = '';
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    const pill = AUDIT_PILL[r.action];
+    tr.innerHTML =
+      `<td>${fmtTime(r.ts / 1000)}</td>` +
+      `<td>${esc(r.actor || '（未知）')}</td>` +
+      `<td>${esc(r.role || '—')}</td>` +
+      `<td>${pill ? `<span class="${pill}">${esc(r.action)}</span>` : esc(r.action)}</td>` +
+      `<td class="detail-cell" title="${esc(r.target)}">${esc(r.target || '—')}</td>` +
+      `<td class="detail-cell" title="${esc(r.detail)}">${esc(r.detail || '—')}</td>`;
+    tb.appendChild(tr);
+  }
+  // limit=500 单次拉取，超量时该数是截断后的条数而非全库总数（评审 C4）
+  $('afCount').textContent = `已加载 ${rows.length} 条（单次上限 500）`;
+  $('auditEmpty').style.display = rows.length ? 'none' : 'block';
+}
+$('afQuery').onclick = loadAudit;
+$('afReset').onclick = () => {
+  $('afActor').value = ''; $('afAction').value = '';
+  loadAudit();
+};
+$('afExport').onclick = () => {
+  const params = new URLSearchParams();
+  if ($('afActor').value.trim()) params.set('actor', $('afActor').value.trim());
+  if ($('afAction').value) params.set('action', $('afAction').value);
+  const url = '/api/audit/export' + (params.toString() ? '?' + params : '');
+  // 带 Authorization 的下载：fetch 读 blob 再触发保存（window.open 无法带自定义头）
+  fetch(url, { headers: authHdr() }).then(r => {
+    if (!r.ok) throw new Error(r.status);
+    return r.blob();
+  }).then(b => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b);
+    a.download = 'audit_log.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }).catch(() => toast('导出失败（无权限或登录已过期）'));
+};
 function statusOf(u) {
   if (u.revoked) return ['st-revoked', '已吊销'];
   if (u.expires_at && u.expires_at <= Date.now() / 1000) return ['st-expired', '已过期'];

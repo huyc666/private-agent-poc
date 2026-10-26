@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import time
 import unicodedata
 import uuid
 from contextlib import asynccontextmanager
@@ -27,7 +28,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                Response, StreamingResponse)
 from pydantic import BaseModel, Field
 
-from server import (agent, approval, auth, config, custom_tools, packs,
+from server import (agent, approval, audit, auth, config, custom_tools, packs,
                     session_lock, sessions, skills, telemetry, usage)
 from tools import kb_parsers  # 定位端点按锚点重解析文档（服务器侧，不进包）
 
@@ -71,6 +72,7 @@ async def lifespan(app: FastAPI):
         print(f"[approval] 启动清理：{cleaned} 条残留审批已处理"
               "（pending→expired，approved 未执行→abandoned）")
     auth.bootstrap_admin()  # 认证模式首启：创建引导 admin 并打印一次性 Key
+    audit.init()  # PLAN 6.3：审计表建表 + 存量容量裁剪（失败不阻断启动）
     # 多用户文件分域（v0.17.7 评审）：旧版单目录 uploads/outputs 的存量文件
     # 迁入 shared/ 域，保证升级后旧文件仍可按 shared 寻址（不迁则分域后找不到）
     await asyncio.to_thread(_migrate_legacy_file_dirs)
@@ -139,16 +141,20 @@ class LoginRequest(BaseModel):
 
 
 @app.post("/api/auth/login")
-async def login_endpoint(req: LoginRequest):
+async def login_endpoint(req: LoginRequest, request: Request):
     """账号密码登录（v0.15.0）：签发 pat- 短期令牌。
-    成功失败都走同一路径，不区分「用户不存在」与「密码错误」（防枚举）。"""
+    成功失败都走同一路径，不区分「用户不存在」与「密码错误」（防枚举）。
+    PLAN 6.3：登录成败均落审计（who/when/what + 来源 IP）。"""
     if not auth.enabled():
         return JSONResponse({"error": "当前为开放模式，无需登录"}, status_code=400)
+    ip = request.client.host if request.client else ""
     # PBKDF2 200k 迭代是 CPU 密集同步调用（实测 300ms+），挪线程池避免阻塞
     # 事件循环（全项目评审问题4；同 resolve_identity 的 to_thread 先例）
     result = await asyncio.to_thread(auth.login, req.username, req.password)
     if result is None:
+        audit.log(req.username.strip()[:64], "", "登录失败", detail=ip)
         return JSONResponse({"error": "用户名或密码错误"}, status_code=401)
+    audit.log(req.username.strip()[:64], "", "登录成功", detail=ip)
     return result
 
 
@@ -175,10 +181,11 @@ def _admin_guard(request: Request):
     return None
 
 
-def _audit(operator: str, action: str, target: str) -> None:
-    """管理动作结构化日志（AC10）。统一审计表随 PLAN 6.3 落库；
+def _audit(operator: str, action: str, target: str, role: str = "") -> None:
+    """管理动作结构化日志（AC10）+ 统一审计落库（PLAN 6.3）。
     绝不打印明文 Key 等敏感值。"""
     print(f"[admin] {operator} {action} {target}")
+    audit.log(operator, role, action, target=target)
 
 
 class AdminUserCreate(BaseModel):
@@ -225,7 +232,8 @@ async def admin_create_user(request: Request, req: AdminUserCreate):
         return JSONResponse(
             {"error": "创建失败：用户名已存在、为保留名（shared）、超长（>64 字）或角色非法"},
             status_code=400)
-    _audit(request.state.user["username"], "创建用户", req.username.strip())
+    _audit(request.state.user["username"], "创建用户", req.username.strip(),
+           role=request.state.user["role"])
     return {"key": key}
 
 
@@ -244,7 +252,8 @@ async def admin_rotate_key(request: Request, username: str,
     key = auth.rotate_user(username, days=req.days)
     if key is None:
         return JSONResponse({"error": "用户不存在"}, status_code=404)
-    _audit(request.state.user["username"], "轮换 Key", username)
+    _audit(request.state.user["username"], "轮换 Key", username,
+           role=request.state.user["role"])
     return {"key": key}
 
 
@@ -262,7 +271,8 @@ async def admin_reset_password(request: Request, username: str,
             {"error": f"密码至少 {auth.MIN_PASSWORD_LEN} 位"}, status_code=400)
     if not auth.set_password(username, req.password):
         return JSONResponse({"error": "密码设置失败"}, status_code=400)
-    _audit(request.state.user["username"], "重置密码", username)
+    _audit(request.state.user["username"], "重置密码", username,
+           role=request.state.user["role"])
     return {"ok": True}
 
 
@@ -281,7 +291,8 @@ async def admin_set_role(request: Request, username: str, req: AdminRoleSet):
             {"error": "不能把自己的角色改为非 admin"}, status_code=400)
     if not auth.set_role(username, req.role):
         return JSONResponse({"error": "用户不存在或已吊销"}, status_code=404)
-    _audit(operator, "设角色", f"{username} → {req.role}")
+    _audit(operator, "设角色", f"{username} → {req.role}",
+           role=request.state.user["role"])
     return {"ok": True}
 
 
@@ -295,7 +306,8 @@ async def admin_set_department(request: Request, username: str,
     if not auth.set_department(username, req.department):
         return JSONResponse({"error": "用户不存在或已吊销"}, status_code=404)
     _audit(request.state.user["username"], "设部门",
-           f"{username} → {req.department.strip() or '（清空）'}")
+           f"{username} → {req.department.strip() or '（清空）'}",
+           role=request.state.user["role"])
     return {"ok": True}
 
 
@@ -310,8 +322,48 @@ async def admin_revoke_user(request: Request, username: str):
         return JSONResponse({"error": "不能吊销自己"}, status_code=400)
     if not auth.revoke_user(username):
         return JSONResponse({"error": "用户不存在或已吊销"}, status_code=404)
-    _audit(operator, "吊销账号", username)
+    _audit(operator, "吊销账号", username, role=request.state.user["role"])
     return {"ok": True}
+
+
+@app.get("/api/audit")
+async def audit_query(request: Request, actor: str = "", action: str = "",
+                      since: int = 0, limit: int = 200):
+    """审计流水查询（PLAN 6.3，AC5）：admin 专属。过滤：操作人/动作/起始时间
+    （毫秒）；limit 收敛 [1,1000]（防全表拉取）。拒绝路径复用 _admin_guard。"""
+    if err := _admin_guard(request):
+        return err
+    return {"records": audit.query(actor=actor, action=action,
+                                   since_ms=since, limit=limit)}
+
+
+@app.get("/api/audit/export")
+async def audit_export(request: Request, actor: str = "", action: str = "",
+                       since: int = 0):
+    """审计流水导出 CSV（AC5）：admin 专属；含 UTF-8 BOM 保证 Excel 中文不乱码。"""
+    import csv
+    import io as _io
+    if err := _admin_guard(request):
+        return err
+    rows = audit.query(actor=actor, action=action, since_ms=since,
+                       limit=1000)
+    buf = _io.StringIO()
+    buf.write("\ufeff")  # UTF-8 BOM：Excel 打开 CSV 中文防乱码
+    w = csv.writer(buf)
+    w.writerow(["时间", "操作人", "角色", "动作", "目标", "详情"])
+    for r in rows:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"] / 1000))
+        w.writerow([ts, r["actor"], r["role"], r["action"],
+                    r["target"], r["detail"]])
+    # 直接返回 writer 输出（默认行尾已是 \r\n，且 \ufeff BOM 在首）：不做
+    # splitlines 再拼接——str.splitlines 按 \u2028/\x85 等 Unicode 行边界切分，
+    # 会把 csv 未引用该类字符的记录裂成多条残行（评审 C2，可被含特殊字符的
+    # 用户名污染导出完整性）
+    return Response(
+        buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 'attachment; filename="audit_log.csv"'})
 
 
 class ChatRequest(BaseModel):
@@ -678,6 +730,9 @@ async def upload_doc(request: Request, name: str = ""):
         if not target.resolve().is_relative_to(config.UPLOADS_DIR.resolve()):
             return JSONResponse({"error": "非法文件名"}, status_code=400)
         target.write_text(text, encoding="utf-8")
+        ident = _acl_identity(request)
+        audit.log(ident["username"] if ident else "", ident["role"] if ident else "",
+                  "文件上传", target=safe)
         return {"name": f"{scope}/{safe}", "chars": len(text), "preview": text[:200]}
     except OSError:
         # 不拼 {e}：OSError 文本含完整服务器绝对路径，外泄部署布局
@@ -720,6 +775,9 @@ async def download_output_file(request: Request, name: str):
         media = "application/octet-stream"
     else:
         media = "text/plain; charset=utf-8"
+    ident = _acl_identity(request)
+    audit.log(ident["username"] if ident else "", ident["role"] if ident else "",
+              "文件下载", target=rel)
     return FileResponse(target, media_type=media, filename=fname)
 
 
@@ -772,6 +830,8 @@ async def upload_skillpack(request: Request, overwrite: bool = False):
         return JSONResponse({"error": "导入失败（服务器内部错误）"}, status_code=500)
     if not personal_scope:
         await asyncio.to_thread(agent.maybe_reload_custom_tools)  # 通用技能签名变化 → 重建图
+    audit.log(ident["username"] if ident else "", ident["role"] if ident else "",
+              "技能包导入", target=result["name"])
     result["files"] = result["files"][:50]
     return result
 
@@ -791,6 +851,9 @@ async def upload_delete(request: Request, name: str):
             or not target.is_file()):
         return JSONResponse({"error": "文件不存在"}, status_code=404)
     target.unlink()
+    ident = _acl_identity(request)
+    audit.log(ident["username"] if ident else "", ident["role"] if ident else "",
+              "文件删除", target=Path(rel).name)
     return {"deleted": rel}
 
 
@@ -1084,6 +1147,9 @@ async def approve(req: ApproveRequest, request: Request):
     u = request.state.user or {"username": "", "role": "admin"}  # 开放模式：任何人可决议（旧行为）
     result = approval.resolve(req.approval_id, req.approve, u["username"], u["role"])
     if result == "ok":
+        audit.log(u["username"], u["role"],
+                  "审批通过" if req.approve else "审批驳回",
+                  target=req.approval_id)
         return {"ok": True}
     if result == "forbidden":
         return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)

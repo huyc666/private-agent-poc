@@ -232,6 +232,11 @@ def save_output_file(name: str, content: str, as_docx: bool = False) -> str:
             (out / name).write_bytes(_mdtext_to_docx(content))
         else:
             (out / name).write_text(content, encoding="utf-8")
+        # PLAN 6.3 A7：工具级文件写落审计（spec 承诺「写/删」都记；actor 取
+        # 对话归属身份，直接调用无上下文时为空）。target 与 do_delete 同口径
+        from server import audit  # 延迟导入避免循环依赖；audit 内部自吞异常
+        audit.log(usage.current_user.get() or "", "", "工具保存文件",
+                  target=f"outputs/{scope}/{name}")
         kind = "Word 文档" if as_docx else "文本文件"
         return (f"已保存 {kind} {name}（{len(content):,} 字符）。"
                 f"下载链接：/api/files/{scope}/{name}")
@@ -282,6 +287,8 @@ def do_delete(path: str) -> str:
         if not target.is_file():
             return f"文件不存在: {path}"
         target.unlink()
+        from server import audit  # 延迟导入避免循环依赖；audit 内部自吞异常
+        audit.log(usage.current_user.get() or "", "", "工具删除文件", target=path)
         return f"已删除文件: {path}"
     except Exception as e:
         # 不回显原始异常文本（P1-3 约定），细节仅进服务端日志
