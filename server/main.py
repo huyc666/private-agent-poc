@@ -73,6 +73,7 @@ async def lifespan(app: FastAPI):
               "（pending→expired，approved 未执行→abandoned）")
     auth.bootstrap_admin()  # 认证模式首启：创建引导 admin 并打印一次性 Key
     audit.init()  # PLAN 6.3：审计表建表 + 存量容量裁剪（失败不阻断启动）
+    packs.load_disabled_packs()  # PLAN 3.2 Q2：恢复禁用名单（须在 Agent 装配前）
     # 多用户文件分域（v0.17.7 评审）：旧版单目录 uploads/outputs 的存量文件
     # 迁入 shared/ 域，保证升级后旧文件仍可按 shared 寻址（不迁则分域后找不到）
     await asyncio.to_thread(_migrate_legacy_file_dirs)
@@ -364,6 +365,51 @@ async def audit_export(request: Request, actor: str = "", action: str = "",
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition":
                  'attachment; filename="audit_log.csv"'})
+
+
+# ---- PLAN 3.2 包与审批面板：包管理端点（admin 专属，packs.py 函数收口到页面）----
+
+def _pack_toggle_result(result: tuple[str, str]):
+    """启停结构化结果 → HTTP 响应（评审①：按状态分流，不靠文案子串猜测）。"""
+    status, msg = result
+    if status == "ok":
+        return {"ok": True, "message": msg}
+    return JSONResponse(
+        {"error": msg},
+        status_code={"not_found": 404, "refused": 400, "error": 500}[status])
+
+
+@app.get("/api/admin/packs")
+async def admin_list_packs(request: Request):
+    """包全量清单（AC1）：口径与 packs.list_packs 管理视图一致，含平台包。"""
+    if err := _admin_guard(request):
+        return err
+    return {"packs": packs.list_packs()}
+
+
+@app.post("/api/admin/packs/{name}/disable")
+async def admin_disable_pack(request: Request, name: str):
+    """停用领域包（AC2/AC3）：立即生效并持久化（STATE_DB disabled_packs 表）。
+    平台包拒停（400，前端按钮隐藏只是体验层，服务端是防线）。"""
+    if err := _admin_guard(request):
+        return err
+    result = packs._toggle_pack(name.strip(), enable=False)
+    if result[0] == "ok":  # 仅成功动作记审计（AC4）
+        _audit(request.state.user["username"], "停用包", name.strip(),
+               role=request.state.user["role"])
+    return _pack_toggle_result(result)
+
+
+@app.post("/api/admin/packs/{name}/enable")
+async def admin_enable_pack(request: Request, name: str):
+    """启用领域包（AC2/AC3）：status≠ok 拒启（400，不把故障包引进运行时）。"""
+    if err := _admin_guard(request):
+        return err
+    result = packs._toggle_pack(name.strip(), enable=True)
+    if result[0] == "ok":  # 仅成功动作记审计（AC4）
+        _audit(request.state.user["username"], "启用包", name.strip(),
+               role=request.state.user["role"])
+    return _pack_toggle_result(result)
 
 
 class ChatRequest(BaseModel):

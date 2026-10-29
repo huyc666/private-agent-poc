@@ -185,8 +185,10 @@
 <main>
   <div id="mainView" style="display:none">
     <div class="ctabs">
-      <span class="ctab active" data-view="view-users">用户与 Key 管理</span>
-      <span class="ctab" data-view="view-audit">审计日志</span>
+      <span class="ctab active" data-view="view-users" data-admin-only="1">用户与 Key 管理</span>
+      <span class="ctab" data-view="view-audit" data-admin-only="1">审计日志</span>
+      <span class="ctab" data-view="view-packs" data-admin-only="1">包管理</span>
+      <span class="ctab" data-view="view-approvals">审批</span>
     </div>
     <div class="view active" id="view-users">
     <div class="page-head">
@@ -230,6 +232,8 @@
             <option value="设角色">设角色</option>
             <option value="设部门">设部门</option>
             <option value="吊销账号">吊销账号</option>
+            <option value="停用包">停用包</option>
+            <option value="启用包">启用包</option>
             <option value="审批通过">审批通过</option>
             <option value="审批驳回">审批驳回</option>
             <option value="文件上传">文件上传</option>
@@ -258,6 +262,56 @@
       </div>
       <div class="foot-note">审计容量上限 10 万条，超限自动裁剪最旧记录；导出 CSV 最多含最近 1000 条。</div>
     </div><!-- /view-audit -->
+
+    <div class="view" id="view-packs">
+      <div class="page-head">
+        <h2>包管理</h2>
+        <p>平台包与领域包的运行状态一览。领域包可即时停用/启用（立即生效并持久化，重启不丢）；平台包为跨领域基础能力，不可停用。</p>
+      </div>
+      <div class="toolbar">
+        <button class="btn primary" id="packRefresh">刷新</button>
+        <span class="audit-count" id="packCount"></span>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>包名</th><th>版本</th><th>描述</th><th>状态</th><th>启用</th>
+                <th>平台</th><th>工具 · 技能</th><th>信任级别</th><th>可用角色</th><th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="packRows"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="foot-note">停用会立即从 Agent 移除该包的工具/技能/提示词；<strong>停用名单持久化，重启不丢</strong>。状态异常的包须修复后才可启用。</div>
+    </div><!-- /view-packs -->
+
+    <div class="view" id="view-approvals">
+      <div class="page-head">
+        <h2>审批</h2>
+        <p>危险操作审批池：待审批单可批准/拒绝（批准后对应会话继续执行）；全部状态历史同面板可查，决议日志另见审计页签。</p>
+      </div>
+      <div class="toolbar">
+        <button class="btn primary" id="approvalRefresh">刷新</button>
+        <span class="audit-count" id="approvalCount"></span>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>审批单</th><th>工具</th><th>参数摘要</th><th>状态</th><th>发起人</th>
+                <th>发起时间</th><th>决策人</th><th>决策时间</th><th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="approvalRows"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="foot-note">审批为全局池：任何审批人/管理员可决议任何待审批单；批准后对应会话立即继续执行，决策动作记入审计。</div>
+    </div><!-- /view-approvals -->
   </div>
 
   <div id="denyBox">
@@ -389,7 +443,7 @@
 // ---- 凭据（与聊天页同源 localStorage：poc_key）----
 let apiKey = localStorage.getItem('poc_key') || '';
 let me = null;   // {username, role, department}
-let lastLoadedUser = null;   // v0.17.29 修复问题4：仅身份变化时重建列表，
+let lastLoadedUser = null;   // v0.17.29 修复问题4：仅身份（含角色）变化时重建视图，
                              // 避免 health 5s 轮询销毁行内编辑框/弹窗
 function authHdr(extra) {
   const h = Object.assign({}, extra || {});
@@ -437,19 +491,27 @@ async function checkHealth() {
     me = h.identity || { username: 'anonymous', role: 'admin', department: '' };
     $('loginMask').classList.remove('open');
     $('userBadge').textContent = '👤 ' + me.username;
-    if (me.role !== 'admin') {                  // user/approver → 拒绝视图
+    if (me.role === 'user') {                   // user → 拒绝视图（口径不变）
       $('mainView').style.display = 'none';
       $('roleBadge').style.display = 'none';
       $('denyBox').style.display = 'block';
       $('denyMsg').textContent = `当前身份「${me.username}（${me.role}）」无权访问管理控制台，请联系管理员。`;
       return;
     }
+    // Q1 按角色渲染：admin 全部四页签；approver 仅「审批」页签
+    const isAdmin = me.role === 'admin';
     $('denyBox').style.display = 'none';
+    $('roleBadge').className = isAdmin ? 'badge role-admin' : 'badge';
+    $('roleBadge').textContent = isAdmin ? '管理员' : '审批人';
     $('roleBadge').style.display = '';
     $('mainView').style.display = '';
-    if (lastLoadedUser !== me.username) {   // 仅首次或切换账号后加载一次
-      lastLoadedUser = me.username;
-      loadUsers();
+    document.querySelectorAll('.ctab').forEach(t =>
+      t.style.display = (isAdmin || !t.dataset.adminOnly) ? '' : 'none');
+    const identityKey = me.username + ':' + me.role;   // 身份或角色变化都重建视图
+    if (lastLoadedUser !== identityKey) {
+      lastLoadedUser = identityKey;
+      if (isAdmin) { switchTab('view-users'); loadUsers(); }
+      else { switchTab('view-approvals'); loadApprovals(); }
     }
   } catch (e) {
     status.textContent = '服务离线，每 5 秒自动重连';
@@ -510,18 +572,23 @@ async function loadUsers() {
   if (!ok) { toast('加载用户列表失败'); return; }
   renderRows(data.users || []);
 }
-// ---- 审计日志（PLAN 6.3）：页签切换 + 过滤查询 + CSV 导出 ----
-document.querySelectorAll('.ctab').forEach(t => t.onclick = () => {
-  document.querySelectorAll('.ctab').forEach(x => x.classList.toggle('active', x === t));
+// ---- 页签切换（懒加载与 view-audit 同构：首次进入才拉数据）----
+function switchTab(view) {
+  document.querySelectorAll('.ctab').forEach(x =>
+    x.classList.toggle('active', x.dataset.view === view));
   document.querySelectorAll('.view').forEach(v =>
-    v.classList.toggle('active', v.id === t.dataset.view));
-  if (t.dataset.view === 'view-audit' && !$('auditRows').children.length) loadAudit();
-});
+    v.classList.toggle('active', v.id === view));
+  if (view === 'view-audit' && !$('auditRows').children.length) loadAudit();
+  if (view === 'view-packs' && !$('packRows').children.length) loadPacks();
+  if (view === 'view-approvals' && !$('approvalRows').children.length) loadApprovals();
+}
+document.querySelectorAll('.ctab').forEach(t => t.onclick = () => switchTab(t.dataset.view));
 const AUDIT_PILL = {
   '登录成功': 'pill st-ok', '审批通过': 'pill st-ok',
   '登录失败': 'pill st-revoked', '吊销账号': 'pill st-revoked', '审批驳回': 'pill st-revoked',
   '创建用户': 'pill role-admin', '轮换 Key': 'pill role-admin', '重置密码': 'pill role-admin',
   '设角色': 'pill role-admin', '设部门': 'pill role-admin',
+  '停用包': 'pill role-admin', '启用包': 'pill role-admin',
 };
 async function loadAudit() {
   const params = new URLSearchParams();
@@ -762,6 +829,126 @@ $('copyKey').onclick = async () => {
   }
 };
 $('keyDone').onclick = () => closeModal('keyMask');
+
+// ---- 包管理面板（PLAN 3.2）：列表 + 启停（admin 专属，AC1-AC4）----
+function packStatusPill(p) {
+  if (p.status === 'ok') return ['st-ok', '正常'];
+  if (p.status === 'unavailable') return ['st-expired', '不可用'];
+  return ['st-revoked', '异常'];
+}
+async function loadPacks() {
+  const { ok, status, data } = await api('/api/admin/packs');
+  if (status === 401) { apiKey = ''; localStorage.removeItem('poc_key'); showLogin('凭据无效，请重新登录'); return; }
+  if (status === 403) { toast('需要管理员角色'); return; }
+  if (!ok) { toast('加载包列表失败'); return; }
+  renderPacks(data.packs || []);
+}
+function renderPacks(packs) {
+  const tb = $('packRows');
+  tb.innerHTML = '';
+  for (const p of packs) {
+    const [stCls, stText] = packStatusPill(p);
+    // 操作列（AC3）：平台包只读说明；status≠ok 不给启用；其余按当前启用位给对称操作
+    let ops;
+    if (p.platform) {
+      ops = '<span class="muted" style="font-size:12px">平台包不可停用</span>';
+    } else if (p.enabled) {
+      ops = `<button class="btn ghost sm danger-text" data-toggle="disable" data-pack="${esc(p.name)}">停用</button>`;
+    } else if (p.status !== 'ok') {
+      ops = '<span class="muted" style="font-size:12px">状态异常，修复后方可启用</span>';
+    } else {
+      ops = `<button class="btn sm" data-toggle="enable" data-pack="${esc(p.name)}">启用</button>`;
+    }
+    const roles = (p.allowed_roles || []).join('、') || '全部角色';
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td><span class="uname">${esc(p.name)}</span></td>` +
+      `<td>${esc(p.version || '—')}</td>` +
+      `<td class="detail-cell" title="${esc(p.description)}">${esc(p.description || '—')}</td>` +
+      `<td>${p.status === 'ok'
+        ? `<span class="pill st-ok">正常</span>`
+        : `<span class="pill ${stCls}" title="${esc(p.error || '')}">${stText}</span>`}</td>` +
+      `<td>${p.enabled ? '<span class="pill st-ok">已启用</span>' : '<span class="pill st-revoked">已停用</span>'}</td>` +
+      `<td>${p.platform ? '<span class="pill role-admin">平台</span>' : '<span class="muted">领域</span>'}</td>` +
+      `<td class="detail-cell">${esc((p.tools || []).join('、') || '—')} · ${esc((p.skills || []).join('、') || '—')}</td>` +
+      `<td>${esc(p.trust || 'unsigned')}</td>` +
+      `<td class="detail-cell" title="${esc(roles)}">${esc(roles)}</td>` +
+      `<td><div class="ops">${ops}</div></td>`;
+    tb.appendChild(tr);
+  }
+  $('packCount').textContent = `共 ${packs.length} 个包`;
+}
+$('packRefresh').onclick = loadPacks;
+$('packRows').addEventListener('click', async e => {
+  const btn = e.target.closest('button[data-toggle]');
+  if (!btn) return;
+  const name = btn.dataset.pack;
+  const { ok, status, data } = await api(
+    `/api/admin/packs/${encodeURIComponent(name)}/${btn.dataset.toggle}`,
+    { method: 'POST' });
+  if (status === 401) { apiKey = ''; localStorage.removeItem('poc_key'); showLogin('凭据无效，请重新登录'); return; }
+  if (!ok) { toast(data.error || '操作失败'); return; }
+  toast(btn.dataset.toggle === 'disable' ? `「${name}」已停用` : `「${name}」已启用`);
+  loadPacks();   // 列表即时反映（AC2）
+});
+
+// ---- 审批面板（PLAN 3.2）：列表 + 决议（admin/approver，AC5-AC7）----
+const APPROVAL_PILL = {
+  pending: 'pill st-expired', approved: 'pill st-ok',
+  rejected: 'pill st-revoked', expired: 'pill st-revoked', abandoned: 'pill st-revoked',
+};
+const APPROVAL_TEXT = {
+  pending: '待审批', approved: '已批准', rejected: '已拒绝',
+  expired: '已超时', abandoned: '已丢失',
+};
+async function loadApprovals() {
+  const { ok, status, data } = await api('/api/approvals?limit=200');
+  if (status === 401) { apiKey = ''; localStorage.removeItem('poc_key'); showLogin('凭据无效，请重新登录'); return; }
+  if (!ok) { toast('加载审批列表失败'); return; }
+  renderApprovals(data.approvals || []);
+}
+function renderApprovals(rows) {
+  const tb = $('approvalRows');
+  tb.innerHTML = '';
+  for (const r of rows) {
+    // pending 行给批准/拒绝；已决行只读（参数摘要截断展示，title 看全文——宪法 §2）
+    const ops = r.status === 'pending'
+      ? `<button class="btn primary sm" data-approve="1" data-aid="${esc(r.aid)}">批准</button>` +
+        `<button class="btn ghost sm danger-text" data-approve="0" data-aid="${esc(r.aid)}">拒绝</button>`
+      : '<span class="muted" style="font-size:12px">已决议</span>';
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td><code style="font-family:Consolas,'Courier New',monospace;font-size:12px">${esc(r.aid)}</code></td>` +
+      `<td>${esc(r.tool)}</td>` +
+      `<td class="detail-cell" title="${esc(r.args)}">${esc(r.args || '—')}</td>` +
+      `<td><span class="pill ${APPROVAL_PILL[r.status] || ''}">${APPROVAL_TEXT[r.status] || esc(r.status)}</span></td>` +
+      `<td>${esc(r.user_id || '—')}</td>` +
+      `<td class="nowrap">${fmtTime(r.created)}</td>` +
+      `<td>${esc(r.decided_by || '—')}</td>` +
+      `<td class="nowrap">${fmtTime(r.decided)}</td>` +
+      `<td><div class="ops">${ops}</div></td>`;
+    tb.appendChild(tr);
+  }
+  $('approvalCount').textContent = `共 ${rows.length} 条（单次上限 200）`;
+}
+$('approvalRefresh').onclick = loadApprovals;
+$('approvalRows').addEventListener('click', async e => {
+  const btn = e.target.closest('button[data-aid]');
+  if (!btn) return;
+  const { ok, status, data } = await api('/api/approve', {
+    method: 'POST',
+    body: JSON.stringify({ approval_id: btn.dataset.aid, approve: btn.dataset.approve === '1' })
+  });
+  if (status === 401) { apiKey = ''; localStorage.removeItem('poc_key'); showLogin('凭据无效，请重新登录'); return; }
+  if (status === 403) { toast('无决议权限'); return; }
+  if (!ok) {
+    toast('该审批单已被决议或不存在（可能已被其他审批人处理）');
+    loadApprovals();   // 重新拉取对齐最新状态
+    return;
+  }
+  toast(btn.dataset.approve === '1' ? '已批准，对应会话将继续执行' : '已拒绝，操作不会执行');
+  loadApprovals();   // 决议后状态即时更新（AC6）
+});
 
 checkHealth();
 setInterval(checkHealth, 5000);

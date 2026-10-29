@@ -11,11 +11,13 @@
 生命周期：
 - 启动/热重载时 scan_packs() 扫描校验，enabled_packs() 过滤后加载
 - 包工具沿用 custom_tools 的构建器（沙箱/本地双模式，沙箱走 /run_tool 的 pack 字段）
-- enable/disable 为运行时内存态（挂审批）；ENABLED_PACKS 环境变量决定重启后的默认集
+- disable/enable 运行时立即生效并持久化到 STATE_DB（disabled_packs 表，PLAN 3.2
+  Q2：重启不丢）；ENABLED_PACKS 环境变量保持部署层白名单语义（两者都通过才启用）
 - 工具名不做命名空间（LangChain 工具名不允许点号），重名冲突 → 跳过并告警
 """
 import os
 import re
+import sqlite3
 from pathlib import Path
 
 import yaml
@@ -25,7 +27,7 @@ from . import config, custom_tools, packsign, skills
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,49}$")
 KB_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")  # 知识库库名（pack.yaml 声明）
 
-# 运行时被禁用的包名（内存态，重启后以 ENABLED_PACKS 为准）
+# 运行时被禁用的包名（启动时从 STATE_DB 加载的镜像；启停动作同步写库）
 _disabled: set[str] = set()
 # scan_packs 结果缓存（v0.16.1）：包目录的写入口只有 create/delete/sign，
 # 三处都会失效缓存；手工改盘需重启生效（与启动加载语义一致）
@@ -325,6 +327,65 @@ def _mark_shared_kb_tool_conflicts(result: list[dict]) -> None:
         p["error"] = msg
 
 
+# 禁用名单持久化（PLAN 3.2 Q2）：STATE_DB 独立连接（audit._connect 同款，
+# 不经过其他模块，防循环依赖）；读失败回退空名单 = 部署层 ENABLED_PACKS 语义
+_DISABLED_SCHEMA = """
+CREATE TABLE IF NOT EXISTS disabled_packs (
+    name TEXT PRIMARY KEY
+)
+"""
+
+
+def _disabled_db_connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(config.STATE_DB, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def load_disabled_packs() -> None:
+    """启动加载：从 STATE_DB 恢复禁用名单（重启不丢，Q2）。
+    读失败保持空名单继续启动——fail-safe 方向：少禁用比多禁用安全，
+    部署层仍可用 ENABLED_PACKS 兜底。"""
+    try:
+        conn = _disabled_db_connect()
+        try:
+            conn.execute(_DISABLED_SCHEMA)
+            rows = conn.execute("SELECT name FROM disabled_packs").fetchall()
+        finally:
+            conn.close()
+        _disabled.clear()
+        _disabled.update(r[0] for r in rows)
+    except Exception as e:
+        print(f"[packs] 禁用名单加载失败，按空名单继续（{type(e).__name__}）")
+
+
+def _persist_disabled(name: str, disabled: bool) -> bool:
+    """启停动作同步写库，返回是否成功。
+
+    写库失败由调用方回滚内存态并向调用者报错（PLAN 3.2 评审②）：
+    「运行时假成功 + 重启后静默复活」比「当场失败可重试」更危险——
+    回滚后 disable 保持启用（可用性优先）、enable 保持停用（安全优先），
+    两个方向都与部署层 ENABLED_PACKS 兜底语义自洽。"""
+    try:
+        conn = _disabled_db_connect()
+        try:
+            conn.execute(_DISABLED_SCHEMA)
+            if disabled:
+                conn.execute(
+                    "INSERT OR IGNORE INTO disabled_packs (name) VALUES (?)",
+                    (name,))
+            else:
+                conn.execute("DELETE FROM disabled_packs WHERE name = ?",
+                             (name,))
+            conn.commit()
+        finally:
+            conn.close()
+        return True
+    except Exception as e:
+        print(f"[packs] 禁用名单写库失败（{type(e).__name__}），操作将回滚")
+        return False
+
+
 def _env_enabled(name: str) -> bool:
     raw = config.ENABLED_PACKS.strip()
     if not raw:
@@ -371,34 +432,52 @@ def list_packs() -> list[dict]:
     } for p in scan_packs()]
 
 
-def disable_pack(name: str) -> str:
-    """运行时禁用（内存态）。返回结果文案。平台包不可禁用。"""
-    packs = {p["name"]: p for p in scan_packs()}
-    if name not in packs:
-        return f"领域包「{name}」不存在"
-    if packs[name]["platform"]:
-        return (f"「{name}」是平台包（跨领域通用基础能力），运行时不可禁用；"
+def _toggle_pack(name: str, *, enable: bool) -> tuple[str, str]:
+    """启停核心。返回 (状态, 文案)，状态 ∈ ok / not_found / refused / error——
+    调用方（HTTP 端点）按结构化状态分流，不再靠文案子串猜测（PLAN 3.2 评审①：
+    此前文案含「不存在」的包名会被误路由 404 且漏审计）。
+    校验顺序：存在性 → 平台包 → status（仅启用侧）→ ENABLED_PACKS → 写库。"""
+    info = {p["name"]: p for p in scan_packs()}.get(name)
+    if info is None:
+        return "not_found", f"领域包「{name}」不存在"
+    if info["platform"]:
+        if enable:
+            return "refused", f"「{name}」是平台包，始终处于启用状态，无需操作。"
+        return ("refused",
+                f"「{name}」是平台包（跨领域通用基础能力），运行时不可禁用；"
                 "如确需下线，请管理员在部署层移除 packs/ 下对应目录。")
+    if enable:
+        if info["status"] != "ok":
+            return "refused", f"领域包「{name}」不可启用：{info['error']}"
+        if not _env_enabled(name):
+            return "refused", (f"领域包「{name}」被 ENABLED_PACKS 环境变量排除，"
+                               "请先调整配置")
+        _disabled.discard(name)
+        if not _persist_disabled(name, False):
+            _disabled.add(name)   # 写库失败回滚：保持停用（安全优先）
+            return "error", (f"领域包「{name}」启用未生效（停用名单写库失败），"
+                             "请稍后重试")
+        return "ok", (f"领域包「{name}」已启用：其工具/技能/提示词已挂载到 Agent，"
+                      "停用名单已同步清除。")
     if not _env_enabled(name):
-        return f"领域包「{name}」已被 ENABLED_PACKS 环境变量排除，无需禁用"
+        return "refused", f"领域包「{name}」已被 ENABLED_PACKS 环境变量排除，无需禁用"
     _disabled.add(name)
-    return (f"领域包「{name}」已禁用（运行时生效）：其工具/技能/提示词已从 Agent 移除。\n"
-            f"注意：此为内存态，重启后恢复；要持久禁用请在 .env 配置 ENABLED_PACKS 白名单。")
+    if not _persist_disabled(name, True):
+        _disabled.discard(name)   # 写库失败回滚：保持启用（可用性优先）
+        return "error", (f"领域包「{name}」停用未生效（停用名单写库失败），"
+                         "请稍后重试")
+    return "ok", (f"领域包「{name}」已禁用（立即生效）：其工具/技能/提示词已从 Agent 移除，"
+                  "停用名单已持久化（重启不丢）。")
+
+
+def disable_pack(name: str) -> str:
+    """运行时禁用（立即生效并持久化）。Agent 工具入口，返回结果文案。"""
+    return _toggle_pack(name, enable=False)[1]
 
 
 def enable_pack(name: str) -> str:
-    """运行时启用（从内存禁用集合中移除）。"""
-    packs = {p["name"]: p for p in scan_packs()}
-    if name not in packs:
-        return f"领域包「{name}」不存在"
-    if packs[name]["platform"]:
-        return f"「{name}」是平台包，始终处于启用状态，无需操作。"
-    if packs[name]["status"] != "ok":
-        return f"领域包「{name}」不可启用：{packs[name]['error']}"
-    if not _env_enabled(name):
-        return f"领域包「{name}」被 ENABLED_PACKS 环境变量排除，请先调整配置"
-    _disabled.discard(name)
-    return f"领域包「{name}」已启用，其工具/技能/提示词已挂载到 Agent。"
+    """运行时启用。Agent 工具入口，返回结果文案。"""
+    return _toggle_pack(name, enable=True)[1]
 
 
 def effective_env(pack: dict) -> dict:
