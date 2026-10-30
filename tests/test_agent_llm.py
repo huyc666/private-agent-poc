@@ -88,7 +88,8 @@ def test_dynamic_prompt_injects_personal_assets(login_as):
     """动态提示词：静态基座 + 本人专属技能/工具索引按请求身份注入。"""
     login_as("alice")
     skills.create_skill("al-skill", "专属技能", "# 指令")
-    custom_tools.write_custom_tool("al_tool", _code_for("al_tool"), scope="alice")
+    custom_tools.write_custom_tool(
+        "al_tool", _code_for("al_tool"), scope=config.user_scope("alice"))
     STATE.system_prompt_static = "静态基座"
     out = agent._dynamic_prompt({"messages": [HumanMessage("你好")]})
     assert isinstance(out[0], SystemMessage)

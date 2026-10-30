@@ -295,36 +295,82 @@ def build(kb_dir: Path, embed_fn=_UNSET) -> None:
             print(f"WARNING：向量引擎不可用，本次仅建 BM25 索引（{type(e).__name__}）")
             vecs = None
 
-    # ---- 落库 ----
-    db_path = kb_dir / "kb.db"
-    if db_path.exists():
-        db_path.unlink()
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("CREATE TABLE chunks (doc TEXT, heading TEXT, content TEXT,"
-                 " dl INTEGER, terms TEXT, vec BLOB, anchor TEXT)")
-    conn.execute("CREATE TABLE df (term TEXT PRIMARY KEY, n INTEGER)")
-    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    # ---- 落库（SEC-7，v0.17.32：临时库构建 → 完整性校验 → 原子替换）----
+    # 旧实现先 unlink 现役库再重建：构建中途异常旧索引即丢失，重建期间查询
+    # 也会打到半成品库。现在全部写入 kb.db.tmp；PRAGMA quick_check 通过后，
+    # 旧库转存 kb.db.bak（只留一版，可回滚；转存失败降级为不保留），最后
+    # 原子替换为现役库。失败路径（评审修复 C4/C8）：连接强制关闭防句柄锁住
+    # tmp（unlink 抛 PermissionError 会掩盖原始异常、残留毒化下次构建）；
+    # 转存成功而替换失败时回滚 bak，兑现「任何失败现役库保持完好」。
+    import time
 
-    n_chunks = len(chunks_all)
-    for i, (doc, heading, content, dl, terms_json, anchor_json) in enumerate(chunks_all):
-        vec_blob = None
-        if vecs is not None:
-            vec_blob = np.asarray(vecs[i], dtype="<f4").tobytes()
-        conn.execute("INSERT INTO chunks VALUES (?,?,?,?,?,?,?)",
-                     (doc, heading, content, dl, terms_json, vec_blob, anchor_json))
-    for t, n in df.items():
-        conn.execute("INSERT INTO df VALUES (?,?)", (t, n))
-    backend = os.environ.get("EMBED_BACKEND", "local").strip().lower()
-    conn.executemany("INSERT INTO meta VALUES (?,?)", [
-        ("n_chunks", str(n_chunks)),
-        ("avgdl", str(total_dl / max(n_chunks, 1))),
-        ("has_vec", "1" if vecs is not None else "0"),
-        ("dim", str(dim)),
-        ("embed_backend", backend),
-        ("embed_model", _embed_model()),
-    ])
-    conn.commit()
-    conn.close()
+    db_path = kb_dir / "kb.db"
+    tmp_path = kb_dir / "kb.db.tmp"
+    bak_path = kb_dir / "kb.db.bak"
+    tmp_path.unlink(missing_ok=True)   # C4：清历史崩溃残留，防 CREATE TABLE 撞表
+    moved_to_bak = False               # C8：替换失败时判定是否需要回滚
+    try:
+        conn = sqlite3.connect(str(tmp_path))
+        try:
+            conn.execute("CREATE TABLE chunks (doc TEXT, heading TEXT, content TEXT,"
+                         " dl INTEGER, terms TEXT, vec BLOB, anchor TEXT)")
+            conn.execute("CREATE TABLE df (term TEXT PRIMARY KEY, n INTEGER)")
+            conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+
+            n_chunks = len(chunks_all)
+            for i, (doc, heading, content, dl, terms_json, anchor_json) in enumerate(chunks_all):
+                vec_blob = None
+                if vecs is not None:
+                    vec_blob = np.asarray(vecs[i], dtype="<f4").tobytes()
+                conn.execute("INSERT INTO chunks VALUES (?,?,?,?,?,?,?)",
+                             (doc, heading, content, dl, terms_json, vec_blob, anchor_json))
+            for t, n in df.items():
+                conn.execute("INSERT INTO df VALUES (?,?)", (t, n))
+            backend = os.environ.get("EMBED_BACKEND", "local").strip().lower()
+            conn.executemany("INSERT INTO meta VALUES (?,?)", [
+                ("n_chunks", str(n_chunks)),
+                ("avgdl", str(total_dl / max(n_chunks, 1))),
+                ("has_vec", "1" if vecs is not None else "0"),
+                ("dim", str(dim)),
+                ("embed_backend", backend),
+                ("embed_model", _embed_model()),
+            ])
+            conn.commit()
+            check = conn.execute("PRAGMA quick_check").fetchone()
+        finally:
+            conn.close()   # C4：异常路径同样关闭——句柄未释放会锁住 tmp，外层
+                            # finally 的 unlink 在 Windows 抛 PermissionError 掩盖原始异常
+        if not check or check[0] != "ok":
+            raise RuntimeError(f"新索引完整性校验失败: {check}")
+
+        if db_path.exists():
+            try:
+                os.replace(db_path, bak_path)   # 只留一版（覆盖上一版 bak）
+                moved_to_bak = True
+            except OSError as e:
+                print(f"WARNING：旧索引转存 kb.db.bak 失败（继续替换，旧版不保留）: {e}")
+        try:
+            for attempt in range(3):
+                try:
+                    os.replace(tmp_path, db_path)
+                    break
+                except OSError:
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.1)
+        except OSError:
+            # C8：现役库已转存 bak、新库替换失败 → 回滚保住上一版；转存未
+            # 成功（旧库仍在原位）则不动，防把陈旧 bak 覆盖到完好的旧库上。
+            if moved_to_bak:
+                try:
+                    os.replace(bak_path, db_path)
+                    print(f"WARNING：新索引替换失败，已回滚保留上一版索引: {db_path}")
+                except OSError as e:
+                    print(f"WARNING：回滚失败（现役库缺失），请手动将 {bak_path} "
+                          f"改名为 {db_path}: {e}")
+            raise
+    finally:
+        tmp_path.unlink(missing_ok=True)   # 成功路径 tmp 已被替换；失败清残留
 
     vec_info = f"，向量 {dim} 维" if vecs is not None else "（未启用向量，仅 BM25）"
     print(f"已建索引：{db_path}（{len(parsed)} 份文档入库 → {n_chunks} 块，"

@@ -154,20 +154,21 @@ def test_approve_role_separation(api):
 def test_upload_and_domain_isolation(api):
     tok1 = _login(api, _mk_user("u1"))
     tok2 = _login(api, _mk_user("u2"))
+    u1 = config.user_scope("u1")
     r = api.post("/api/uploads", params={"name": "doc.md"}, content=b"hello",
                  headers=_hdr(tok1))
     assert r.status_code == 200
-    assert r.json()["name"] == "u1/doc.md"          # 落本人域
+    assert r.json()["name"] == f"{u1}/doc.md"       # 落本人域
     # 清单分域：u2 看不到 u1 的文档
     names2 = [i["name"] for i in api.get("/api/uploads", headers=_hdr(tok2)).json()["uploads"]]
     assert names2 == []
     # u2 删 u1 的文档：user 强制本域 → 目标不存在 → 404（不可越域探测）
-    r = api.delete("/api/uploads/u1/doc.md", headers=_hdr(tok2))
+    r = api.delete(f"/api/uploads/{u1}/doc.md", headers=_hdr(tok2))
     assert r.status_code == 404
     # u1 删自己的文档
-    r = api.delete("/api/uploads/u1/doc.md", headers=_hdr(tok1))
+    r = api.delete(f"/api/uploads/{u1}/doc.md", headers=_hdr(tok1))
     assert r.status_code == 200
-    assert r.json()["deleted"] == "u1/doc.md"
+    assert r.json()["deleted"] == f"{u1}/doc.md"
 
 
 def test_upload_bad_names_rejected(api):
@@ -193,26 +194,46 @@ def test_files_download_domain_rules(api):
     tok1 = _login(api, _mk_user("u1"))
     tok2 = _login(api, _mk_user("u2"))
     tok_ap = _login(api, _mk_user("boss", role="approver"))
+    u1 = config.user_scope("u1")
     out = config.OUTPUTS_DIR
-    (out / "u1").mkdir(parents=True)
+    (out / u1).mkdir(parents=True)
     (out / "shared").mkdir(parents=True)
-    (out / "u1" / "report.md").write_text("u1 的报告", encoding="utf-8")
+    (out / u1 / "report.md").write_text("u1 的报告", encoding="utf-8")
     (out / "shared" / "legacy.md").write_text("旧版遗留", encoding="utf-8")
     # 单段名路由到本域
     r = api.get("/api/files/report.md", headers=_hdr(tok1))
     assert r.status_code == 200
     assert "u1 的报告" in r.text
-    # user 强制本域：带 u1/ 前缀也拿不到别人域的文件（u1 域无 secret.md → 404）
-    r = api.get("/api/files/u1/secret.md", headers=_hdr(tok2))
+    # user 强制本域：带他人域前缀也拿不到别人域的文件（u1 域无 secret.md → 404）
+    r = api.get(f"/api/files/{u1}/secret.md", headers=_hdr(tok2))
     assert r.status_code == 404
     # approver 全局视图：可带域前缀访问任意域
-    r = api.get("/api/files/u1/report.md", headers=_hdr(tok_ap))
+    r = api.get(f"/api/files/{u1}/report.md", headers=_hdr(tok_ap))
     assert r.status_code == 200
     # 全局视图回退 shared（旧版无域链接兼容）；user 角色不回退（保持隔离）
     r = api.get("/api/files/legacy.md", headers=_hdr(tok_ap))
     assert r.status_code == 200
     r = api.get("/api/files/legacy.md", headers=_hdr(tok2))
     assert r.status_code == 404
+
+
+def test_files_global_view_long_scope_name_addressable(api):
+    """评审修复 C2 回归：基名 ≥40 字用户的哈希域名（49-57 字符）经全局视图
+    两段式 URL 寻址不被域段清洗截断（此前沿用 scope_clean 的 48 截断截掉
+    哈希后缀 → 404）。"""
+    tok_ap = _login(api, _mk_user("boss", role="approver"))
+    scope = config.user_scope("u" * 48)          # 48 字基名 → 57 字符域名
+    assert len(scope) == 57
+    out_d = config.OUTPUTS_DIR / scope
+    out_d.mkdir(parents=True)
+    (out_d / "report.md").write_text("长名用户产出", encoding="utf-8")
+    r = api.get(f"/api/files/{scope}/report.md", headers=_hdr(tok_ap))
+    assert r.status_code == 200 and "长名用户产出" in r.text
+    up_d = config.UPLOADS_DIR / scope
+    up_d.mkdir(parents=True)
+    (up_d / "doc.md").write_text("x", encoding="utf-8")
+    r = api.delete(f"/api/uploads/{scope}/doc.md", headers=_hdr(tok_ap))
+    assert r.status_code == 200
 
 
 # ---------------------------------------------------------------- chat SSE 冒烟

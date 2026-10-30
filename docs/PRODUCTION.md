@@ -63,6 +63,11 @@ python -c "import secrets; print(secrets.token_hex(32))"   # 生成 4 个不同�
   验收：`curl http://127.0.0.1:9001/health` 返回 200；不带令牌调 `/run` 返回 401（fail-closed 生效）
 - [ ] **网关**：`docker compose -f docker/docker-compose.gateway.yml up -d`
   验收：`curl http://127.0.0.1:4000/health/liveliness` 返回 200
+- [ ] **网关主模型地址**（v0.17.32 SEC-5）：`.env` 按拓扑配
+  `VLLM_API_BASE=http://<GPU机器>:8000/v1`（同机 Docker 用 compose 默认的
+  `host.docker.internal:8000/v1`）——删除 deepseek fallback 后主链路不再有
+  云端兜底，`127.0.0.1` 硬编码会让网关打不到 vLLM 直接不可用
+  验收：`docker exec poc-llm-gateway env | grep VLLM_API_BASE` 显示正确地址
 - [ ] **包签名**：`.env` 写入 `PACK_SIGNING_KEY` 后执行
   `python tools/sign_pack.py --all`（core-utils / weather-ops 用本机密钥重签）
 - [ ] **Agent**：建 venv 装依赖后 `python server/main.py --host 0.0.0.0 --port 7100`

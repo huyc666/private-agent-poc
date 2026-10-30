@@ -73,7 +73,8 @@ def test_load_skill_roundtrip_and_missing(login_as):
 
 def test_list_custom_tools_personal_view(login_as):
     login_as("alice")                                # user 角色：本人专属平铺
-    custom_tools.write_custom_tool("mine_tool", _code_for("mine_tool"), scope="alice")
+    custom_tools.write_custom_tool(
+        "mine_tool", _code_for("mine_tool"), scope=config.user_scope("alice"))
     out = tools_admin.list_custom_tools()
     assert "mine_tool" in out and "本人专属" in out
 
@@ -100,9 +101,10 @@ def test_list_custom_tools_open_mode(monkeypatch):
 
 def test_create_custom_tool_personal_no_approval(login_as):
     login_as("alice")                                # user：专属域自助落盘
+    alice = config.user_scope("alice")
     out = asyncio.run(tools_admin.create_custom_tool("al_tool", _code_for("al_tool")))
-    assert "custom_tools_personal/alice/al_tool.py" in out
-    assert (config.PERSONAL_CUSTOM_TOOLS_DIR / "alice" / "al_tool.py").is_file()
+    assert f"custom_tools_personal/{alice}/al_tool.py" in out
+    assert (config.PERSONAL_CUSTOM_TOOLS_DIR / alice / "al_tool.py").is_file()
 
 
 def test_create_custom_tool_global_gated(login_as, patch_interrupt):
@@ -124,7 +126,8 @@ def test_create_custom_tool_invalid_code(login_as):
 
 def test_delete_custom_tool_personal_self_service(login_as):
     login_as("alice")
-    custom_tools.write_custom_tool("al_tool", _code_for("al_tool"), scope="alice")
+    custom_tools.write_custom_tool(
+        "al_tool", _code_for("al_tool"), scope=config.user_scope("alice"))
     out = asyncio.run(tools_admin.delete_custom_tool("al_tool"))
     assert "已删除" in out
 

@@ -11,6 +11,9 @@ services:
     volumes:
       # 把本地下载好的模型目录挂进去（私有化场景一般用本地权重，不走 HuggingFace）
       - ${MODEL_DIR:-../models}:/models
+    # ⚠️ 模型窗口与上下文压缩对齐（SEC-6，v0.17.32）：--max-model-len 须与 .env 的
+    # CONTEXT_MAX_TOKENS 同值（此默认 32768 → CONTEXT_MAX_TOKENS=32768，触发线 ≈ 19661）；
+    # 换大窗口模型时两处一起改，否则长会话在压缩触发前先超模型窗口被截断。
     command: >
       --model ${MODEL_PATH:-/models/Qwen3-27B}
       --served-model-name qwen-27b

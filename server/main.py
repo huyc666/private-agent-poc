@@ -77,6 +77,9 @@ async def lifespan(app: FastAPI):
     # 多用户文件分域（v0.17.7 评审）：旧版单目录 uploads/outputs 的存量文件
     # 迁入 shared/ 域，保证升级后旧文件仍可按 shared 寻址（不迁则分域后找不到）
     await asyncio.to_thread(_migrate_legacy_file_dirs)
+    # SEC-2（v0.17.32）：文件域改用 user_scope 哈希域名（防清洗碰撞），
+    # 存量老域名目录一次性迁移到新名（幂等；碰撞/冲突场景不盲动 + WARNING）
+    await asyncio.to_thread(_migrate_scope_dirs)
     # v0.17.4（安全审计 F2）：SSO 身份头必须配合受信代理白名单才生效；
     # 配置了身份头却没配白名单 = 身份头永远不生效（fail-closed），启动时明确告警
     if auth.enabled() and config.AUTH_IDENTITY_HEADER and not config.AUTH_PROXY_ALLOWED_IPS:
@@ -474,6 +477,11 @@ async def chat(req: ChatRequest, request: Request):
     # 开放模式：沿用请求体自报（演示用）
     if auth.enabled():
         user_id = request.state.user["username"]
+        # SEC-1（v0.17.32）：会话归属校验——防止登录用户拿他人 session_id
+        # 向其会话写入并接续 LangGraph thread_id 的模型上下文（跨用户上下文
+        # 泄露 + 会话状态污染）。校验先于任何写库/进流完成。
+        if _chat_session_denied(request.state.user, session_id):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
     else:
         user_id = (req.user_id or "anonymous").strip()[:64] or "anonymous"
 
@@ -565,6 +573,21 @@ def _can_access_session(identity: dict, session_id: str) -> bool:
     return bool(owners) and owners <= {identity["username"], "anonymous"}
 
 
+def _chat_session_denied(identity: dict, session_id: str) -> bool:
+    """chat 端点专属会话归属校验（SEC-1，v0.17.32）：登录用户向既有会话发言时，
+    会话全部属主必须是本人（或开放模式遗留 anonymous），否则 403。与
+    _can_access_session 的关键差异：空会话（新会话首轮）必须放行——chat 是
+    会话属主的判定写入来源，首轮写入前无从校验；复用后者（空 owners 返回
+    False）会把新会话也判为 forbidden，首轮即死锁。admin 放行（全局视图）。
+    返回 True = 拒绝。"""
+    if identity["role"] == "admin":
+        return False
+    owners = sessions.session_users(session_id)
+    if not owners:
+        return False
+    return not owners <= {identity["username"], "anonymous"}
+
+
 @app.get("/api/sessions")
 async def session_list(request: Request, limit: int = 50):
     """会话列表（对话记录来自 SQLite，重启后仍在）。
@@ -647,19 +670,14 @@ def _upload_safe_name(name: str) -> str:
     return name if suffix in _UPLOAD_ALL_EXTS else ""
 
 
-def _scope_clean(username: str) -> str:
-    """身份 → 文件域目录名。清洗规则收敛在 config.scope_clean（v0.17.7 评审：
-    工具侧 tools_builtin 落盘与端点侧寻址必须同规则，避免两处实现漂移）。"""
-    return config.scope_clean(username)
-
-
 def _user_scope(request: Request) -> str:
     """当前请求的文件域：开放模式/无身份 → shared（兼容旧版单目录）；
-    认证模式按用户名分域（uploads/outputs 多用户隔离，v0.17.7 评审修复）。"""
+    认证模式按用户名分域（uploads/outputs 多用户隔离，v0.17.7 评审修复；
+    v0.17.32 SEC-2 改用 user_scope 哈希域名，彻底消除清洗碰撞）。"""
     if not auth.enabled():
         return "shared"
     ident = request.state.user
-    return _scope_clean(ident["username"]) if ident else "shared"
+    return config.user_scope(ident["username"]) if ident else "shared"
 
 
 def _global_file_view(request: Request) -> bool:
@@ -680,7 +698,10 @@ def _safe_rel(rel: str) -> str:
     if not parts or ".." in parts:
         return ""
     if len(parts) == 2:
-        scope, fname = _scope_clean(parts[0]), _upload_safe_name(parts[1])
+        # 域段清洗走 config.scope_segment（评审修复 C2，v0.17.32）：
+        # user_scope 域名最长 57 字符，沿用 scope_clean 的 48 截断会截掉
+        # 基名 ≥40 字用户的哈希后缀 → 全局视图按 URL 寻址其域 404。
+        scope, fname = config.scope_segment(parts[0]), _upload_safe_name(parts[1])
         return f"{scope}/{fname}" if scope and fname else ""
     if len(parts) == 1:
         return _upload_safe_name(parts[0])
@@ -736,6 +757,62 @@ def _migrate_legacy_file_dirs() -> None:
                               f"无法按新分域寻址，请手动移动）: {p.name}: {e}")
                     else:
                         time.sleep(0.05)
+
+
+def _migrate_scope_dirs() -> None:
+    """老域名目录 → user_scope 哈希域名目录（SEC-2，v0.17.32）：文件域改用
+    哈希后缀后，存量用户目录须改名寻址才不断档。认领口径：目录名与某在册
+    用户（含已吊销——其文件可能仍需本人接续）的 scope_clean 相同。规则：
+    唯一认领 → rename（重试 3 次）；多用户碰撞 → 不动 + WARNING（无法判定
+    归属，人工分拣）；新名已存在 → 跳过 + WARNING（人工核对）；无人认领 →
+    不动（留待管理员核查，绝不盲目归并）；shared 域排除。幂等：迁移后老名
+    消失，新哈希名不被认领规则命中，重复启动为空操作。"""
+    import time
+    try:
+        users = auth.list_users()
+    except Exception as e:
+        print(f"[startup] WARNING: 用户表读取失败，跳过文件域目录迁移: {e}")
+        return
+    claims: dict[str, list[str]] = {}
+    for u in users:
+        claims.setdefault(config.scope_clean(u["username"]), []).append(u["username"])
+    for base in (config.UPLOADS_DIR, config.OUTPUTS_DIR,
+                 config.PERSONAL_SKILLS_DIR, config.PERSONAL_CUSTOM_TOOLS_DIR):
+        if not base.is_dir():
+            continue
+        for d in list(base.iterdir()):
+            if not d.is_dir() or d.name == "shared":
+                continue
+            owners = claims.get(d.name, [])
+            if len(owners) > 1:
+                print(f"[startup] WARNING: 老域名「{d.name}」有 {len(owners)} 位"
+                      f"认领用户（清洗碰撞），目录未迁移、请人工分拣: {d}")
+                continue
+            if not owners:
+                continue        # 无人认领（含已是新哈希名）：不动
+            new = config.user_scope(owners[0])
+            if new == d.name:
+                continue
+            target = base / new
+            if target.exists():
+                print(f"[startup] WARNING: 新域名「{new}」已存在，跳过迁移"
+                      f"（请人工核对两目录内容）: {target}")
+                continue
+            moved = False
+            for attempt in range(3):
+                try:
+                    d.rename(target)
+                    moved = True
+                    break
+                except OSError:
+                    if attempt < 2:
+                        time.sleep(0.05)
+            if moved:
+                print(f"[startup] 文件域目录已迁移（SEC-2 哈希防碰撞）: "
+                      f"{base.name}/{d.name} → {new}")
+            else:
+                print(f"[startup] WARNING: 目录迁移失败（3 次重试），老域名文件"
+                      f"将无法按新域寻址，请手动改名: {base.name}/{d.name} → {new}")
 
 
 @app.post("/api/uploads")
@@ -863,7 +940,7 @@ async def upload_skillpack(request: Request, overwrite: bool = False):
         return JSONResponse({"error": f"文件超过大小上限（{config.UPLOAD_MAX_MB}MB）"},
                             status_code=413)
     ident = _acl_identity(request)
-    personal_scope = (config.scope_clean(ident["username"])
+    personal_scope = (config.user_scope(ident["username"])
                       if ident and ident.get("role") == "user" else None)
     try:
         result = await asyncio.to_thread(

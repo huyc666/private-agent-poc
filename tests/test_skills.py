@@ -31,10 +31,11 @@ def test_create_skill_general_for_admin(login_as):
 
 def test_create_skill_routes_to_personal_domain_for_user(login_as):
     login_as("alice")
+    alice = config.user_scope("alice")
     out = skills.create_skill("my-notes", "个人笔记", "# 笔记")
-    assert "skills_personal/alice/my-notes/SKILL.md" in out
+    assert f"skills_personal/{alice}/my-notes/SKILL.md" in out
     assert "仅本人可见" in out
-    assert (config.PERSONAL_SKILLS_DIR / "alice" / "my-notes" / "SKILL.md").is_file()
+    assert (config.PERSONAL_SKILLS_DIR / alice / "my-notes" / "SKILL.md").is_file()
     # 通用层不受影响
     assert not (config.SKILLS_DIR / "my-notes").exists()
 
@@ -77,7 +78,7 @@ def test_list_skills_includes_personal_only_for_own_scope(login_as):
     skills.create_skill("global-skill", "通用", "x")
     login_as("alice")
     skills.create_skill("alice-only", "专属", "y")
-    names = [s["name"] for s in skills.list_skills("alice")]
+    names = [s["name"] for s in skills.list_skills(config.user_scope("alice"))]
     assert "global-skill" in names and "alice-only" in names
     assert [s["name"] for s in skills.list_skills(None)] == ["global-skill"]
 
@@ -101,7 +102,7 @@ def test_load_skill_rejects_invalid_name():
 def test_personal_index_prompt_lists_own_skills(login_as):
     login_as("alice")
     skills.create_skill("mine", "专属技能", "x")
-    prompt = skills.personal_index_prompt("alice")
+    prompt = skills.personal_index_prompt(config.user_scope("alice"))
     assert "mine" in prompt and "仅本人可见" in prompt
 
 

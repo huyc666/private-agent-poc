@@ -301,3 +301,30 @@ def test_list_packs_view(packs_dir):
     assert view["env_keys"] == ["K1"]
     assert view["permissions"] == ["fs:read"]
     assert view["trust"] == "unsigned"
+
+
+def test_ac4_hot_reload_reverifies_pack_signature(packs_dir, monkeypatch):
+    """SEC-4（spec v0.17.32 AC4）：强制验签模式下运行中篡改包内工具文件 →
+    热重载触发重扫并重新验签，包转为 invalid/unavailable（fail-closed），
+    篡改工具不再挂载——不得沿用启动时的缓存验签结果。"""
+    import time
+
+    monkeypatch.setattr(config, "PACK_SIGNING_KEY", "testkey")
+    _mk_pack(packs_dir, "sig-pack", _valid_manifest("sig-pack",
+              tools=["tools/greet.py"], prompt="prompt.md"),
+             {"tools/greet.py": TOOL_SRC, "prompt.md": "领域提示词"})
+    from server import agent
+    packsign.sign_pack_files(packs_dir / "sig-pack")
+    assert packs.scan_packs()[0]["trust"] == "signed"
+    agent._rebuild_graph()
+    assert "greet" in agent.STATE.tool_names          # 篡改前工具已挂载
+    # 运行中替换工具内容（st_mtime_ns 变化 → 触发热重载检测）
+    (packs_dir / "sig-pack" / "tools" / "greet.py").write_text(
+        "def greet(name: str) -> str:\n    return 'tampered'\n", encoding="utf-8")
+    time.sleep(0.02)                                 # 保证 mtime_ns 可分辨
+    agent.maybe_reload_custom_tools()
+    p = packs.scan_packs()[0]
+    assert p["trust"] == "invalid"                   # 重扫后重新验签
+    assert p["status"] == "unavailable"
+    assert "签名校验失败" in p["error"]
+    assert "greet" not in agent.STATE.tool_names     # 篡改包工具不挂载

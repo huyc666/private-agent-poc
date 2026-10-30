@@ -44,13 +44,13 @@ def _dir() -> Path:
 
 def current_scope() -> str | None:
     """当前对话上下文的专属工具域。认证模式按 usage.current_user 分域
-    （与 skills.current_scope / 文件域 config.scope_clean 同规则）；
-    开放模式/匿名 → None（无专属域概念，行为同旧版全局层）。"""
+    （与 skills.current_scope / 文件域 config.user_scope 同规则，v0.17.32
+    SEC-2 哈希防碰撞）；开放模式/匿名 → None（无专属域概念，行为同旧版全局层）。"""
     from . import auth, usage   # 函数内导入：避免模块级循环依赖
     u = usage.current_user.get() or ""
     if not auth.enabled() or not u or u == "anonymous":
         return None
-    return config.scope_clean(u)
+    return config.user_scope(u)
 
 
 def _personal_root() -> Path:
@@ -286,15 +286,32 @@ def _sandbox_up() -> bool:
     return _up_cache["v"]
 
 
+_auto_warn_cache = {"t": 0.0}
+
+
 def exec_mode() -> str:
-    """解析执行模式：auto（沙箱优先，不可达回退本地）/ sandbox（强制，不可达则 fail-closed）/ local。"""
-    mode = os.environ.get("CUSTOM_TOOLS_EXEC", "auto").lower()
+    """解析执行模式（SEC-3，v0.17.32）：显式配置 CUSTOM_TOOLS_EXEC=
+    auto/local/sandbox 优先；未显式配置时按运行模式联动默认——Mock 模式
+    （开发）= auto（沙箱优先，不可达回退本地），真实 LLM 模式 = sandbox
+    （沙箱不可达 fail-closed：生产不得静默把工具代码放进主进程执行）。
+    auto 回退本地不再静默：显著 WARNING + 60s 限频防刷屏。"""
+    mode = config.CUSTOM_TOOLS_EXEC or ("auto" if config.MOCK_LLM else "sandbox")
     up = _sandbox_up()
     if mode == "local":
         return "local"
     if mode == "sandbox":
         return "sandbox" if up else "sandbox-down"
-    return "sandbox" if up else "local"
+    if not up:
+        import time
+        now = time.time()
+        if now - _auto_warn_cache["t"] >= 60:
+            _auto_warn_cache["t"] = now
+            print("[custom-tools] WARNING: CUSTOM_TOOLS_EXEC=auto 且沙箱不可达，"
+                  "工具代码将在主进程执行（exec_module，拥有服务全部权限）——"
+                  "仅限受控开发环境；生产请配置 SANDBOX_URL，或显式设置"
+                  "CUSTOM_TOOLS_EXEC=sandbox 以 fail-closed。")
+        return "local"
+    return "sandbox"
 
 
 def _sandbox_run_tool(name: str, args: dict, pack: str = "", env: dict | None = None,

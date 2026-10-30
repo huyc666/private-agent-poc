@@ -503,3 +503,123 @@ def test_ac5_semantic_query_offline(tmp_path, monkeypatch):
     build_kb.build(kb)              # 默认 local 引擎（已缓存，离线推理）
     out = tool.search_hr_knowledge("新员工入职后什么时候可以休假")
     assert out.startswith("【来源：假期管理规定.md")
+
+
+# ------------------------------------- SEC-7 原子重建（spec：security-hardening-v0.17.32 AC7）
+
+
+def _docs(db_path):
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return {r[0] for r in conn.execute("SELECT DISTINCT doc FROM chunks")}
+    finally:
+        conn.close()
+
+
+def test_ac7_build_preserves_previous_as_bak(tmp_path):
+    """SEC-7：重建产出新库，旧库保留为 kb.db.bak（只留一版可回滚）；
+    首次构建无上一版，不产生 bak。"""
+    kb = tmp_path / "kb"
+    kb.mkdir()
+    (kb / "a.md").write_text("# A\n内容甲", encoding="utf-8")
+    build_kb.build(kb, embed_fn=None)
+    assert _docs(kb / "kb.db") == {"a.md"}
+    assert not (kb / "kb.db.bak").exists()           # 首建无上一版
+    (kb / "b.md").write_text("# B\n内容乙", encoding="utf-8")
+    build_kb.build(kb, embed_fn=None)
+    assert _docs(kb / "kb.db") == {"a.md", "b.md"}   # 新库含增量
+    assert _docs(kb / "kb.db.bak") == {"a.md"}       # 上一版可回滚
+
+
+def test_ac7_build_failure_keeps_old_db(tmp_path, monkeypatch):
+    """SEC-7：构建中途异常 → 原库保持完好、无临时残留
+    （旧实现「先 unlink 再重建」在失败时丢失旧索引——本用例为其回归防线）。"""
+    kb = tmp_path / "kb"
+    kb.mkdir()
+    (kb / "a.md").write_text("# A\n内容甲", encoding="utf-8")
+    build_kb.build(kb, embed_fn=None)
+    (kb / "b.md").write_text("# B\n内容乙", encoding="utf-8")
+
+    def boom(*a, **k):
+        raise RuntimeError("注入失败：落库段异常")
+
+    monkeypatch.setattr(build_kb.sqlite3, "connect", boom)
+    with pytest.raises(RuntimeError):
+        build_kb.build(kb, embed_fn=None)
+    monkeypatch.undo()                               # 恢复真实 connect 以校验旧库
+    assert _docs(kb / "kb.db") == {"a.md"}           # 旧库完好
+    assert not (kb / "kb.db.tmp").exists()           # 无临时残留
+
+
+def test_review_c4_build_exception_closes_conn_and_keeps_original(
+        tmp_path, monkeypatch):
+    """评审修复 C4 回归：connect 成功后落库段异常 → 连接被 finally 关闭
+    （句柄不锁 tmp），原始异常正常传播（Windows 下不被 PermissionError
+    掩盖）、旧库完好、无残留。（旧实现仅正常路径关闭连接，异常路径句柄
+    未释放 → 外层 finally unlink 抛 PermissionError 掩盖原始异常，且 tmp
+    残留 + CREATE TABLE 撞表会毒化下次构建。）"""
+    kb = tmp_path / "kb"
+    kb.mkdir()
+    (kb / "a.md").write_text("# A\n内容甲", encoding="utf-8")
+    build_kb.build(kb, embed_fn=None)
+    (kb / "b.md").write_text("# B\n内容乙", encoding="utf-8")
+
+    real_connect = build_kb.sqlite3.connect
+
+    class _BoomConn:
+        def __init__(self, path):
+            self._c = real_connect(path)
+            self.closed = False
+
+        def execute(self, *a, **k):
+            return self._c.execute(*a, **k)
+
+        def executemany(self, *a, **k):
+            raise RuntimeError("注入失败：落库段异常")
+
+        def commit(self, *a, **k):
+            self._c.commit(*a, **k)
+
+        def close(self):
+            self.closed = True
+            self._c.close()
+
+    conn = {}
+
+    def _fake_connect(path, *a, **k):
+        conn["h"] = _BoomConn(path)
+        return conn["h"]
+
+    monkeypatch.setattr(build_kb.sqlite3, "connect", _fake_connect)
+    with pytest.raises(RuntimeError, match="落库段异常"):
+        build_kb.build(kb, embed_fn=None)
+    monkeypatch.undo()
+    assert conn["h"].closed                        # 异常路径同样关闭连接
+    assert _docs(kb / "kb.db") == {"a.md"}          # 旧库完好
+    assert not (kb / "kb.db.tmp").exists()          # 无残留（句柄已释放）
+
+
+def test_review_c8_replace_failure_rolls_back_previous(tmp_path, monkeypatch):
+    """评审修复 C8 回归：旧库已转存 bak、新库替换现役库 3 连败 → 回滚
+    bak 保住上一版（spec「任何失败现役库保持完好」），且无 tmp 残留。
+    （旧实现在该场景 raise 后由 finally 删掉 tmp，现役库缺失只剩 bak。）"""
+    kb = tmp_path / "kb"
+    kb.mkdir()
+    (kb / "a.md").write_text("# A\n内容甲", encoding="utf-8")
+    build_kb.build(kb, embed_fn=None)
+    (kb / "b.md").write_text("# B\n内容乙", encoding="utf-8")
+
+    real_replace = os.replace
+
+    def _flaky_replace(src, dst):
+        if str(src).endswith("kb.db.tmp") and str(dst).endswith("kb.db"):
+            raise OSError("注入失败：现役替换被锁")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(build_kb.os, "replace", _flaky_replace)
+    with pytest.raises(OSError, match="现役替换被锁"):
+        build_kb.build(kb, embed_fn=None)
+    monkeypatch.undo()
+    assert _docs(kb / "kb.db") == {"a.md"}          # 回滚：上一版仍为现役
+    assert not (kb / "kb.db.bak").exists()          # bak 已回滚归位
+    assert not (kb / "kb.db.tmp").exists()          # 无临时残留

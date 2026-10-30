@@ -74,6 +74,11 @@ def _rebuild_graph():
     同名工具先挂载者优先（内置 > MCP > 自定义 > 领域包）：ToolNode 按名做
     dict 赋值、后写静默覆盖先写，此前 pack 同名工具会无声遮蔽 custom/builtin
     版本且无人知晓（全项目评审问题2）——此处显式去重 + 告警，冲突可发现。"""
+    # SEC-4（v0.17.32）：热重载前强制失效包扫描缓存并重新验签。此前 scan_packs
+    # 缓存启动时的验签结果，运行中篡改包文件（mtime 变化触发热重载）后重载仍
+    # 沿用旧验签——签名包退化为「启动时校验」。此处重扫即重验：篡改包在强制
+    # 验签模式下变 invalid/unavailable，工具不再挂载（fail-closed）。
+    packs.invalidate_scan_cache()
     tools = tools_admin.builtin_langchain_tools() + list(STATE.mcp_tool_list)
     tools += custom_tools.load_langchain_tools()
     pack_tool_list = packs.load_pack_tools()

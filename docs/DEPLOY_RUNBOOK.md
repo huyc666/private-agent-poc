@@ -88,6 +88,12 @@ chmod 600 .env
 2. 删除 `router_settings.fallbacks` 一行（或改为第二台 vLLM）；
 3. `general_settings.master_key` 改为 `<K2>`。
 
+主模型地址（v0.17.32 SEC-5）：`litellm_config.yaml` 经 `VLLM_API_BASE`
+环境变量读 vLLM 端点。`.env` 按部署拓扑写入
+`VLLM_API_BASE=http://<GPU机器>:8000/v1`（同机 Docker 默认
+`host.docker.internal:8000/v1` 已由 compose 注入，可不配；**删除 fallback
+后此项必须正确**，主链路不再有 deepseek 兜底）。
+
 编辑 `docker/docker-compose.postgres.yml`：`POSTGRES_PASSWORD` 改为 `<K3>`。
 
 **验收点**：`grep -n deepseek gateway/litellm_config.yaml` 无输出；

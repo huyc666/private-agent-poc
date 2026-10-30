@@ -104,21 +104,68 @@ def test_exec_mode_local_without_sandbox():
 
 
 def test_exec_mode_sandbox_down_fail_closed(monkeypatch):
-    monkeypatch.setenv("CUSTOM_TOOLS_EXEC", "sandbox")
+    # v0.17.32 SEC-3：exec_mode 改读 config 常量（import 时固化），setenv 不再生效
+    monkeypatch.setattr(config, "CUSTOM_TOOLS_EXEC", "sandbox")
     monkeypatch.setattr(config, "SANDBOX_URL", "")
     custom_tools._up_cache["t"] = 0.0
     assert custom_tools.exec_mode() == "sandbox-down"   # 强制模式不可达 fail-closed
+
+
+# ---------------------------------------------------------------- SEC-3 执行模式默认值
+# 默认值与运行模式联动（对齐 AUTH_ENABLED 先例）：Mock=开发者模式默认 auto；
+# 真实 LLM 模式默认 sandbox fail-closed（沙箱不可达不在主进程 exec 工具代码）。
+
+def test_ac3_default_mock_mode_keeps_auto(monkeypatch):
+    monkeypatch.setattr(config, "CUSTOM_TOOLS_EXEC", "")   # 未显式配置
+    monkeypatch.setattr(config, "MOCK_LLM", True)
+    monkeypatch.setattr(config, "SANDBOX_URL", "")
+    custom_tools._up_cache["t"] = 0.0
+    assert custom_tools.exec_mode() == "local"    # auto 语义：不可达回退本地
+
+
+def test_ac3_default_real_mode_sandbox_fail_closed(monkeypatch):
+    monkeypatch.setattr(config, "CUSTOM_TOOLS_EXEC", "")   # 未显式配置
+    monkeypatch.setattr(config, "MOCK_LLM", False)
+    monkeypatch.setattr(config, "SANDBOX_URL", "")
+    custom_tools._up_cache["t"] = 0.0
+    assert custom_tools.exec_mode() == "sandbox-down"   # 真实模式默认 fail-closed
+
+
+def test_ac3_explicit_config_overrides_default(monkeypatch):
+    monkeypatch.setattr(config, "MOCK_LLM", False)
+    monkeypatch.setattr(config, "SANDBOX_URL", "")
+    expect = {"auto": "local", "local": "local", "sandbox": "sandbox-down"}
+    for explicit in ("auto", "local", "sandbox"):
+        monkeypatch.setattr(config, "CUSTOM_TOOLS_EXEC", explicit)
+        custom_tools._up_cache["t"] = 0.0
+        assert custom_tools.exec_mode() == expect[explicit]
+
+
+def test_ac3_auto_fallback_local_warns_rate_limited(monkeypatch, capsys):
+    """auto 回退 local 不再静默：显著 WARNING + 60s 限频防刷屏。"""
+    monkeypatch.setattr(config, "CUSTOM_TOOLS_EXEC", "")
+    monkeypatch.setattr(config, "MOCK_LLM", True)
+    monkeypatch.setattr(config, "SANDBOX_URL", "")
+    custom_tools._up_cache["t"] = 0.0
+    custom_tools._auto_warn_cache["t"] = 0.0    # 前序用例已告警过，重置限频
+    assert custom_tools.exec_mode() == "local"
+    assert "主进程" in capsys.readouterr().out
+    custom_tools._up_cache["t"] = 0.0          # 限频窗口内重复回退不再告警
+    custom_tools.exec_mode()
+    assert "主进程" not in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------- 专属工具归属校验
 
 def test_resolve_personal_user_role_boundaries(login_as):
     login_as("alice")
-    custom_tools.write_custom_tool("mine_tool", _code_for("mine_tool"), scope="alice")
+    # v0.17.32 SEC-2：域目录名带哈希后缀（user_scope），字面量 "alice" 不再命中
+    alice_scope = config.user_scope("alice")
+    custom_tools.write_custom_tool("mine_tool", _code_for("mine_tool"), scope=alice_scope)
     custom_tools.write_custom_tool("global_one", _code_for("global_one"))
 
     scope, path = custom_tools._resolve_personal("mine_tool")
-    assert scope == "alice" and path.is_file()
+    assert scope == alice_scope and path.is_file()
     # 跨域访问被拒
     assert "不属于你的专属域" in custom_tools._resolve_personal("bob/mine_tool")
     # 不存在
@@ -146,7 +193,8 @@ def test_resolve_personal_open_mode_rejected(monkeypatch, login_as):
 def test_run_personal_tool_local_mode_fail_closed(login_as):
     """专属工具未经审批 → 不允许主进程内执行（须沙箱隔离）。"""
     login_as("alice")
-    custom_tools.write_custom_tool("mine_tool", _code_for("mine_tool"), scope="alice")
+    custom_tools.write_custom_tool("mine_tool", _code_for("mine_tool"),
+                                    scope=config.user_scope("alice"))
     out = asyncio.run(custom_tools.run_personal_tool("mine_tool", {"x": 1}))
     assert "fail-closed" in out and "沙箱" in out
 
@@ -179,7 +227,8 @@ def test_signature_tracks_nanosecond_changes():
 
 def test_personal_index_prompt_includes_own_tools(login_as):
     login_as("alice")
-    custom_tools.write_custom_tool("mine_tool", _code_for("mine_tool"), scope="alice")
+    custom_tools.write_custom_tool("mine_tool", _code_for("mine_tool"),
+                                   scope=config.user_scope("alice"))
     prompt = custom_tools.personal_index_prompt()
     assert "mine_tool" in prompt and "专属自定义工具" in prompt
 

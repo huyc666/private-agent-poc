@@ -245,7 +245,7 @@ def test_session_delete_open_mode_no_acl(client_factory, make_user, monkeypatch)
 def test_personal_tool_rejects_empty_scope(login_as, monkeypatch):
     """user 角色但专属域解析为空 → 拒绝（防越权兜底分支）。"""
     login_as("u-pt", role="user")
-    monkeypatch.setattr(config, "scope_clean", lambda u: "")
+    monkeypatch.setattr(config, "user_scope", lambda u: "")
     out = custom_tools._resolve_personal("some_tool")
     assert out == "专属自定义工具仅对登录用户可用"
 
@@ -261,11 +261,11 @@ def test_personal_tool_rejects_unknown_role(login_as, monkeypatch):
 def test_personal_tool_sandbox_down_failclosed(login_as, monkeypatch):
     """CUSTOM_TOOLS_EXEC=sandbox 且沙箱不可达 → fail-closed 拒绝执行。"""
     login_as("u-pt3", role="user")
-    scope = config.scope_clean("u-pt3")
+    scope = config.user_scope("u-pt3")
     d = config.PERSONAL_CUSTOM_TOOLS_DIR / scope
     d.mkdir(parents=True, exist_ok=True)
     (d / "t1.py").write_text("def t1():\n    return 1\n", encoding="utf-8")
-    monkeypatch.setenv("CUSTOM_TOOLS_EXEC", "sandbox")
+    monkeypatch.setattr(config, "CUSTOM_TOOLS_EXEC", "sandbox")
     monkeypatch.setattr(config, "SANDBOX_URL", "http://127.0.0.1:1")   # 必不可达
     monkeypatch.setattr(custom_tools, "_up_cache", {"t": 0.0, "v": False})
     out = asyncio.run(custom_tools.run_personal_tool("t1", {}))

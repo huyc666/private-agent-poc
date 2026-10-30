@@ -12,13 +12,20 @@
 # Fallback: when qwen-27b (vLLM) is unreachable the router switches to
 # deepseek-chat automatically; the Agent side notices nothing.
 # Audit: every request passes the gateway log (ship it to your log stack).
+#
+# Primary vLLM address (SEC-5, v0.17.32): VLLM_API_BASE env var, e.g.
+#   Docker:  set as environment in docker-compose.gateway.yml
+#            (default http://host.docker.internal:8000/v1)
+#   No Docker: export VLLM_API_BASE=http://<GPU-host>:8000/v1 before litellm starts
+# Never hardcode 127.0.0.1 here: inside the gateway container it points to the
+# container itself, not the vLLM host - the DeepSeek fallback used to mask this.
 
 model_list:
   # Primary: self-hosted vLLM (see deploy step 1)
   - model_name: qwen-27b
     litellm_params:
       model: openai/qwen-27b            # openai/ prefix = any OpenAI-compatible endpoint
-      api_base: http://127.0.0.1:8000/v1   # point to http://<GPU-host>:8000/v1 when remote
+      api_base: os.environ/VLLM_API_BASE   # primary vLLM endpoint via env (see note above)
       api_key: EMPTY
       rpm: 120                          # requests-per-minute limit
   # Fallback: DeepSeek cloud (dev only; remove for production deployment,

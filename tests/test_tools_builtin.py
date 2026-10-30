@@ -73,8 +73,9 @@ def test_user_cannot_read_others_domains(login_as):
 
 def test_user_can_read_own_domain(login_as):
     login_as("alice")
-    _ws_file("uploads/alice/f.md", "自己的文档")
-    assert tools_builtin.read_text_file("uploads/alice/f.md") == "自己的文档"
+    rel = f"uploads/{config.user_scope('alice')}/f.md"
+    _ws_file(rel, "自己的文档")
+    assert tools_builtin.read_text_file(rel) == "自己的文档"
 
 
 def test_approver_global_view_reads_any_domain(login_as):
@@ -91,10 +92,11 @@ def test_open_mode_uses_shared_domain(monkeypatch):
 
 def test_list_uploaded_docs_scoped_to_current_user(login_as):
     login_as("alice")
-    _ws_file("uploads/alice/a.md", "x")
+    alice = config.user_scope("alice")
+    _ws_file(f"uploads/{alice}/a.md", "x")
     _ws_file("uploads/bob/b.md", "y")
     out = tools_builtin.list_uploaded_docs()
-    assert "uploads/alice/a.md" in out
+    assert f"uploads/{alice}/a.md" in out
     assert "bob" not in out                                  # 他人文档对模型不可见
 
 
@@ -107,10 +109,11 @@ def test_list_uploaded_docs_empty_when_no_dir(login_as):
 
 def test_save_output_file_strips_path_and_saves(login_as):
     login_as("alice")
+    alice = config.user_scope("alice")
     out = tools_builtin.save_output_file("../../../../报告.md", "内容")
     assert "已保存" in out
-    assert "下载链接：/api/files/alice/报告.md" in out      # 逻辑路径（单段路径剥成 basename）
-    assert (config.OUTPUTS_DIR / "alice" / "报告.md").is_file()
+    assert f"下载链接：/api/files/{alice}/报告.md" in out   # 逻辑路径（单段路径剥成 basename）
+    assert (config.OUTPUTS_DIR / alice / "报告.md").is_file()
 
 
 def test_save_output_file_rejects_illegal_names(login_as):
@@ -153,7 +156,8 @@ def test_save_docx_success(login_as):
     login_as("alice")
     out = tools_builtin.save_output_file("公文.docx", "# 公文\n\n正文", as_docx=True)
     assert "Word 文档" in out
-    with zipfile.ZipFile(config.OUTPUTS_DIR / "alice" / "公文.docx") as z:
+    docx = config.OUTPUTS_DIR / config.user_scope("alice") / "公文.docx"
+    with zipfile.ZipFile(docx) as z:
         assert z.testzip() is None
 
 

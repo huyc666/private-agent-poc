@@ -273,8 +273,9 @@ def invalidate_scan_cache() -> None:
 
 def scan_packs() -> list[dict]:
     """扫描 PACKS_DIR 下全部包（含不可用/损坏的），按名称排序。
-    结果带内存缓存：包目录的写入口（create/delete/sign）均已失效缓存，
-    手工改盘需重启生效（与启动加载语义一致）。"""
+    结果带内存缓存：包目录的写入口（create/delete/sign）均已失效缓存；
+    手工改盘（含运行中篡改包文件）经 agent._rebuild_graph 开头强制失效
+    缓存重扫并重新验签（SEC-4，v0.17.32）——热重载同样遵循强制验签语义。"""
     global _scan_cache
     if _scan_cache is None:
         result = []

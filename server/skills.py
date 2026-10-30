@@ -35,13 +35,13 @@ def _skills_dir() -> Path:
 
 def current_scope() -> str | None:
     """当前对话上下文的专属技能域（v0.17.9）。认证模式按 usage.current_user
-    分域（与文件域 config.scope_clean 同规则）；开放模式/匿名 → None
-    （无专属域概念，技能创建与加载全部走通用层，行为同旧版）。"""
+    分域（与文件域 config.user_scope 同规则，v0.17.32 SEC-2 哈希防碰撞）；
+    开放模式/匿名 → None（无专属域概念，技能创建与加载全部走通用层，行为同旧版）。"""
     from . import auth, usage   # 函数内导入：避免模块级循环依赖
     u = usage.current_user.get() or ""
     if not auth.enabled() or not u or u == "anonymous":
         return None
-    return config.scope_clean(u)
+    return config.user_scope(u)
 
 
 def _personal_root() -> Path:

@@ -127,6 +127,14 @@ MODEL_NAME=qwen-27b            # 逻辑模型名：vLLM 宕机时网关自动切
 litellm 按系统默认编码读 YAML，中文注释会在中文版 Windows 上启动失败，已踩坑）。
 正式私有化部署请删除配置中的 deepseek 备模型（或改为第二台 vLLM）。
 
+主模型（vLLM）地址经 **`VLLM_API_BASE`** 环境变量注入（v0.17.32 SEC-5），
+不再写死在 YAML 里——容器内的 `127.0.0.1` 指向网关自身而非 vLLM，此前
+DeepSeek fallback 会掩盖这一错配。Compose 默认注入
+`http://host.docker.internal:8000/v1`（宿主机 vLLM，Linux 依赖 compose 里的
+`extra_hosts: host-gateway`）；vLLM 在其他机器时在 `.env` 配
+`VLLM_API_BASE=http://<GPU机器>:8000/v1`。无 Docker 直跑 litellm 时须先
+`export VLLM_API_BASE=...` 再启动。
+
 无 Docker 的开发机也可以本机起网关：
 `pip install "litellm[proxy]" && litellm --config gateway/litellm_config.yaml --port 4000`
 （注意：litellm[proxy] 会把 mcp 包升到 2.x 与 fastmcp 3.x 冲突，

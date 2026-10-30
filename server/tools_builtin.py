@@ -40,12 +40,13 @@ def _output_safe_name(name: str) -> bool:
 
 def _file_scope() -> str:
     """当前工具调用的文件域（多用户隔离，v0.17.7 评审）：认证模式按
-    usage.current_user（stream_reply 注入的对话归属身份）分域；开放模式
-    及身份缺失时 shared（与端点侧 _user_scope 同口径，规则在 config.scope_clean）。"""
+    usage.current_user（stream_reply 注入的对话归属身份）分域（user_scope
+    哈希后缀，v0.17.32 SEC-2 防清洗碰撞）；开放模式及身份缺失时 shared
+    （与端点侧 _user_scope 同口径，规则在 config.user_scope）。"""
     u = usage.current_user.get() or ""
     if not auth.enabled() or not u or u == "anonymous":
         return "shared"
-    return config.scope_clean(u)
+    return config.user_scope(u)
 
 
 def _is_sensitive_file(target) -> bool:

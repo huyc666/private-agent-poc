@@ -1,4 +1,5 @@
 """配置：全部通过环境变量驱动，私有化部署友好。"""
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -42,6 +43,32 @@ def scope_clean(username: str) -> str:
     s = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]", "_", (username or "").strip())
     return s.strip("_")[:48] or "shared"
 
+
+def user_scope(username: str) -> str:
+    """身份 → 唯一文件域目录名（SEC-2，v0.17.32）：scope_clean 基名 + 原始
+    用户名 SHA-256 前 8 位后缀，彻底消除清洗碰撞（a@b 与 a_b 清洗后同名
+    不再共享 uploads/outputs/专属技能/专属工具目录）。回退 shared 不带
+    后缀（开放模式遗留共享域兼容）。存量老域名目录由 main._migrate_scope_dirs
+    启动时 rename 迁移；哈希输入为 strip 后的原始用户名（与 add_user 落库口径
+    一致），基名由 scope_clean 清洗（对含哈希后缀的目录名再清洗仍幂等）。"""
+    base = scope_clean(username)
+    if base == "shared":
+        return "shared"
+    digest = hashlib.sha256(
+        (username or "").strip().encode("utf-8")).hexdigest()[:8]
+    return f"{base}-{digest}"
+
+
+def scope_segment(name: str) -> str:
+    """URL 域段清洗（评审修复 C2，v0.17.32）：与 scope_clean 同字符集清洗与
+    shared 回退，但长度上限放宽到 57——user_scope 域名 = 48 字基名 + '-' +
+    8 位 hex，最长 57 字符；此前 URL 寻址侧沿用 scope_clean 的 48 字截断，
+    基名 ≥40 字用户的哈希后缀被截掉，approver/admin 全局视图按 URL 寻址
+    其域即 404。仅用于 URL 中已生成域名的二次校验；用户名→域名仍走
+    user_scope。"""
+    s = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]", "_", (name or "").strip())
+    return s.strip("_")[:57] or "shared"
+
 # 单文件大小上限（MB），防超大文件灌爆内存/磁盘
 UPLOAD_MAX_MB = int(os.getenv("UPLOAD_MAX_MB", "10"))
 
@@ -76,6 +103,13 @@ SANDBOX_TIMEOUT = float(os.environ.get("SANDBOX_TIMEOUT", "20"))
 # 留空 = 不携带（兼容未启用鉴权的既有沙箱部署）。生产建议生成随机值：
 # python -c "import secrets; print(secrets.token_hex(32))"
 SANDBOX_AUTH_TOKEN = os.environ.get("SANDBOX_AUTH_TOKEN", "")
+
+# ---- 自定义工具执行模式（SEC-3，v0.17.32）----
+# 显式指定 auto / local / sandbox；未显式配置时按运行模式联动默认：
+# Mock 模式（开发）= auto（沙箱优先，不可达回退主进程，方便离线开发）；
+# 真实 LLM 模式 = sandbox（沙箱不可达 fail-closed，生产不得静默把工具代码
+# 放进主进程执行）。auto 回退 local 会打显著 WARNING（60s 限频）。
+CUSTOM_TOOLS_EXEC = os.environ.get("CUSTOM_TOOLS_EXEC", "").strip().lower()
 
 # ---- Skills 目录 ----
 SKILLS_DIR = Path(os.environ.get("SKILLS_DIR", str(PROJECT_ROOT / "skills"))).resolve()

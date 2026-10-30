@@ -31,6 +31,14 @@ def test_add_user_reserved_scope_username_rejected():
     assert auth.add_user("###") is None
 
 
+def test_ac2_colliding_clean_names_both_creatable():
+    """SEC-2（spec v0.17.32 AC2）：哈希域天然消除碰撞——清洗后同名的
+    用户名均可创建（此前共享目录须人工避免），域目录由 user_scope 区分。"""
+    assert auth.add_user("a@b") is not None
+    assert auth.add_user("a_b") is not None
+    assert config.user_scope("a@b") != config.user_scope("a_b")
+
+
 def test_add_user_name_rules():
     assert auth.add_user("") is None
     assert auth.add_user("x" * 65) is None
