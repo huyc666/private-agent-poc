@@ -15,6 +15,7 @@
 渐进式披露：系统提示词只注入索引（name + description），
 模型需要时通过 load_skill 工具拉取完整指令。
 """
+import hashlib
 import io
 import os
 import re
@@ -353,11 +354,27 @@ def personal_index_prompt(scope: str | None) -> str:
             "任务匹配时先调用 load_skill 获取完整指令）：\n" + "\n".join(items))
 
 
+def _file_sig(p: Path) -> str:
+    """单文件内容哈希；读失败返回 '?'（v0.17.34 AC1，对齐 custom_tools /
+    packs 的 _file_sig 口径）：每轮对话开头都做签名检测，读失败上抛会
+    打断本轮对话的 SSE 流；'?' 与任何成功哈希都不同，异常状态仍会触发
+    一次重载，不被静默吞掉。
+    有意不复用另两处实现（评审 C4 保留）：packs 模块级 import skills，
+    反向导入即成循环导入；为一个 6 行助手做跨模块耦合不值当。"""
+    try:
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+    except OSError:
+        return "?"
+
+
 def signature() -> tuple:
-    """技能文件签名（相对路径 + mtime 纳秒），纳入 Agent 图重建检测：
-    create_skill / 技能包导入后下一轮自动重绑生效，无需重启。
-    v0.17.7 评审 P2：改用 st_mtime_ns——秒级 mtime 在快速连续更新时不变，
-    会导致图不重建、新技能不生效。
+    """技能文件签名（相对路径 + 内容哈希，v0.17.34 AC1），纳入 Agent 图
+    重建检测：create_skill / 技能包导入后下一轮自动重绑生效，无需重启。
+    v0.17.33 复验实测：此前 st_mtime_ns 口径可被「篡改内容 + 还原 mtime」
+    完全绕过（不重建、不重验签），与 custom_tools / packs 同源问题本轮
+    一并闭环；v0.17.7 评审 P2 的纳秒精度决策随之作废——内容变化必然
+    引起哈希变化，时间戳不再参与签名。技能文件均为小文本，每轮对话一次
+    检测的开销可忽略。
     注意：只统计通用层（skills/ + 领域包）——用户专属技能
     （skills_personal/<域>/）的索引按请求身份动态注入，变更即时生效，
     不参与图重建判定（v0.17.9）。"""
@@ -366,8 +383,5 @@ def signature() -> tuple:
         if not d.is_dir():
             continue
         for p in sorted(d.rglob("SKILL.md")):
-            try:
-                items.append((p.relative_to(d).as_posix(), p.stat().st_mtime_ns))
-            except OSError:
-                continue
+            items.append((p.relative_to(d).as_posix(), _file_sig(p)))
     return tuple(items)

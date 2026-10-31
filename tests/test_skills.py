@@ -1,8 +1,9 @@
-"""skills：技能注册中心（创建分流 / 专属域遮蔽 / 技能包安全导入 / 纳秒签名）。"""
+"""skills：技能注册中心（创建分流 / 专属域遮蔽 / 技能包安全导入 / 内容哈希签名）。"""
 import io
 import os
 import time
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -201,13 +202,41 @@ def test_failed_import_does_not_damage_existing(login_as):
 
 # ---------------------------------------------------------------- 变更检测
 
-def test_signature_uses_nanosecond_mtime(login_as):
+def test_ac1_skill_signature_detects_tamper_with_restored_mtime(login_as):
+    """AC1：篡改技能内容并还原 mtime（v0.17.33 复验实测绕过手法）→
+    内容哈希仍检出。取代旧 test_signature_uses_nanosecond_mtime——其断言
+    基于 mtime 检测，内容哈希口径下语义反转（时间戳不再参与签名）。"""
     login_as("admin1", role="admin")
     skills.create_skill("fast-skill", "d", "v1")
     p = config.SKILLS_DIR / "fast-skill" / "SKILL.md"
     sig1 = skills.signature()
-    # 快速连续更新：用纳秒 utime 模拟（秒级 mtime 无法区分的场景）
-    ns = time.time_ns() + 1_000_000
-    os.utime(p, ns=(ns, ns))
-    sig2 = skills.signature()
-    assert sig2 != sig1                        # 纳秒精度捕获快速更新
+    st = p.stat()
+    p.write_text("---\nname: fast-skill\ndescription: d\n---\n\nv2\n",
+                 encoding="utf-8")
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))     # 还原 mtime
+    assert skills.signature() != sig1                     # 内容哈希仍检出
+
+
+def test_ac1_skill_signature_ignores_mtime_only_change(login_as):
+    """AC1 反向：仅改 mtime、内容不变 → 签名稳定（检测只认内容）。"""
+    login_as("admin1", role="admin")
+    skills.create_skill("stable-skill", "d", "v")
+    p = config.SKILLS_DIR / "stable-skill" / "SKILL.md"
+    sig1 = skills.signature()
+    ns = time.time_ns() + 1_000_000_000
+    os.utime(p, ns=(ns, ns))                              # mtime 前进、内容不变
+    assert skills.signature() == sig1
+
+
+def test_ac1_skill_signature_read_failure_fallback(login_as, monkeypatch):
+    """AC1：读失败返回 '?' 兜底（对齐 custom_tools / packs 的 _file_sig
+    口径，v0.17.33 评审 C1 先例）——异常状态参与签名触发一次重载，
+    不静默吞掉、更不上抛打断本轮对话。"""
+    login_as("admin1", role="admin")
+    skills.create_skill("sig-err-skill", "d", "v")
+
+    def _boom(self):
+        raise OSError("file locked")
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+    sig = skills.signature()
+    assert sig and all(h == "?" for _rel, h in sig)

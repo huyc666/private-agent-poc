@@ -19,7 +19,7 @@ import hashlib
 import os
 import re
 import sqlite3
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -250,12 +250,26 @@ def _parse_pack(pack_dir: Path) -> dict:
             info["tools"].append(p)
         else:
             print(f"[packs] {name}: 工具文件不存在，跳过: {rel}")
+    skill_dirs: set[str] = set()                    # 已挂载技能目录（评审 E1 去重）
     for rel in data.get("skills") or []:
         p = _resolve_in_pack(pack_dir, rel, "技能", name)
-        if p is not None and (p / "SKILL.md").is_file():
-            info["skills"].append(p)
-        elif p is not None:
+        if p is None:
+            continue
+        leaf = (p / "SKILL.md").resolve()
+        if not leaf.is_file():
             print(f"[packs] {name}: 技能目录缺少 SKILL.md，跳过: {rel}")
+        elif pack_dir.resolve() not in leaf.parents:
+            # v0.17.34 AC4（复验 R3）：目录包含校验通过，但叶子自身可以是
+            # 指向包外的符号链接——is_file 会跟随链接，须对 resolve 后的
+            # 真实路径再校验一次包含关系
+            print(f"[packs] {name}: SKILL.md 指向包目录之外，跳过: {rel}")
+        elif str(p) in skill_dirs:
+            # 评审修复 E1：清单重复声明同一技能目录 → 去重（与工具分支的
+            # tool_stems 去重对称，v0.17.27）；重复条目会重复进入签名载荷
+            print(f"[packs] {name}: 技能目录重复声明，跳过: {rel}")
+        else:
+            skill_dirs.add(str(p))
+            info["skills"].append(p)
     prompt_rel = data.get("prompt")
     if prompt_rel:
         p = _resolve_in_pack(pack_dir, prompt_rel, "提示词", name)
@@ -267,11 +281,43 @@ def _parse_pack(pack_dir: Path) -> dict:
 
 
 def _resolve_in_pack(pack_dir: Path, rel, kind: str, name: str) -> Path | None:
-    """包资源路径解析（v0.17.33 AC2，复验 R2）：manifest 引用必须是包目录
-    内的相对路径——resolve 后做包含关系校验，越界（../、绝对路径、符号
-    链接出界）一律跳过并告警（fail-closed）。此前直接拼接 + is_file 检查
-    存在性，../outside.py 与绝对路径会以 status=ok 被接受挂载。"""
-    p = (pack_dir / str(rel)).resolve()
+    """包资源路径解析（v0.17.34 AC3 规范白名单 + v0.17.33 越界校验，
+    均跳过并告警、fail-closed）：
+    1. manifest 引用必须是规范相对路径——工具 tools/<文件名>.py（平铺
+       一层，与沙箱执行路径 /packs/<pack>/tools/<name>.py 完全一致）、
+       技能 skills/<一级目录>、提示词 prompt.md。复验实测此前允许包内
+       任意路径：清单引用 code/x.py 会挂载但不在签名与变更检测载荷内
+       （篡改后 status=ok 且 signed 双绿），声明路径与沙箱执行路径也可能
+       脱钩；白名单一举闭合两处（可挂载资源全部落在 packsign 载荷的
+       tools/** + skills/** + prompt.md 内）。
+    2. resolve 后仍在包目录内（v0.17.33 AC2，复验 R2）：越界（../、
+       绝对路径、符号链接出界）拒收——规范路径的文件名成分仍可能是
+       指向包外的链接，两道检查各拦一类，缺一不可。
+    """
+    raw = str(rel)
+    # 评审修复 C2：Windows 下反斜杠同为路径分隔符——"tools/a\b.py" 的
+    # PurePosixPath.parts 是 ('tools','a\b.py') 会过白名单，物理 resolve
+    # 却成嵌套文件 tools/a/b.py，声明与沙箱平铺执行 tools/b.py 再度错位
+    # （实测仅审计错位、无未签名执行，仍须封堵以保平铺意图）。
+    # manifest 路径的规范形态不含反斜杠，显式拒绝并单独告警。
+    if "\\" in raw:
+        print(f"[packs] {name}: {kind}路径非规范（不得包含反斜杠），跳过: {rel}")
+        return None
+    parts = PurePosixPath(raw).parts
+    if kind == "工具":
+        canonical = (len(parts) == 2 and parts[0] == "tools"
+                     and parts[1].endswith(".py"))
+    elif kind == "技能":
+        canonical = (len(parts) == 2 and parts[0] == "skills"
+                     and parts[1] not in ("", ".", ".."))
+    else:
+        canonical = raw == "prompt.md"
+    if not canonical:
+        print(f"[packs] {name}: {kind}路径非规范"
+              f"（工具须为 tools/<文件名>.py 平铺 / 技能须为 skills/<一级目录>"
+              f" / 提示词须为 prompt.md），跳过: {rel}")
+        return None
+    p = (pack_dir / raw).resolve()
     if pack_dir.resolve() not in p.parents:
         print(f"[packs] {name}: {kind}路径越界（不在包目录内），跳过: {rel}")
         return None
@@ -600,10 +646,14 @@ def _file_sig(p: Path) -> str:
 
 
 def packs_signature() -> tuple:
-    """包目录签名（清单/工具/提示词的内容哈希 + 运行时禁用集合），用于热重载检测。
+    """包目录签名（清单/工具/技能/提示词的内容哈希 + 运行时禁用集合），用于热重载检测。
     v0.17.33：mtime 改内容哈希——复验实测『篡改内容 + 还原 mtime』可完全
     绕过检测（不重扫不重验签，SEC-4 信任缺口复现）；与 custom_tools.signature
-    同口径。清单/工具/提示词均为小文件，每轮对话一次检测开销可忽略。"""
+    同口径。清单/工具/提示词均为小文件，每轮对话一次检测开销可忽略。
+    v0.17.34 AC2：载荷补挂载技能目录全量文件（对齐 packsign 的 skills/**
+    口径）——包级篡改 SKILL.md（含还原 mtime）触发重扫重验；与 AC1 的
+    技能层内容哈希双层互备（包被禁用或仅技能附属文件被篡改时，包级
+    签名仍是防线）。"""
     sig = []
     for pack in scan_packs():
         hs = []
@@ -612,6 +662,10 @@ def packs_signature() -> tuple:
             hs.append(_file_sig(manifest))
         for p in pack["tools"]:
             hs.append(_file_sig(p))
+        for sdir in pack["skills"]:               # v0.17.34 AC2
+            for p in sorted(sdir.rglob("*")):
+                if p.is_file():
+                    hs.append(_file_sig(p))
         if pack["prompt"] and Path(pack["prompt"]).is_file():
             hs.append(_file_sig(Path(pack["prompt"])))
         sig.append((pack["name"], tuple(hs)))

@@ -383,3 +383,106 @@ def test_ac3_pack_tamper_with_restored_mtime_detected(packs_dir, monkeypatch):
     assert p["trust"] == "invalid"                       # mtime 未变也重验签
     assert p["status"] == "unavailable"
     assert "greet" not in agent.STATE.tool_names
+
+
+# ---- v0.17.34 AC2/AC3/AC4：领域包信任链闭环（复验实测）----
+
+def test_ac2_packs_signature_covers_skill_files(packs_dir):
+    """AC2：packs_signature 载荷补包内技能文件——篡改 SKILL.md 并还原
+    mtime，包级签名仍变化（复验实测此前载荷不含 skills，双层检测全漏）。"""
+    _mk_pack(packs_dir, "p1", _valid_manifest("p1", skills=["skills/demo"]),
+             {"skills/demo/SKILL.md": "---\nname: demo\n---\n指令v1"})
+    sig1 = packs.packs_signature()
+    f = packs_dir / "p1" / "skills" / "demo" / "SKILL.md"
+    st = f.stat()
+    f.write_text("---\nname: demo\n---\n指令v2", encoding="utf-8")
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))     # 还原 mtime
+    assert packs.packs_signature() != sig1
+
+
+def test_ac2_signed_pack_skill_tamper_invalidates_trust(packs_dir, monkeypatch):
+    """AC2 端到端：强制验签下篡改已签名包的 SKILL.md 并还原 mtime →
+    内容哈希触发重扫重验 → trust=invalid 整包剔除（fail-closed）。"""
+    from server import agent
+    monkeypatch.setattr(config, "PACK_SIGNING_KEY", "testkey")
+    _mk_pack(packs_dir, "sig-pack3", _valid_manifest("sig-pack3",
+              skills=["skills/demo"]),
+             {"skills/demo/SKILL.md": "---\nname: demo\n---\n指令"})
+    packsign.sign_pack_files(packs_dir / "sig-pack3")
+    agent._rebuild_graph()
+    # 稳定检测基线：图重建先捕获签名（agent.py L101-102）后注册包技能目录
+    # （L105-106），首建后下一轮比较必然发现「新增目录」多重建一次；先让
+    # 基线吸收该时序差异，使后续检测只对真实篡改敏感——否则本用例会被无关
+    # 变化触发重扫而假绿（现状代码也能通过）。
+    agent.maybe_reload_custom_tools()
+    f = packs_dir / "sig-pack3" / "skills" / "demo" / "SKILL.md"
+    st = f.stat()
+    f.write_text("---\nname: demo\n---\n被篡改的指令", encoding="utf-8")
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))     # 还原 mtime
+    agent.maybe_reload_custom_tools()
+    p = next(p for p in packs.scan_packs() if p["name"] == "sig-pack3")
+    assert p["trust"] == "invalid"                       # 重扫后重新验签
+    assert p["status"] == "unavailable"
+    assert "签名校验失败" in p["error"]
+
+
+def test_ac3_noncanonical_manifest_paths_rejected(packs_dir, capsys):
+    """AC3：清单规范路径白名单（fail-closed）——工具须平铺 tools/<文件名>.py
+    （对齐沙箱执行路径）、技能须 skills/<一级目录>、提示词须 prompt.md。
+    复验实测 code/demo_tool.py 曾以 status=ok 挂载且不在签名/检测载荷内
+    （签名与检测双重盲区），声明路径与沙箱执行路径也可能脱钩。
+    评审修复 C2 回归：Windows 混合分隔符 tools/mix\\tool.py 物理上 resolve 成
+    嵌套文件，会绕过 PurePosixPath 白名单的平铺意图——须按非规范拒收。"""
+    _mk_pack(packs_dir, "wild-paths", _valid_manifest("wild-paths",
+              tools=["code/demo_tool.py", "tools/nested/tool.py",
+                     "tools/mix\\tool.py", "tools/greet.py"],
+              skills=["skills/a/b", "skills/pointed/SKILL.md",
+                      "skills/mix\\dir", "skills/ok"],
+              prompt="docs/prompt.md"),
+             {"code/demo_tool.py": TOOL_SRC,
+              "tools/nested/tool.py": TOOL_SRC,
+              "tools/greet.py": TOOL_SRC,
+              "skills/a/b/SKILL.md": "---\nname: b\n---\nx",
+              "skills/pointed/SKILL.md": "---\nname: p\n---\nx",
+              "skills/ok/SKILL.md": "---\nname: ok\n---\nx",
+              "docs/prompt.md": "越界位置提示词"})
+    info = next(p for p in packs.scan_packs() if p["name"] == "wild-paths")
+    assert info["status"] == "ok"                        # 包本体仍可加载
+    assert [t.stem for t in info["tools"]] == ["greet"]  # 非规范工具拒收
+    assert [s.name for s in info["skills"]] == ["ok"]     # 非规范技能拒收
+    assert not info["prompt"]                            # 非规范提示词拒收
+    assert capsys.readouterr().out.count("非规范") == 7  # 逐项告警可定位（含 C2 两项）
+
+
+def test_ac4_skill_leaf_symlink_rejected(packs_dir, tmp_path, capsys):
+    """AC4：SKILL.md 叶子指向包外的符号链接 → 技能拒收（复验 R3：技能
+    目录包含校验通过，但叶子仅 is_file() 会跟随链接导致越界内容入索引）。
+    环境无法创建符号链接时跳过（Windows 需开发者模式/管理员）。"""
+    _mk_pack(packs_dir, "leaf-link", _valid_manifest("leaf-link",
+              skills=["skills/hijack", "skills/normal"]),
+             {"skills/normal/SKILL.md": "---\nname: normal\n---\n包内技能"})
+    outside = tmp_path / "outside_skill"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("---\nname: hijack\n---\n包外越界技能",
+                                      encoding="utf-8")
+    hijack_dir = packs_dir / "leaf-link" / "skills" / "hijack"
+    hijack_dir.mkdir(parents=True)
+    try:
+        os.symlink(outside / "SKILL.md", hijack_dir / "SKILL.md")
+    except OSError:
+        pytest.skip("当前环境无法创建符号链接（Windows 需开发者模式/管理员）")
+    info = next(p for p in packs.scan_packs() if p["name"] == "leaf-link")
+    assert [s.name for s in info["skills"]] == ["normal"]   # 越界叶子拒收
+    assert "SKILL.md 指向包目录之外" in capsys.readouterr().out
+
+
+def test_review_skill_manifest_duplicate_entries_deduped(packs_dir, capsys):
+    """评审修复 E1：清单重复声明同一技能目录 → 只挂载一次（与工具分支的
+    tool_stems 去重对称，v0.17.27）——此前重复条目会重复进入 info["skills"]
+    与签名载荷（无运行时危害，register_extra_dir 去重兜底，仅分支不对称）。"""
+    _mk_pack(packs_dir, "dup-skills", _valid_manifest("dup-skills",
+              skills=["skills/ok", "skills/ok"]),
+             {"skills/ok/SKILL.md": "---\nname: ok\n---\nx"})
+    info = next(p for p in packs.scan_packs() if p["name"] == "dup-skills")
+    assert [s.name for s in info["skills"]] == ["ok"]
+    assert "重复声明" in capsys.readouterr().out
