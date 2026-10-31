@@ -131,3 +131,22 @@ def test_review_verify_survives_encode_error(key, pack_dir, monkeypatch, capsys)
     assert not packsign.verify(pack_dir, sig)              # 不抛异常，判无效
     assert "读取失败" in capsys.readouterr().out            # 异常类型入告警可定位
     assert packsign.trust_status(pack_dir, sig) == "invalid"
+
+
+def test_ac4_verify_survives_runtimeerror(key, pack_dir, monkeypatch, capsys):
+    """AC4/R9：验签载荷遍历 RuntimeError（链接循环的 rglob 形态，
+    RecursionError 亦为其子类）与 OSError/UnicodeEncodeError 同口径
+    fail-closed——verify 判 False 不上抛、告警可定位、trust=invalid；
+    compute 生成路径维持严格上抛（R5 语义不回退）。"""
+    sig = packsign.compute(pack_dir)
+
+    def _boom(d):
+        raise RuntimeError("Symlink loop")
+
+    monkeypatch.setattr(packsign, "_payload", _boom)
+    assert packsign.verify(pack_dir, sig) is False        # 不抛异常，判无效
+    out = capsys.readouterr().out
+    assert "读取失败" in out and "RuntimeError" in out     # 异常类型入告警
+    assert packsign.trust_status(pack_dir, sig) == "invalid"
+    with pytest.raises(RuntimeError):                      # 生成路径：明确报错
+        packsign.compute(pack_dir)

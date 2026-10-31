@@ -58,29 +58,47 @@ def _personal_dir(scope: str | None) -> Path | None:
     return _personal_root() / scope
 
 
-# 额外技能来源（领域包注册），条目 (父目录, 来源标签, 允许的技能目录名集合, 包根目录)。
-# v0.17.35 R4（复验报告）：父目录注册必须附「已验证接受的具体技能目录名集合」
-# ——无过滤注册会让未声明、甚至被解析期拒绝（叶子出包等）的兄弟技能经共同
-# skills/ 父目录重新进入索引/加载/签名。allowed=None 维持旧行为（整个目录
-# 可扫，内核 skills/ 与既有测试直调用）；root 给定时对实际可加载的每个
-# SKILL.md 做加载期真实路径包含校验（见 _skill_entry_ok）。
-_extra_dirs: list[tuple[Path, str, frozenset[str] | None, Path | None]] = []
+# 额外技能来源（领域包注册），条目 (父目录, 来源标签, 允许的技能目录名集合,
+# 包根目录, SKILL.md 内容快照)。v0.17.35 R4（复验报告）：父目录注册必须附
+# 「已验证接受的具体技能目录名集合」——无过滤注册会让未声明、甚至被解析期
+# 拒绝（叶子出包等）的兄弟技能经共同 skills/ 父目录重新进入索引/加载/签名。
+# allowed=None 维持旧行为（整个目录可扫，内核 skills/ 与既有测试直调用）；
+# root 给定时对实际可加载的每个 SKILL.md 做加载期真实路径包含校验（见
+# _skill_entry_ok）。v0.17.36 R8（复验报告）：texts 为扫描接受时物化的
+# 内容快照——索引/加载只读快照、不再访问磁盘，检查与读取之间的换链窗口
+# 由此闭合（texts=None 的来源维持直读：内核 skills/ 不在信任链内）。
+_extra_dirs: list[tuple[Path, str, frozenset[str] | None, Path | None,
+                        dict[str, str] | None]] = []
 
 
-def register_extra_dir(path, source: str = "", allowed=None, root=None) -> None:
+def register_extra_dir(path, source: str = "", allowed=None, root=None,
+                       texts=None) -> None:
     """注册额外的技能扫描目录（领域包调用）。重复注册自动去重（同一父目录
-    再次注册时合并允许集合，防御性——正常路径各包父目录唯一）。"""
-    p = Path(path).resolve()
+    再次注册时合并允许集合与快照，防御性——正常路径各包父目录唯一）。
+    v0.17.36 R9：resolve 遇链接循环等异常时告警并跳过注册（fail-closed，
+    注册入口不上抛——报告修复要求 2）。"""
     allowed_set = frozenset(allowed) if allowed is not None else None
-    root_p = Path(root).resolve() if root is not None else None
-    for i, (d, _s, a, _r) in enumerate(_extra_dirs):
+    # 评审 F1（P1）：空 dict 与 None 必须区分——None = 无快照来源（内核
+    # skills/ 维持直读）；显式空快照 = fail-closed 注册（服务端全部条目因
+    # 缺失快照被拒）——静默回退直读会重开 R8 换链窗口
+    texts_map = dict(texts) if texts is not None else None
+    try:
+        p = Path(path).resolve()
+        root_p = Path(root).resolve() if root is not None else None
+    except (OSError, RuntimeError) as e:
+        print(f"[skills] 额外技能目录注册失败（路径解析异常"
+              f"{type(e).__name__}），跳过: {path}")
+        return
+    for i, (d, _s, a, _r, _t) in enumerate(_extra_dirs):
         if d == p:
             if allowed_set:
                 _extra_dirs[i] = (d, _s, (a or frozenset()) | allowed_set,
-                                  root_p if root_p is not None else _r)
+                                  root_p if root_p is not None else _r,
+                                  {**(_t or {}), **texts_map}
+                                  if texts_map else _t)
             return
     if p.is_dir():
-        _extra_dirs.append((p, source, allowed_set, root_p))
+        _extra_dirs.append((p, source, allowed_set, root_p, texts_map))
 
 
 def reset_extra_dirs() -> None:
@@ -88,8 +106,9 @@ def reset_extra_dirs() -> None:
     _extra_dirs.clear()
 
 
-def _all_skill_dirs() -> list[tuple[Path, str, frozenset[str] | None, Path | None]]:
-    return [(_skills_dir(), "", None, None)] + list(_extra_dirs)
+def _all_skill_dirs() -> list[tuple[Path, str, frozenset[str] | None,
+                                    Path | None, dict[str, str] | None]]:
+    return [(_skills_dir(), "", None, None, None)] + list(_extra_dirs)
 
 
 def _skill_entry_ok(smd: Path, allowed, root, source: str) -> bool:
@@ -98,8 +117,11 @@ def _skill_entry_ok(smd: Path, allowed, root, source: str) -> bool:
        四重校验（规范路径/resolve 包含/叶子包含/去重）的集合，未声明或被拒
        兄弟不得经父目录复活；
     2) root 给定时 SKILL.md 真实路径仍须在包根内——解析期校验之后磁盘仍可能
-       被换成指向包外的链接，加载期再校验一次闭合 TOCTOU 窗口（报告 R4
-       修复要求 3）。
+       被换成指向包外的链接，加载期再校验一次（报告 R4 修复要求 3）。
+    v0.17.36 R8（复验报告）：本函数只把「名字与路径」准入；包来源的内容
+    一律取注册时物化的快照（_extra_dirs 条目 texts）——准入通过后不再有
+    第二次磁盘读取，检查-读取间隙的换链改变不了服务返回的内容（磁盘变化
+    经签名检测触发重建后，快照整体替换）。
     任一不满足 → 跳过并告警（fail-closed：宁误拒不误放，且可定位）。"""
     if allowed is not None and smd.parent.name not in allowed:
         print(f"[skills] 技能目录「{smd.parent.name}」不在来源允许集合内，"
@@ -141,12 +163,26 @@ def list_skills(scope: str | None = None) -> list[dict]:
     result: list[dict] = []
     seen: set[str] = set()
 
-    def _scan(base: Path, source: str, allowed=None, root=None) -> None:
+    def _scan(base: Path, source: str, allowed=None, root=None, texts=None) -> None:
         for smd in sorted(base.glob("*/SKILL.md")):
             if not _skill_entry_ok(smd, allowed, root, source):
                 continue
+            if texts is not None:
+                # v0.17.36 R8：包来源只读注册时物化的快照，不再读盘——
+                # 准入通过后没有第二次磁盘访问，换链改变不了索引内容；
+                # 快照缺失 fail-closed（正常路径与 allowed 同源，防御性）
+                content = texts.get(smd.parent.name)
+                if content is None:
+                    print(f"[skills] 技能目录「{smd.parent.name}」无内容快照，"
+                          f"跳过（来源：{source}）")
+                    continue
+            else:
+                try:
+                    content = smd.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
             try:
-                meta = _parse_skill_md(smd.read_text(encoding="utf-8", errors="replace"))
+                meta = _parse_skill_md(content)
                 name = meta["name"] or smd.parent.name
                 if name in seen:
                     print(f"[skills] 技能名冲突「{name}」（{source} 被遮蔽），跳过")
@@ -159,8 +195,8 @@ def list_skills(scope: str | None = None) -> list[dict]:
             except Exception:
                 continue
 
-    for base, source, allowed, root in _all_skill_dirs():
-        _scan(base, source or "内核", allowed, root)
+    for base, source, allowed, root, texts in _all_skill_dirs():
+        _scan(base, source or "内核", allowed, root, texts)
     pdir = _personal_dir(scope)
     if pdir is not None and pdir.is_dir():
         _scan(pdir, f"专属域/{scope}")
@@ -176,24 +212,45 @@ def load_skill(name: str, scope: str | None = None) -> str | None:
     目录名不同的声明技能经兜底扫描仍可按 frontmatter 名加载。"""
     if not NAME_PATTERN.match(name):
         return None
-    for base, _src, allowed, root in _all_skill_dirs():
+    for base, _src, allowed, root, texts in _all_skill_dirs():
         if allowed is not None and name not in allowed:
             continue    # 目录名直查：请求名不在允许集合（frontmatter 名走兜底）
         direct = base / name / "SKILL.md"
         if direct.is_file() and _skill_entry_ok(direct, allowed, root, _src):
+            # v0.17.36 R8：包来源返回注册时物化的快照——准入通过后不再读盘，
+            # 检查-读取间隙换入的链接改变不了返回内容（快照缺失 fail-closed）
+            if texts is not None:
+                content = texts.get(name)
+                if content is None:
+                    print(f"[skills] 技能目录「{name}」无内容快照，"
+                          f"跳过（来源：{_src}）")
+                    continue
+                return content
             return direct.read_text(encoding="utf-8", errors="replace")
     pdir = _personal_dir(scope)
     if pdir is not None:
         direct = pdir / name / "SKILL.md"
         if direct.is_file():
             return direct.read_text(encoding="utf-8", errors="replace")
-    for base, _src, allowed, root in _all_skill_dirs():
+    for base, _src, allowed, root, texts in _all_skill_dirs():
         for smd in base.glob("*/SKILL.md"):
             if not _skill_entry_ok(smd, allowed, root, _src):
                 continue
+            if texts is not None:
+                content = texts.get(smd.parent.name)    # R8：只读快照，不读盘
+                if content is None:
+                    # 评审 F3（P3）：与直查/索引同口径告警，兜底扫描不静默
+                    print(f"[skills] 技能目录「{smd.parent.name}」无内容快照，"
+                          f"跳过（来源：{_src}）")
+                    continue    # 快照缺失 fail-closed
+            else:
+                try:
+                    content = smd.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
             try:
-                if _parse_skill_md(smd.read_text(encoding="utf-8", errors="replace"))["name"] == name:
-                    return smd.read_text(encoding="utf-8", errors="replace")
+                if _parse_skill_md(content)["name"] == name:
+                    return content
             except Exception:
                 continue
     if pdir is not None and pdir.is_dir():
@@ -421,13 +478,27 @@ def signature() -> tuple:
     （skills_personal/<域>/）的索引按请求身份动态注入，变更即时生效，
     不参与图重建判定（v0.17.9）。
     v0.17.35 R4：包来源条目统一过 _skill_entry_ok，与索引/加载同一份
-    「已验证接受的具体技能集合」——未声明或被拒兄弟不进技能层签名。"""
+    「已验证接受的具体技能集合」——未声明或被拒兄弟不进技能层签名。
+    v0.17.36 R8（复验报告）：签名是检测层职责本身，维持读盘、不返回内容
+    ——快照只在重建时刷新、重建只由签名变化触发（可加载内容变化 ⇒ 必先
+    反映为签名变化 ⇒ 重建重验 ⇒ 快照整体替换）。
+    v0.17.36 R9：每来源目录 rglob/条目构建遇链接循环（OSError/RuntimeError，
+    含 RecursionError）→ 哨兵条目参与比较，不上抛中断热检测；哨兵随异常
+    变化、故障恢复后回归正常形态，差异触发重扫（与 packs.packs_signature
+    同口径）。"""
     items = []
-    for d, _src, allowed, root in _all_skill_dirs():
+    for d, _src, allowed, root, _texts in _all_skill_dirs():
         if not d.is_dir():
             continue
-        for p in sorted(d.rglob("SKILL.md")):
-            if not _skill_entry_ok(p, allowed, root, _src):
-                continue
-            items.append((p.relative_to(d).as_posix(), _file_sig(p)))
+        try:
+            for p in sorted(d.rglob("SKILL.md")):
+                if not _skill_entry_ok(p, allowed, root, _src):
+                    continue
+                items.append((p.relative_to(d).as_posix(), _file_sig(p)))
+        except (OSError, RuntimeError) as e:
+            # 评审 F2（P2）：哨兵键带来源标签（包来源 pack:<名>，内核用
+            # 目录名）便于定位；补告警对齐 scan_packs 的可定位口径
+            print(f"[skills] 来源「{_src or d.name}」技能签名遍历遇链接循环/IO"
+                  f" 异常（{type(e).__name__}），哨兵条目参与比较待重建自愈")
+            items.append((f"__error__:{_src or d.name}", f"{type(e).__name__}:{e}"))
     return tuple(items)

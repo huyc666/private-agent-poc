@@ -85,12 +85,16 @@ def verify(pack_dir: Path, signature: str, key: bytes | None = None) -> bool:
     覆盖不完整的签名。
     评审 C6：捕获范围补 UnicodeEncodeError——Linux surrogateescape
     文件名（lone surrogate）使 _payload 的 rel.encode("utf-8") 抛错，
-    同属「载荷构建失败」，与 OSError 同口径 fail-closed，不炸 scan_packs。"""
+    同属「载荷构建失败」，与 OSError 同口径 fail-closed，不炸 scan_packs。
+    v0.17.36 R9（复验报告）：捕获范围再补 RuntimeError——载荷 rglob 遇
+    链接循环（含 RecursionError 子类形态）同样 fail-closed 判 False，
+    不上抛中断 scan_packs/热检测；compute/sign 生成路径维持严格上抛
+    （R5 语义不回退：绝不签出覆盖不完整的签名）。"""
     if not signature or not signature.startswith(SIG_PREFIX):
         return False
     try:
         expected = compute(pack_dir, key)
-    except (OSError, UnicodeEncodeError) as e:
+    except (OSError, UnicodeEncodeError, RuntimeError) as e:
         print(f"[packsign] 包「{pack_dir.name}」签名载荷读取失败，按 invalid 处理"
               f"（{type(e).__name__}）——请检查文件占用/权限")
         return False

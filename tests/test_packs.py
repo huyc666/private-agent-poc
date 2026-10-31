@@ -1,6 +1,7 @@
 """领域包注册中心：清单解析校验 / 启用白名单与运行时禁用 / 包脚手架创建 /
 工具挂载去重与 env 冲突告警 / 签名 / 删除。"""
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -670,13 +671,10 @@ def _mk_link(target: Path, link: Path) -> bool:
 
 
 def test_review_grouped_parent_registration_survives_link_split(packs_dir):
-    """评审 C5：声明技能 skills/x 是指向包内 tools/ 的目录链接，
-    skills/y 为正常声明 → 按真实父目录分组注册后 y 必须照常可用（不得
-    因 skills[0].parent 陪葬）。x 的可见性随链接形态而异且都安全：
-    真 symlink 被 resolve 穿透（父目录=包根）→ allowed 过滤 fail-closed
-    拒收；Windows junction 不被 resolve 穿透（父目录仍 skills/）→ 经
-    allowed 放行但读到的是包内已签名内容——故断言锚定形态无关不变量：
-    y 不陪葬、索引 == 技能层签名（三口一致）、x 不越界读（链接环境
+    """评审 C5（v0.17.36 R7 收紧后断言更新）：清单声明技能 skills/x 是指向
+    包内 tools/ 的目录链接——报告 R7 修复要求 1 明示指向 tools/ 的链接同拒，
+    v0.17.36 起技能目录解析后必须仍位于 <pack>/skills/ 树内，x 在解析期即
+    拒收；合法声明技能 y 不陪葬、三口一致的核心回归价值保留（链接环境
     不可用时 skip，CI 恒跑）。"""
     _mk_pack(packs_dir, "split-pack",
              _valid_manifest("split-pack", skills=["skills/x", "skills/y"]),
@@ -688,21 +686,17 @@ def test_review_grouped_parent_registration_survives_link_split(packs_dir):
     if not _mk_link(tools_dir, packs_dir / "split-pack" / "skills" / "x"):
         pytest.skip("当前环境无法创建目录链接")
     info = next(p for p in packs.scan_packs() if p["name"] == "split-pack")
-    assert len(info["skills"]) == 2                  # 链接指向包内，解析期双接受
+    assert [s.name for s in info["skills"]] == ["y"]   # R7：链接技能解析期拒收
     packs.register_pack_skills()
     idx = {s["name"] for s in skills.list_skills()}
-    assert "y" in idx                                # 合法声明技能不得陪葬
+    assert idx == {"y"}                                 # 合法声明技能不得陪葬
     assert skills.load_skill("y") is not None
-    x_content = skills.load_skill("x")
-    assert x_content is None or "链接技能" in x_content   # 可见时必为包内内容，不越界
-    # 三口一致（物理文件层面）：resolve 穿透链接后 allowed 键为目标目录名
-    # （tools），x 实际挂载自 tools/SKILL.md（frontmatter 名 x），链接拼接
-    # 形态 x/SKILL.md 被拒于三口之外——可加载技能的物理源文件必在技能层
-    # 签名载荷中（idx 名为 frontmatter 名、签名键为目录名，口径与 AC2 先例
-    # 一致，不要求字面相等）
+    assert skills.load_skill("x") is None               # 链接名不可加载
+    assert skills.load_skill("tools") is None          # 目标目录名同样不可加载
+    # 三口一致：技能层签名只含 y，tools/SKILL.md 不经任何入口服务
     sig_rels = {rel for rel, _ in skills.signature()}
     assert "y/SKILL.md" in sig_rels
-    assert x_content is None or "tools/SKILL.md" in sig_rels
+    assert "tools/SKILL.md" not in sig_rels
 
 
 def test_review_signature_survives_relative_to_mismatch(packs_dir, monkeypatch):
@@ -745,3 +739,213 @@ def test_review_sign_pack_survives_encode_error(packs_dir, monkeypatch):
     assert "签名失败" in r and "未写入任何签名" in r
     text = (packs_dir / "enc-pack" / "pack.yaml").read_text(encoding="utf-8")
     assert "signature:" not in text
+
+
+# ---- v0.17.36 AC1-AC4：严格 skills 树布局 / 加载快照 / 链接循环哨兵（R7-R9）----
+
+def test_ac1_pack_internal_dir_link_rejected(packs_dir, monkeypatch, capsys):
+    """AC1/R7：skills/x -> ../hidden（目录链接指向 skills 树之外的包内目录）
+    ——强制模式下不得出现「技能可加载且包 signed」：技能目录解析后必须仍
+    位于 <pack>/skills/ 树内（hidden/、tools/ 等一律拒收，junction 与
+    POSIX symlink 同形拒绝；POSIX 形态即报告实测的 rglob 不跟随目录链接
+    HMAC 盲区，Windows junction 本机可真跑、CI/Linux 真符号链接恒跑）。"""
+    monkeypatch.setattr(config, "PACK_SIGNING_KEY", "testkey")
+    _mk_pack(packs_dir, "link-pack", _valid_manifest("link-pack",
+              skills=["skills/x", "skills/y"]),
+             {"skills/y/SKILL.md": "---\nname: y\n---\n正常技能",
+              "hidden/SKILL.md": "---\nname: blind-spot\n---\n盲区技能"})
+    if not _mk_link(packs_dir / "link-pack" / "hidden",
+                    packs_dir / "link-pack" / "skills" / "x"):
+        pytest.skip("当前环境无法创建目录链接")
+    packsign.sign_pack_files(packs_dir / "link-pack")
+    info = next(p for p in packs.scan_packs() if p["name"] == "link-pack")
+    assert [s.name for s in info["skills"]] == ["y"]    # x 解析后出 skills 树 → 拒收
+    assert info["trust"] == "signed"                    # 包本体与正常技能照常
+    assert info["status"] == "ok"
+    packs.register_pack_skills()
+    idx = {s["name"] for s in skills.list_skills()}
+    assert "y" in idx and "blind-spot" not in idx        # 链接目标不入索引
+    assert skills.load_skill("y") is not None
+    for name in ("x", "hidden", "blind-spot"):          # 链接名/目标名/frontmatter 名全不可加载
+        assert skills.load_skill(name) is None
+    assert "skills 树" in capsys.readouterr().out       # 拒收告警可定位
+
+
+def test_ac2_mounted_set_covers_all_collections(packs_dir, monkeypatch):
+    """AC2/R7 修复要求 4：签名集合、热检测集合、索引集合和加载集合再次
+    同一——实际挂载技能目录全部落在 packsign HMAC 载荷内（报告 AC1）；目录
+    链接形态拒收后不得在任何集合留痕；frontmatter 别名技能经兜底加载计入
+    挂载集合。"""
+    monkeypatch.setattr(config, "PACK_SIGNING_KEY", "testkey")
+    _mk_pack(packs_dir, "cover-pack", _valid_manifest("cover-pack",
+              skills=["skills/one", "skills/alias", "skills/x"]),
+             {"skills/one/SKILL.md": "---\nname: one\n---\n技能一",
+              "skills/alias/SKILL.md": "---\nname: aliased-name\n---\n别名技能",
+              "hidden/SKILL.md": "---\nname: blind-spot\n---\n盲区技能"})
+    if not _mk_link(packs_dir / "cover-pack" / "hidden",
+                    packs_dir / "cover-pack" / "skills" / "x"):
+        pytest.skip("当前环境无法创建目录链接")
+    packsign.sign_pack_files(packs_dir / "cover-pack")
+    info = next(p for p in packs.scan_packs() if p["name"] == "cover-pack")
+    assert [s.name for s in info["skills"]] == ["one", "alias"]   # x 拒收
+    packs.register_pack_skills()
+    idx = {s["name"] for s in skills.list_skills()}
+    assert idx == {"one", "aliased-name"}                       # 索引集合
+    assert all(skills.load_skill(n) for n in ("one", "alias", "aliased-name"))
+    assert skills.load_skill("x") is None                        # 加载集合无链接痕迹
+    assert skills.load_skill("hidden") is None
+    assert skills.load_skill("blind-spot") is None
+    sig_dirs = {rel.split("/")[0] for rel, _ in skills.signature()}
+    assert sig_dirs == {"one", "alias"}                          # 技能层签名集合
+    hot = dict(next(e for e in packs.packs_signature()[0]
+                    if e[0] == "cover-pack")[1])
+    hot_dirs = {k.split("/")[1] for k in hot if k.startswith("skills/")}
+    assert hot_dirs == {"one", "alias"}                          # 热检测集合
+    payload = {rel for rel, _ in
+               packsign._canonical_parts(packs_dir / "cover-pack")}
+    assert {"skills/one/SKILL.md", "skills/alias/SKILL.md"} <= payload  # HMAC 覆盖
+    assert info["trust"] == "signed" and info["status"] == "ok"
+
+
+def test_ac3_swap_in_check_read_gap_no_outside_content(packs_dir, monkeypatch,
+                                                        tmp_path):
+    """AC3/R8：准入（_skill_entry_ok）返回后、内容读取前换入指向包外的
+    junction（精确复现报告 toctou_swapped / outside_content_loaded 场景）——
+    直查加载与索引不得返回包外内容；frontmatter 别名兜底加载同防护；正常
+    技能与别名仍可加载；signature 检测到变化（检测层职责，读盘不返回内容）。"""
+    monkeypatch.setattr(config, "PACK_SIGNING_KEY", "testkey")
+    _mk_pack(packs_dir, "swap-pack", _valid_manifest("swap-pack",
+              skills=["skills/good", "skills/alias"]),
+             {"skills/good/SKILL.md": "---\nname: good\n---\n包内已验内容",
+              "skills/alias/SKILL.md": "---\nname: aliased-name\n---\n别名技能"})
+    packsign.sign_pack_files(packs_dir / "swap-pack")
+    packs.register_pack_skills()
+    sig_before = skills.signature()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("---\nname: good\n---\n包外越界内容",
+                                      encoding="utf-8")
+    good_dir = packs_dir / "swap-pack" / "skills" / "good"
+    swapped = []
+    real_ok = skills._skill_entry_ok
+
+    def _swap_after_ok(smd, allowed, root, source):
+        ok = real_ok(smd, allowed, root, source)
+        if ok and smd.parent.name == "good" and not swapped:
+            swapped.append(True)                # 检查通过瞬间换链（TOCTOU 窗口）
+            shutil.rmtree(good_dir)
+            _mk_link(outside, good_dir)
+        return ok
+
+    monkeypatch.setattr(skills, "_skill_entry_ok", _swap_after_ok)
+    content = skills.load_skill("good")          # 直查分支：准入后、读取前换链
+    assert swapped                               # 换链确实发生在窗口内
+    assert content is not None and "包外越界内容" not in content
+    assert "包内已验内容" in content              # 只能返回已验签内容（快照）
+    descs = " ".join(s["description"] for s in skills.list_skills())
+    assert "包外越界内容" not in descs           # 索引同样不泄露包外内容
+    assert skills.load_skill("aliased-name") is not None   # 别名兜底仍可加载
+    assert skills.load_skill("alias") is not None          # 正常技能仍可加载
+    assert skills.signature() != sig_before      # 检测层捕获换链 → 触发重建重验
+
+
+def test_ac4_scan_survives_root_resolve_loop(packs_dir, monkeypatch):
+    """AC4/R9 修复要求 2：扫描入口对链接循环收口——包根/资源 resolve 抛
+    RuntimeError（注入复现报告 Symlink loop）不得中断 scan_packs，异常包
+    fail-closed 转 error 态，健康包继续扫描（沿 C2 注入先例，本机恒跑）。"""
+    _mk_pack(packs_dir, "boom", _valid_manifest("boom", skills=["skills/s"]),
+             {"skills/s/SKILL.md": "---\nname: s\n---\n指令"})
+    _mk_pack(packs_dir, "healthy", _valid_manifest("healthy"))
+    real_resolve = Path.resolve
+
+    def _loop(self, strict=False):
+        if "boom" in self.parts:
+            raise RuntimeError("Symlink loop")
+        return real_resolve(self, strict)
+
+    monkeypatch.setattr(Path, "resolve", _loop)
+    infos = {p["name"]: p for p in packs.scan_packs()}
+    assert infos["boom"]["status"] == "error"          # 异常包 fail-closed
+    assert "Symlink loop" in infos["boom"]["error"]     # 错误可定位
+    assert infos["healthy"]["status"] == "ok"           # 健康包不受影响
+
+
+def test_ac4_signature_sentinel_on_root_loop(packs_dir, monkeypatch):
+    """AC4/R9 修复要求 1：缓存内包根被换成链接循环（注入 resolve
+    RuntimeError）——packs_signature 每包捕获 (OSError, RuntimeError) 生成
+    可比较异常哨兵：热检测不上抛（每轮对话开头不得中断）、异常包条目为
+    哨兵、健康包条目正常；哨兵与正常态不同 → 差异触发重扫重验自愈。"""
+    _mk_pack(packs_dir, "loopme", _valid_manifest("loopme"))
+    _mk_pack(packs_dir, "calm", _valid_manifest("calm"))
+    packs.scan_packs()                                  # 先填充扫描缓存
+    real_resolve = Path.resolve
+
+    def _loop(self, strict=False):
+        if "loopme" in self.parts:
+            raise RuntimeError("Symlink loop")
+        return real_resolve(self, strict)
+
+    monkeypatch.setattr(Path, "resolve", _loop)
+    sig = packs.packs_signature()                       # 不得上抛
+    entries = {name: dict(hs) for name, hs in sig[0]}
+    assert any(k.startswith("__error__") for k in entries["loopme"])   # 哨兵条目
+    assert "pack.yaml" in entries["calm"]               # 健康包条目正常
+    assert entries["loopme"] != entries["calm"]          # 哨兵参与比较触发重扫
+
+
+def test_ac4_real_root_loop_fail_closed_and_self_heals(packs_dir, monkeypatch):
+    """AC4/R9：真链接自循环（包目录被 rmtree 后换成指向自身的链接）——
+    packs_signature 不上抛、条目变化（哨兵）可被热检测捕获，健康包不受影响；
+    恢复真实目录并重扫后重新验签恢复 signed（异常签名不得缓存永久可信，
+    修复要求 3）。评审 F4 修正：「junction 无法自环」陈述不实（mklink /J
+    自环实测可创建），构造改走 _mk_link（symlink → junction 回退），Windows
+    无特权也真跑；链接环境完全不可用才降级 skip（CI/Linux symlink 恒跑）。"""
+    monkeypatch.setattr(config, "PACK_SIGNING_KEY", "testkey")
+    d = _mk_pack(packs_dir, "selfloop", _valid_manifest("selfloop",
+              skills=["skills/one"]),
+             {"skills/one/SKILL.md": "---\nname: one\n---\n指令"})
+    packsign.sign_pack_files(d)
+    _mk_pack(packs_dir, "calm2", _valid_manifest("calm2"))
+    packs.scan_packs()                                  # 缓存填充（循环注入前）
+    before = packs.packs_signature()
+    shutil.rmtree(d)
+    if not _mk_link(d, d):         # symlink → junction 回退（均可自环）
+        pytest.skip("当前环境无法创建自循环链接")
+    during = packs.packs_signature()                    # 不得上抛
+    assert during != before                             # 循环被检测层捕获
+    entries = {name: dict(hs) for name, hs in during[0]}
+    assert "pack.yaml" in entries["calm2"]              # 健康包继续参与
+    # 恢复真实目录与内容 → 重扫 → 重新验签恢复（自愈，不得缓存永久可信）
+    d.unlink()                     # 先移除自循环链接（symlink/junction 均不
+    d.mkdir(parents=True)          # 跟随；POSIX mkdir 遇已存在链接路径抛 EEXIST）
+    (d / "pack.yaml").write_text(
+        yaml.safe_dump(_valid_manifest("selfloop", skills=["skills/one"]),
+                       allow_unicode=True, sort_keys=False), encoding="utf-8")
+    (d / "skills" / "one").mkdir(parents=True)
+    (d / "skills" / "one" / "SKILL.md").write_text("---\nname: one\n---\n指令",
+                                                  encoding="utf-8")
+    packsign.sign_pack_files(d)
+    packs.invalidate_scan_cache()
+    info = next(p for p in packs.scan_packs() if p["name"] == "selfloop")
+    assert info["trust"] == "signed" and info["status"] == "ok"
+    assert packs.packs_signature() != during
+
+
+def test_review_nested_alias_same_basename_snapshot_not_clobbered(packs_dir):
+    """评审 A2（v0.17.36）：树内嵌套别名与真实技能同 basename（skills/x ->
+    skills/y/z 与 skills/z 同名 z）——包级快照按真实路径键控，两组各服务
+    各自已验内容，不串包覆盖（链接环境不可用时 skip，CI/Linux 恒跑）。"""
+    _mk_pack(packs_dir, "clobber-pack", _valid_manifest("clobber-pack",
+              skills=["skills/x", "skills/z"]),
+             {"skills/y/z/SKILL.md": "---\nname: nested-z\n---\n嵌套技能",
+              "skills/z/SKILL.md": "---\nname: flat-z\n---\n平铺技能"})
+    if not _mk_link(packs_dir / "clobber-pack" / "skills" / "y" / "z",
+                    packs_dir / "clobber-pack" / "skills" / "x"):
+        pytest.skip("当前环境无法创建目录链接")
+    packs.register_pack_skills()
+    nested = skills.load_skill("nested-z")          # 兜底：嵌套组快照
+    flat = skills.load_skill("flat-z")             # 兜底：平铺组快照
+    assert nested is not None and "嵌套技能" in nested
+    assert flat is not None and "平铺技能" in flat
+    idx = {s["name"] for s in skills.list_skills()}
+    assert idx == {"nested-z", "flat-z"}            # 串包时两者会解析成同名

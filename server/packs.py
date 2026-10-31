@@ -71,9 +71,10 @@ def _packs_dir() -> Path:
     return d
 
 
-def _parse_pack(pack_dir: Path) -> dict:
-    """解析并校验单个包的 pack.yaml。返回 PackInfo dict。"""
-    info = {
+def _new_pack_info(pack_dir: Path) -> dict:
+    """_parse_pack 的初始骨架；v0.17.36 R9：扫描异常兜底条目复用同一形状
+    （保证下游 list_packs / enabled_packs / packs_signature 消费的键完整）。"""
+    return {
         "name": pack_dir.name,
         "version": "",
         "description": "",
@@ -81,11 +82,21 @@ def _parse_pack(pack_dir: Path) -> dict:
         "error": "",
         "tools": [],
         "skills": [],
+        # v0.17.36 R8（复验报告）：接受时物化的 SKILL.md 内容快照（键 =
+        # 解析后技能目录真实路径；评审 A2：同 basename 的嵌套别名与真实
+        # 技能不串包）——索引/加载只读快照，检查与读取间的换链窗口由此
+        # 闭合（内容变化经签名检测后整体替换）
+        "skill_texts": {},
         "prompt": "",
         "env": {},           # 包级环境变量默认值（pack.yaml 的 env 段）
         "platform": False,   # 平台包：跨领域通用能力，始终加载、运行时不可禁用
         "dir": pack_dir,
     }
+
+
+def _parse_pack(pack_dir: Path) -> dict:
+    """解析并校验单个包的 pack.yaml。返回 PackInfo dict。"""
+    info = _new_pack_info(pack_dir)
     manifest = pack_dir / "pack.yaml"
     if not manifest.is_file():
         info["status"] = "error"
@@ -270,6 +281,13 @@ def _parse_pack(pack_dir: Path) -> dict:
         else:
             skill_dirs.add(str(p))
             info["skills"].append(p)
+            # v0.17.36 R8（复验报告）：接受瞬间单次读取 SKILL.md 物化快照，
+            # 随 info 传递到注册——索引/加载此后不再访问磁盘，检查与读取
+            # 之间的换链窗口闭合（读取紧贴四重校验，之后任何磁盘变化必被
+            # 签名检测捕获并经重建整体替换）。键 = 解析后真实路径（评审
+            # A2：嵌套别名与真实技能同 basename 时裸名键会串包覆盖）
+            info["skill_texts"][str(p)] = leaf.read_text(
+                encoding="utf-8", errors="replace")
     prompt_rel = data.get("prompt")
     if prompt_rel:
         p = _resolve_in_pack(pack_dir, prompt_rel, "提示词", name)
@@ -321,6 +339,17 @@ def _resolve_in_pack(pack_dir: Path, rel, kind: str, name: str) -> Path | None:
     if pack_dir.resolve() not in p.parents:
         print(f"[packs] {name}: {kind}路径越界（不在包目录内），跳过: {rel}")
         return None
+    if kind == "技能" and (pack_dir / "skills").resolve() not in p.parents:
+        # v0.17.36 R7（复验报告）：目录链接指向包内其他位置（hidden/、
+        # tools/ 等）时，resolve 后仍在包根内可过上面的包根校验，但
+        # POSIX rglob 不跟随目录符号链接 → 链接目标内容不进 packsign
+        # HMAC 载荷，形成「技能可加载且包 signed」的签名盲区。严格布局
+        # 方案（报告修复要求 1+3）：技能目录解析后必须仍位于解析后的
+        # <pack>/skills/ 树内，包内其他目录的链接一律拒收（junction 与
+        # symlink 同形拒绝）；签名/热检测/索引/加载四集合由此保持同一。
+        print(f"[packs] {name}: 技能目录解析后不在 skills 树内"
+              f"（包内目录链接），跳过: {rel}")
+        return None
     return p
 
 
@@ -340,7 +369,19 @@ def scan_packs() -> list[dict]:
         result = []
         for sub in sorted(_packs_dir().iterdir()):
             if sub.is_dir() and not sub.name.startswith((".", "_")):
-                result.append(_parse_pack(sub))
+                try:
+                    result.append(_parse_pack(sub))
+                except (OSError, RuntimeError) as e:
+                    # v0.17.36 R9（复验报告）：包根/资源路径 resolve 或读取
+                    # 遇链接循环（RuntimeError，含 RecursionError——Windows
+                    # junction 环深层递归形态）等异常 → 该包 fail-closed 转
+                    # error 态，健康包继续扫描，不得中断启动/热重载整条
+                    # 链路（报告修复要求 2：同步收口扫描入口）
+                    info = _new_pack_info(sub)
+                    info["status"] = "error"
+                    info["error"] = f"包扫描异常（链接循环/IO？）: {type(e).__name__}: {e}"
+                    print(f"[packs] {sub.name}: {info['error']}")
+                    result.append(info)
         _mark_shared_kb_tool_conflicts(result)
         _scan_cache = result
     return list(_scan_cache)
@@ -645,12 +686,19 @@ def register_pack_skills() -> None:
     for pack in enabled_packs():
         if not pack["skills"]:
             continue
-        by_parent: dict[Path, set[str]] = {}
+        by_parent: dict[Path, list[Path]] = {}
         for s in pack["skills"]:
-            by_parent.setdefault(s.parent, set()).add(s.name)
-        for parent, names in by_parent.items():
-            skills.register_extra_dir(parent, source=f"pack:{pack['name']}",
-                                      allowed=names, root=pack["dir"])
+            by_parent.setdefault(s.parent, []).append(s)
+        for parent, dirs in by_parent.items():
+            # v0.17.36 R8：注册同时传递该父目录下的内容快照——按真实路径在
+            # 包级 skill_texts 取数（评审 A2：真实路径键唯一，同 basename 的
+            # 嵌套别名与真实技能不串包），组内再以目录名为键（同一父目录内
+            # 唯一）。缺失键取 None → 服务端按无快照 fail-closed 拒绝
+            texts = {s.name: pack.get("skill_texts", {}).get(str(s))
+                    for s in dirs}
+            skills.register_extra_dir(
+                parent, source=f"pack:{pack['name']}",
+                allowed={s.name for s in dirs}, root=pack["dir"], texts=texts)
 
 
 def _file_sig(p: Path) -> str:
@@ -683,22 +731,31 @@ def packs_signature() -> tuple:
     「缓存认为未变、强制重扫已 invalid」的信任状态不一致。读失败 '?'
     兜底保留（_file_sig）：异常状态的变化同样应触发重扫。
     v0.17.34 AC2 载荷补挂载技能目录全量文件、v0.17.33 mtime→内容哈希的
-    决策沿用（双层互备口径不变）。"""
+    决策沿用（双层互备口径不变）。
+    v0.17.36 R9（复验报告）：每包条目构建包一层 (OSError, RuntimeError)
+    捕获——包根/遍历遇链接循环（RuntimeError，含 RecursionError）→ 生成
+    可比较的异常哨兵条目参与比较：不上抛（每轮对话开头的热检测不得
+    中断）、健康包条目不受影响；哨兵随异常变化、故障恢复后条目回归
+    正常形态，差异触发重扫重验、缓存经重建自愈（报告修复要求 1+3，
+    异常结果不得缓存为永久可信）。"""
     sig = []
     for pack in scan_packs():
-        hs = []
-        root = pack["dir"].resolve()
-        manifest = pack["dir"] / "pack.yaml"
-        if manifest.is_file():
-            hs.append(("pack.yaml", _file_sig(manifest)))
-        for p in pack["tools"]:
-            hs.append((_rel_key(p, root), _file_sig(p)))
-        for sdir in pack["skills"]:
-            for p in sorted(sdir.rglob("*")):
-                if p.is_file():
-                    hs.append((_rel_key(p, root), _file_sig(p)))
-        if pack["prompt"] and Path(pack["prompt"]).is_file():
-            hs.append(("prompt.md", _file_sig(Path(pack["prompt"]))))
+        try:
+            root = pack["dir"].resolve()
+            hs = []
+            manifest = pack["dir"] / "pack.yaml"
+            if manifest.is_file():
+                hs.append(("pack.yaml", _file_sig(manifest)))
+            for p in pack["tools"]:
+                hs.append((_rel_key(p, root), _file_sig(p)))
+            for sdir in pack["skills"]:
+                for p in sorted(sdir.rglob("*")):
+                    if p.is_file():
+                        hs.append((_rel_key(p, root), _file_sig(p)))
+            if pack["prompt"] and Path(pack["prompt"]).is_file():
+                hs.append(("prompt.md", _file_sig(Path(pack["prompt"]))))
+        except (OSError, RuntimeError) as e:
+            hs = [(f"__error__:{type(e).__name__}", str(e)[:200])]
         sig.append((pack["name"], tuple(hs)))
     return (tuple(sig), tuple(sorted(_disabled)))
 
