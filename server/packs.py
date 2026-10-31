@@ -630,10 +630,27 @@ def prompt_fragments(role: str | None = None,
 
 
 def register_pack_skills() -> None:
-    """把全部启用包的 skills/ 子目录注册进全局技能索引。"""
+    """把全部启用包的技能目录注册进全局技能索引。
+    v0.17.35 R4（复验报告）：注册父目录时附「已验证接受的具体技能目录名
+    集合」（_parse_pack 已完成规范路径/resolve 包含/叶子包含/去重四重
+    校验的 info["skills"]）与包根目录——索引/加载/签名三入口统一按这份
+    集合过滤（skills._skill_entry_ok），未声明或被解析拒绝的兄弟技能
+    不再经父目录进入任何入口。
+    评审 C5：按真实父目录分组注册——解析期 resolve 可因包内链接使声明
+    技能的父目录偏离 <pack>/skills（如 skills/x → ../tools），原
+    skills[0].parent 的「共同父目录」前提被打破时会静默只注册第一个
+    技能的父目录、其余合法技能陪葬（三口不一致）；逐父目录注册后畸形
+    者自身仍被 allowed 过滤拒收（fail-closed）。正常包全部技能共居
+    同一父目录，行为不变。"""
     for pack in enabled_packs():
-        for skill_dir in pack["skills"]:
-            skills.register_extra_dir(skill_dir.parent, source=f"pack:{pack['name']}")
+        if not pack["skills"]:
+            continue
+        by_parent: dict[Path, set[str]] = {}
+        for s in pack["skills"]:
+            by_parent.setdefault(s.parent, set()).add(s.name)
+        for parent, names in by_parent.items():
+            skills.register_extra_dir(parent, source=f"pack:{pack['name']}",
+                                      allowed=names, root=pack["dir"])
 
 
 def _file_sig(p: Path) -> str:
@@ -645,29 +662,43 @@ def _file_sig(p: Path) -> str:
         return "?"
 
 
+def _rel_key(p: Path, root: Path) -> str:
+    """签名条目键（包目录规范化相对路径，与 packsign HMAC 载荷同键）。
+    relative_to 兜底（评审 C2）：扫描缓存填充后包目录（或其祖先）若被
+    换成指向别处的链接，缓存条目路径与现算包根前缀分叉 → ValueError
+    上抛会炸掉每轮对话开头的热检测且缓存永不失效——退化为绝对路径键
+    继续参与比较，键形态变化即触发重扫重验，缓存经重建自愈。"""
+    try:
+        return p.relative_to(root).as_posix()
+    except ValueError:
+        return str(p)
+
+
 def packs_signature() -> tuple:
-    """包目录签名（清单/工具/技能/提示词的内容哈希 + 运行时禁用集合），用于热重载检测。
-    v0.17.33：mtime 改内容哈希——复验实测『篡改内容 + 还原 mtime』可完全
-    绕过检测（不重扫不重验签，SEC-4 信任缺口复现）；与 custom_tools.signature
-    同口径。清单/工具/提示词均为小文件，每轮对话一次检测开销可忽略。
-    v0.17.34 AC2：载荷补挂载技能目录全量文件（对齐 packsign 的 skills/**
-    口径）——包级篡改 SKILL.md（含还原 mtime）触发重扫重验；与 AC1 的
-    技能层内容哈希双层互备（包被禁用或仅技能附属文件被篡改时，包级
-    签名仍是防线）。"""
+    """包目录签名（清单/工具/技能/提示词 + 运行时禁用集合），用于热重载检测。
+    v0.17.35 R6（复验报告）：条目统一「规范化相对路径 + 内容哈希」二元组，
+    键基准 = 包目录（pack.yaml / tools/<文件名>.py / skills/<目录>/… /
+    prompt.md），与 packsign HMAC 载荷同键——附属文件纯重命名（内容不变，
+    如 references/a.md→b.md）也触发热检测，跨目录交换位置同样可检，消除
+    「缓存认为未变、强制重扫已 invalid」的信任状态不一致。读失败 '?'
+    兜底保留（_file_sig）：异常状态的变化同样应触发重扫。
+    v0.17.34 AC2 载荷补挂载技能目录全量文件、v0.17.33 mtime→内容哈希的
+    决策沿用（双层互备口径不变）。"""
     sig = []
     for pack in scan_packs():
         hs = []
+        root = pack["dir"].resolve()
         manifest = pack["dir"] / "pack.yaml"
         if manifest.is_file():
-            hs.append(_file_sig(manifest))
+            hs.append(("pack.yaml", _file_sig(manifest)))
         for p in pack["tools"]:
-            hs.append(_file_sig(p))
-        for sdir in pack["skills"]:               # v0.17.34 AC2
+            hs.append((_rel_key(p, root), _file_sig(p)))
+        for sdir in pack["skills"]:
             for p in sorted(sdir.rglob("*")):
                 if p.is_file():
-                    hs.append(_file_sig(p))
+                    hs.append((_rel_key(p, root), _file_sig(p)))
         if pack["prompt"] and Path(pack["prompt"]).is_file():
-            hs.append(_file_sig(Path(pack["prompt"])))
+            hs.append(("prompt.md", _file_sig(Path(pack["prompt"]))))
         sig.append((pack["name"], tuple(hs)))
     return (tuple(sig), tuple(sorted(_disabled)))
 
@@ -762,10 +793,21 @@ def create_pack(name: str, description: str, prompt: str = "",
     invalidate_scan_cache()
     signed_note = ""
     if packsign.is_enforced():
-        # 可信路径：内容已过人工审批，落盘即签名（强制模式下不签名无法加载）
-        sig = packsign.sign_pack_files(pack_dir)
-        signed_note = "\n已自动签名（可信路径：内容经审批后落盘）。" if sig else \
-            "\n⚠️ 强制模式已开启但签名失败（未配置 PACK_SIGNING_KEY？），包将不可用。"
+        # 可信路径：内容已过人工审批，落盘即签名（强制模式下不签名无法加载）。
+        # v0.17.35 R5：签名生成不静默跳过不可读文件（会签出覆盖不完整的
+        # 签名）——资源读取/编码异常明确报错，包未获签名。评审 C6：捕获
+        # 范围补 UnicodeEncodeError（Linux surrogateescape 文件名）。
+        # 评审 E2：is_enforced 与 compute 同读 PACK_SIGNING_KEY，「已强制
+        # 但未配密钥」分支不可达，三态清理为两态（失败统一走明确文案）。
+        try:
+            sig = packsign.sign_pack_files(pack_dir)
+        except (OSError, UnicodeEncodeError) as e:
+            print(f"[packs] {name}: 自动签名失败——包资源读取异常"
+                  f"（{type(e).__name__}），未写入签名")
+            sig = ""
+        signed_note = ("\n已自动签名（可信路径：内容经审批后落盘）。" if sig else
+                       "\n⚠️ 自动签名失败：包资源读取异常（文件被占用/权限"
+                       "不足？），包将不可用；请排查后用 sign_pack 重新签名。")
     return (f"领域包「{name}」已创建：packs/{name}\n包含：{caps}{signed_note}\n"
             "（无需重启，下一轮对话起挂载；可用 list_packs 查看，对话中说"
             "「禁用/启用该包」可即时切换能力边界）")
@@ -781,7 +823,17 @@ def sign_pack(name: str) -> str:
     pack_dir = _packs_dir() / name
     if not (pack_dir / "pack.yaml").is_file():
         return f"领域包「{name}」不存在或缺少 pack.yaml"
-    sig = packsign.sign_pack_files(pack_dir)
+    try:
+        sig = packsign.sign_pack_files(pack_dir)
+    except (OSError, UnicodeEncodeError) as e:
+        # v0.17.35 R5：签名生成遇资源读取/编码异常（评审 C6 补
+        # UnicodeEncodeError：Linux surrogateescape 文件名）→ 明确报错且
+        # 不写入任何签名（sign_pack_files 只在 compute 成功后才写
+        # manifest，天然无残缺签名）
+        print(f"[packs] 「{name}」签名生成失败：包资源读取异常"
+              f"（{type(e).__name__}），未写入签名")
+        return ("签名失败：包资源读取异常（文件被占用/权限不足？），"
+                "请排查后重试；未写入任何签名。")
     if not sig:
         return "签名失败：PACK_SIGNING_KEY 不可用"
     invalidate_scan_cache()

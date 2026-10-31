@@ -1,11 +1,13 @@
 """领域包注册中心：清单解析校验 / 启用白名单与运行时禁用 / 包脚手架创建 /
 工具挂载去重与 env 冲突告警 / 签名 / 删除。"""
 import os
+import sys
+from pathlib import Path
 
 import pytest
 import yaml
 
-from server import config, custom_tools, packs, packsign
+from server import config, custom_tools, packs, packsign, skills
 
 CORE = packs.CORE_VERSION
 
@@ -486,3 +488,260 @@ def test_review_skill_manifest_duplicate_entries_deduped(packs_dir, capsys):
     info = next(p for p in packs.scan_packs() if p["name"] == "dup-skills")
     assert [s.name for s in info["skills"]] == ["ok"]
     assert "重复声明" in capsys.readouterr().out
+
+
+# ---- v0.17.35 AC1-AC4：技能挂载同一集合 + 验签异常收口（复验报告 R4-R6）----
+
+def test_ac1_undeclared_sibling_skill_invisible(packs_dir):
+    """AC1/R4：清单只声明 good、磁盘另有未声明 bad/SKILL.md → bad 不得经
+    共同 skills/ 父目录进入任何入口——索引不可见、load_skill 返回 None、
+    不进技能层签名（报告最小复现场景，不依赖符号链接即可复现）。"""
+    _mk_pack(packs_dir, "decl-only", _valid_manifest("decl-only",
+              skills=["skills/good"]),
+             {"skills/good/SKILL.md": "---\nname: good\n---\n已声明技能",
+              "skills/bad/SKILL.md": "---\nname: bad\n---\n未声明技能"})
+    packs.register_pack_skills()
+    idx = {s["name"] for s in skills.list_skills()}
+    assert "good" in idx                                   # 声明技能照常可用
+    assert "bad" not in idx                                # 未声明兄弟不入索引
+    assert skills.load_skill("good") is not None
+    assert skills.load_skill("bad") is None                # 未声明兄弟不可加载
+    sig_names = {rel.split("/")[0] for rel, _ in skills.signature()}
+    assert sig_names == {"good"}                           # 三口同一份已验证集合
+
+
+def test_ac1_rejected_sibling_not_remounted_via_parent(packs_dir, tmp_path):
+    """AC1/R4：同时声明 good 与 hijack，但 hijack 因 SKILL.md 符号链接指向
+    包外被解析期拒绝 → good 正常可用，hijack 不得经父目录注册重新进入
+    索引/加载（报告 R4 测试要求 2）。环境无法创建符号链接时跳过（CI 恒跑，
+    沿用 v0.17.34 AC4 先例）。"""
+    _mk_pack(packs_dir, "mix-link", _valid_manifest("mix-link",
+              skills=["skills/good", "skills/hijack"]),
+             {"skills/good/SKILL.md": "---\nname: good\n---\n包内技能"})
+    outside = tmp_path / "outside_skill"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("---\nname: hijack\n---\n包外越界技能",
+                                      encoding="utf-8")
+    hijack_dir = packs_dir / "mix-link" / "skills" / "hijack"
+    hijack_dir.mkdir(parents=True)
+    try:
+        os.symlink(outside / "SKILL.md", hijack_dir / "SKILL.md")
+    except OSError:
+        pytest.skip("当前环境无法创建符号链接（Windows 需开发者模式/管理员）")
+    info = next(p for p in packs.scan_packs() if p["name"] == "mix-link")
+    assert [s.name for s in info["skills"]] == ["good"]     # 越界叶子解析期已拒
+    packs.register_pack_skills()
+    idx = {s["name"] for s in skills.list_skills()}
+    assert idx == {"good"}                                  # 被拒兄弟不得经父目录复活
+    assert skills.load_skill("good") is not None
+    assert skills.load_skill("hijack") is None
+
+
+def test_ac2_loadable_set_matches_verified_set(packs_dir):
+    """AC2/R4：索引 == 可加载 == 技能层签名载荷，三口同一份「已验证接受的
+    具体技能集合」；多个明确声明的正常技能全部可用（兼容回归，报告 R4
+    测试要求 3）；frontmatter 名与目录名不同的声明技能经兜底扫描仍可加载。"""
+    _mk_pack(packs_dir, "multi", _valid_manifest("multi",
+              skills=["skills/one", "skills/two", "skills/alias"]),
+             {"skills/one/SKILL.md": "---\nname: one\n---\n技能一",
+              "skills/two/SKILL.md": "---\nname: two\n---\n技能二",
+              "skills/alias/SKILL.md": "---\nname: aliased-name\n---\n别名技能",
+              "skills/ghost/SKILL.md": "---\nname: ghost\n---\n未声明"})
+    packs.register_pack_skills()
+    idx = {s["name"] for s in skills.list_skills()}
+    assert idx == {"one", "two", "aliased-name"}
+    assert all(skills.load_skill(n) for n in ("one", "two", "alias"))
+    assert skills.load_skill("aliased-name") is not None   # frontmatter 名兜底可加载
+    assert skills.load_skill("ghost") is None
+    sig_names = {rel.split("/")[0] for rel, _ in skills.signature()}
+    assert sig_names == {"one", "two", "alias"}             # 签名载荷同一集合
+
+
+def test_ac3_scan_survives_resource_read_failure(packs_dir, monkeypatch, capsys):
+    """AC3/R5：签名资源读取 OSError 不中断整个扫描——相关包 fail-closed 转
+    invalid/unavailable，其他正常包不受影响（复验实测此前 verify 直接上抛
+    OSError 炸掉 scan_packs，启动/热重载整条链路跟着失败）。"""
+    monkeypatch.setattr(config, "PACK_SIGNING_KEY", "testkey")
+    _mk_pack(packs_dir, "sick", _valid_manifest("sick", tools=["tools/greet.py"]),
+             {"tools/greet.py": TOOL_SRC})
+    _mk_pack(packs_dir, "healthy", _valid_manifest("healthy"))
+    packsign.sign_pack_files(packs_dir / "sick")
+    packsign.sign_pack_files(packs_dir / "healthy")
+    real_read = Path.read_bytes
+
+    def _boom(self):
+        if "sick" in self.parts and self.name == "greet.py":
+            raise OSError("injected read failure")
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+    infos = {p["name"]: p for p in packs.scan_packs()}      # 不抛异常
+    assert infos["sick"]["trust"] == "invalid"              # 读失败 → 验签失败
+    assert infos["sick"]["status"] == "unavailable"
+    assert "签名校验失败" in infos["sick"]["error"]
+    assert infos["healthy"]["trust"] == "signed"            # 其他包不受影响
+    assert infos["healthy"]["status"] == "ok"
+    assert "读取失败" in capsys.readouterr().out            # 告警可定位
+
+
+def test_ac3_sign_failure_explicit_not_partial(packs_dir, monkeypatch):
+    """AC3/R5：签名生成路径遇不可读资源 → 明确报错且不写入任何签名——
+    不得静默跳过不可读文件签出覆盖不完整的签名（报告 R5 修复要求 2）。"""
+    monkeypatch.setattr(config, "PACK_SIGNING_KEY", "testkey")
+    _mk_pack(packs_dir, "unreadable", _valid_manifest("unreadable",
+              tools=["tools/greet.py"]), {"tools/greet.py": TOOL_SRC})
+    real_read = Path.read_bytes
+
+    def _boom(self):
+        if any(part.startswith("unreadable") for part in self.parts) \
+                and self.name == "greet.py":
+            raise OSError("injected read failure")
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+    r = packs.sign_pack("unreadable")                       # 工具入口：明确报错
+    assert "签名失败" in r and "读取异常" in r
+    text = (packs_dir / "unreadable" / "pack.yaml").read_text(encoding="utf-8")
+    assert "signature:" not in text                         # 未写入任何签名
+    r2 = packs.create_pack("unreadable-b", "描述",
+                           tool_name="greet", tool_code=TOOL_SRC)
+    assert "已创建" in r2 and "自动签名失败" in r2          # 落盘成功、签名明确失败
+    text2 = (packs_dir / "unreadable-b" / "pack.yaml").read_text(encoding="utf-8")
+    assert "signature:" not in text2
+
+
+def test_ac4_skill_reference_rename_changes_hot_signature(packs_dir):
+    """AC4/R6：技能附属文件纯改名（references/a.md→b.md，内容不变）→
+    包级热检测签名必须变化（复验实测 reference_rename_hot_signature_
+    unchanged=True：条目只含内容哈希漏检，但 packsign HMAC 载荷含路径，
+    强制重扫已 invalid——缓存与磁盘信任状态不一致）。"""
+    _mk_pack(packs_dir, "rename-pack", _valid_manifest("rename-pack",
+              skills=["skills/demo"]),
+             {"skills/demo/SKILL.md": "---\nname: demo\n---\n指令",
+              "skills/demo/references/a.md": "参考资料内容不变"})
+    sig1 = packs.packs_signature()
+    f = packs_dir / "rename-pack" / "skills" / "demo" / "references" / "a.md"
+    f.rename(f.with_name("b.md"))
+    assert packs.packs_signature() != sig1                  # 纯改名必须触发热检测
+
+
+def test_ac4_rename_triggers_reverification(packs_dir, monkeypatch):
+    """AC4/R6 端到端：强制验签下附属文件纯改名 → 热检测触发重扫重验 →
+    HMAC 载荷含路径 → trust=invalid 整包剔除（fail-closed），缓存与磁盘
+    信任状态不再不一致。"""
+    from server import agent
+    monkeypatch.setattr(config, "PACK_SIGNING_KEY", "testkey")
+    _mk_pack(packs_dir, "sig-rename", _valid_manifest("sig-rename",
+              skills=["skills/demo"]),
+             {"skills/demo/SKILL.md": "---\nname: demo\n---\n指令",
+              "skills/demo/references/a.md": "参考资料"})
+    packsign.sign_pack_files(packs_dir / "sig-rename")
+    agent._rebuild_graph()
+    # 稳定检测基线：图重建先捕获签名后注册包技能目录，首建后下一轮比较必然
+    # 多一次重建；先吸收该时序差异，使后续检测只对真实改动敏感
+    # （同 test_ac2_signed_pack_skill_tamper_invalidates_trust 先例）
+    agent.maybe_reload_custom_tools()
+    f = packs_dir / "sig-rename" / "skills" / "demo" / "references" / "a.md"
+    f.rename(f.with_name("b.md"))
+    agent.maybe_reload_custom_tools()
+    p = next(p for p in packs.scan_packs() if p["name"] == "sig-rename")
+    assert p["trust"] == "invalid"                           # 重扫后按路径验签失败
+    assert p["status"] == "unavailable"
+    assert "签名校验失败" in p["error"]
+
+
+# ---- v0.17.35 评审修复回归（TRAE-code-review C2/C5/C6）----
+
+def _mk_link(target: Path, link: Path) -> bool:
+    """构造目录链接：优先 os.symlink（Linux / Windows 开发者模式），
+    Windows 回退 junction（mklink /J 无需管理员）；均不可用返回 False
+    （调用方 skip，CI/Linux symlink 恒可用，沿用 v0.17.34 AC4 先例）。"""
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        return True
+    except OSError:
+        pass
+    if sys.platform == "win32":
+        import subprocess
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                           capture_output=True)
+        return r.returncode == 0
+    return False
+
+
+def test_review_grouped_parent_registration_survives_link_split(packs_dir):
+    """评审 C5：声明技能 skills/x 是指向包内 tools/ 的目录链接，
+    skills/y 为正常声明 → 按真实父目录分组注册后 y 必须照常可用（不得
+    因 skills[0].parent 陪葬）。x 的可见性随链接形态而异且都安全：
+    真 symlink 被 resolve 穿透（父目录=包根）→ allowed 过滤 fail-closed
+    拒收；Windows junction 不被 resolve 穿透（父目录仍 skills/）→ 经
+    allowed 放行但读到的是包内已签名内容——故断言锚定形态无关不变量：
+    y 不陪葬、索引 == 技能层签名（三口一致）、x 不越界读（链接环境
+    不可用时 skip，CI 恒跑）。"""
+    _mk_pack(packs_dir, "split-pack",
+             _valid_manifest("split-pack", skills=["skills/x", "skills/y"]),
+             {"skills/y/SKILL.md": "---\nname: y\n---\n正常技能"})
+    tools_dir = packs_dir / "split-pack" / "tools"
+    tools_dir.mkdir()
+    (tools_dir / "SKILL.md").write_text("---\nname: x\n---\n链接技能",
+                                         encoding="utf-8")
+    if not _mk_link(tools_dir, packs_dir / "split-pack" / "skills" / "x"):
+        pytest.skip("当前环境无法创建目录链接")
+    info = next(p for p in packs.scan_packs() if p["name"] == "split-pack")
+    assert len(info["skills"]) == 2                  # 链接指向包内，解析期双接受
+    packs.register_pack_skills()
+    idx = {s["name"] for s in skills.list_skills()}
+    assert "y" in idx                                # 合法声明技能不得陪葬
+    assert skills.load_skill("y") is not None
+    x_content = skills.load_skill("x")
+    assert x_content is None or "链接技能" in x_content   # 可见时必为包内内容，不越界
+    # 三口一致（物理文件层面）：resolve 穿透链接后 allowed 键为目标目录名
+    # （tools），x 实际挂载自 tools/SKILL.md（frontmatter 名 x），链接拼接
+    # 形态 x/SKILL.md 被拒于三口之外——可加载技能的物理源文件必在技能层
+    # 签名载荷中（idx 名为 frontmatter 名、签名键为目录名，口径与 AC2 先例
+    # 一致，不要求字面相等）
+    sig_rels = {rel for rel, _ in skills.signature()}
+    assert "y/SKILL.md" in sig_rels
+    assert x_content is None or "tools/SKILL.md" in sig_rels
+
+
+def test_review_signature_survives_relative_to_mismatch(packs_dir, monkeypatch):
+    """评审 C2：扫描缓存填充后包目录（或其祖先）被换成指向别处的链接时，
+    缓存条目路径与现算包根前缀分叉（relative_to ValueError）→
+    packs_signature 不得上抛（否则炸掉每轮对话开头热检测且缓存永不
+    失效），条目退化为绝对路径键继续参与比较、差异触发重扫重验自愈。"""
+    _mk_pack(packs_dir, "rel-pack",
+             _valid_manifest("rel-pack", tools=["tools/greet.py"]),
+             {"tools/greet.py": TOOL_SRC})
+    packs.packs_signature()                          # 先正常填充扫描缓存
+    real_rel = Path.relative_to
+
+    def _mismatch(self, *other):
+        if any(part == "rel-pack" for part in self.parts):
+            raise ValueError("injected: not in the subpath")
+        return real_rel(self, *other)
+
+    monkeypatch.setattr(Path, "relative_to", _mismatch)
+    sig = packs.packs_signature()                    # 不抛异常
+    entries = dict(sig[0][0][1])                     # 第一个包的条目字典化
+    tool = packs_dir / "rel-pack" / "tools" / "greet.py"
+    assert str(tool) in entries                      # ValueError 条目退化绝对路径键
+    assert "pack.yaml" in entries                    # 固定键不受影响
+
+
+def test_review_sign_pack_survives_encode_error(packs_dir, monkeypatch):
+    """评审 C6：签名生成路径遇 UnicodeEncodeError（Linux surrogateescape
+    文件名使载荷 encode 失败）与 OSError 同口径——明确报错、不写入任何
+    签名（调用方捕获元组扩展，Windows 同文件读取为 PermissionError 已兜底）。"""
+    monkeypatch.setattr(config, "PACK_SIGNING_KEY", "testkey")
+    _mk_pack(packs_dir, "enc-pack", _valid_manifest("enc-pack"))
+
+    def _boom(d):
+        raise UnicodeEncodeError("utf-8", "\ud800", 0, 1,
+                                 "surrogates not allowed")
+
+    monkeypatch.setattr(packsign, "_payload", _boom)
+    r = packs.sign_pack("enc-pack")
+    assert "签名失败" in r and "未写入任何签名" in r
+    text = (packs_dir / "enc-pack" / "pack.yaml").read_text(encoding="utf-8")
+    assert "signature:" not in text

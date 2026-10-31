@@ -1,4 +1,6 @@
 """领域包可信签名：HMAC-SHA256 compute/verify 往返、篡改失效、幂等重签、信任状态四态。"""
+from pathlib import Path
+
 import pytest
 
 from server import config, packsign
@@ -93,3 +95,39 @@ def test_signature_covers_subdirs(key, pack_dir):
     sub = pack_dir / "tools" / "extra.py"
     sub.write_text("x = 1\n", encoding="utf-8")
     assert not packsign.verify(pack_dir, sig)
+
+
+def test_ac3_verify_read_failure_fail_closed(key, pack_dir, monkeypatch, capsys):
+    """AC3/R5：验签路径资源读取 OSError → 不上抛、判 False（fail-closed）
+    且告警可定位；trust_status 相应为 invalid；签名生成路径 compute 保持
+    严格上抛（不得静默跳过不可读文件签出覆盖不完整的签名）。"""
+    real_read = Path.read_bytes
+
+    def _boom(self):
+        if self.name == "greet.py":
+            raise OSError("injected read failure")
+        return real_read(self)
+
+    sig = packsign.compute(pack_dir)
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+    assert not packsign.verify(pack_dir, sig)              # 不抛异常，判无效
+    assert "读取失败" in capsys.readouterr().out            # 服务端告警可定位
+    assert packsign.trust_status(pack_dir, sig) == "invalid"
+    with pytest.raises(OSError):                            # 生成路径：明确报错
+        packsign.compute(pack_dir)
+
+
+def test_review_verify_survives_encode_error(key, pack_dir, monkeypatch, capsys):
+    """评审 C6：Linux surrogateescape 文件名（lone surrogate）使 _payload
+    的 rel.encode("utf-8") 抛 UnicodeEncodeError——verify 与 OSError 同
+    口径 fail-closed 判 False（不上抛炸掉 scan_packs），告警可定位。"""
+    sig = packsign.compute(pack_dir)
+
+    def _boom(d):
+        raise UnicodeEncodeError("utf-8", "\ud800", 0, 1,
+                                 "surrogates not allowed")
+
+    monkeypatch.setattr(packsign, "_payload", _boom)
+    assert not packsign.verify(pack_dir, sig)              # 不抛异常，判无效
+    assert "读取失败" in capsys.readouterr().out            # 异常类型入告警可定位
+    assert packsign.trust_status(pack_dir, sig) == "invalid"

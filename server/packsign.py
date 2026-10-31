@@ -77,10 +77,23 @@ def compute(pack_dir: Path, key: bytes | None = None) -> str | None:
 
 
 def verify(pack_dir: Path, signature: str, key: bytes | None = None) -> bool:
-    """校验签名与包当前内容是否一致（常数时间比较，防时序侧信道）。"""
+    """校验签名与包当前内容是否一致（常数时间比较，防时序侧信道）。
+    v0.17.35 R5（复验报告）：载荷读取/遍历 OSError 不再上抛中断整个扫描
+    ——fail-closed 判 False（该包即 invalid/unavailable，强制模式下整包
+    剔除），[packsign] 告警可定位；其他包不受影响。签名生成路径
+    （compute/sign_pack_files）保持严格上抛：绝不静默跳过不可读文件签出
+    覆盖不完整的签名。
+    评审 C6：捕获范围补 UnicodeEncodeError——Linux surrogateescape
+    文件名（lone surrogate）使 _payload 的 rel.encode("utf-8") 抛错，
+    同属「载荷构建失败」，与 OSError 同口径 fail-closed，不炸 scan_packs。"""
     if not signature or not signature.startswith(SIG_PREFIX):
         return False
-    expected = compute(pack_dir, key)
+    try:
+        expected = compute(pack_dir, key)
+    except (OSError, UnicodeEncodeError) as e:
+        print(f"[packsign] 包「{pack_dir.name}」签名载荷读取失败，按 invalid 处理"
+              f"（{type(e).__name__}）——请检查文件占用/权限")
+        return False
     if expected is None:
         return False
     return hmac.compare_digest(expected, signature)
