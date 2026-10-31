@@ -101,3 +101,49 @@ def test_ac1_chat_anonymous_legacy_session_allowed(api):
     r = api.post("/api/chat", headers=_hdr(tok),
                  json={"session_id": "s-legacy", "message": "继续"})
     assert r.status_code == 200
+
+
+# ---- v0.17.33 AC1：锁外检查后的并发窗口（复验实测）----
+
+def test_ac1_chat_race_window_second_check_rejects(api, monkeypatch):
+    """锁外检查放行后、进锁前归属被并发写入占据 → 锁内二次检查以 error
+    事件拒绝（已开流无法改 HTTP 码），劫持者不写入该会话。"""
+    from server import agent
+    _mk_user("alice")
+    tok_b = _login(api, _mk_user("mallory"))
+    real_lock = agent.session_lock
+
+    def _lock_with_injected_owner(sid):
+        if sid == "s-race":
+            # 模拟并发时序：mallory 锁外检查时会话为空（放行），进锁前
+            # alice 的并发首轮已写入并持有归属
+            sessions.append("s-race", "alice", "user", "并发首轮")
+        return real_lock(sid)
+
+    monkeypatch.setattr(agent, "session_lock", _lock_with_injected_owner)
+    r = api.post("/api/chat", headers=_hdr(tok_b),
+                 json={"session_id": "s-race", "message": "劫持"})
+    assert r.status_code == 200                    # SSE 已开流
+    assert '"type": "error"' in r.text             # 以 error 事件终止
+    assert "mallory" not in sessions.session_users("s-race")
+    assert "alice" in sessions.session_users("s-race")
+
+
+def test_ac1_chat_race_window_admin_global_view_allowed(api, monkeypatch):
+    """锁内二次检查复用 _chat_session_denied 全语义：admin 全局视图在并发
+    窗口下不被误拒（管理职责，可接入任意会话）。"""
+    from server import agent
+    _mk_user("alice")
+    tok_ad = _login(api, _mk_user("root2", role="admin"))
+    real_lock = agent.session_lock
+
+    def _lock_with_injected_owner(sid):
+        if sid == "s-race-ad":
+            sessions.append("s-race-ad", "alice", "user", "首轮")
+        return real_lock(sid)
+
+    monkeypatch.setattr(agent, "session_lock", _lock_with_injected_owner)
+    r = api.post("/api/chat", headers=_hdr(tok_ad),
+                 json={"session_id": "s-race-ad", "message": "管理员接入"})
+    assert r.status_code == 200
+    assert '"type": "error"' not in r.text

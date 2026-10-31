@@ -328,3 +328,58 @@ def test_ac4_hot_reload_reverifies_pack_signature(packs_dir, monkeypatch):
     assert p["status"] == "unavailable"
     assert "签名校验失败" in p["error"]
     assert "greet" not in agent.STATE.tool_names     # 篡改包工具不挂载
+
+
+# ---- v0.17.33 AC2/AC3：包路径边界 + 内容哈希检测（复验实测）----
+
+def test_ac2_pack_paths_confined_to_pack_dir(packs_dir, tmp_path):
+    """包清单越界路径不进包（fail-closed）：tools/skills/prompt 三入口的
+    ../ 与绝对路径——复验实测 ../outside.py 曾以 status=ok 被接受挂载。"""
+    # ../ 从包目录只弹一级：越界目标在 packs_dir 下（而非 packs_dir.parent），
+    # 文件必须真实存在，旧实现才会暴露「直接拼接即接受」的问题
+    parent = packs_dir
+    parent.mkdir(exist_ok=True)
+    (parent / "outside_tool.py").write_text(
+        "def outside(): pass", encoding="utf-8")
+    (parent / "outside_prompt.md").write_text("越界提示词", encoding="utf-8")
+    esc_skill = parent / "escape_skill"
+    esc_skill.mkdir(exist_ok=True)
+    (esc_skill / "SKILL.md").write_text("# 越界技能", encoding="utf-8")
+    abs_tool = tmp_path / "abs_tool.py"
+    abs_tool.write_text("def abs_tool(): pass", encoding="utf-8")
+
+    m = _valid_manifest("p1",
+                        tools=["../outside_tool.py", str(abs_tool),
+                               "tools/greet.py"],
+                        skills=["../escape_skill"],
+                        prompt="../outside_prompt.md")
+    _mk_pack(packs_dir, "p1", m, {"tools/greet.py": TOOL_SRC})
+    # ../escape_skill 目录会一并被 scan 视为无效包，按名称定位目标包
+    info = next(p for p in packs.scan_packs() if p["name"] == "p1")
+    assert [p.stem for p in info["tools"]] == ["greet"]   # 越界项全部拒收
+    assert info["skills"] == []                          # 越界技能拒收
+    assert not info["prompt"]                             # 越界提示词拒收
+
+
+def test_ac3_pack_tamper_with_restored_mtime_detected(packs_dir, monkeypatch):
+    """篡改包工具内容并还原 mtime_ns（复验实测的绕过手法）→ 内容哈希签名
+    仍检测到变更 → 热重载触发重扫重验 → 强制验签下包被剔除（fail-closed）。"""
+    import os
+    from server import agent
+    monkeypatch.setattr(config, "PACK_SIGNING_KEY", "testkey")
+    _mk_pack(packs_dir, "sig-pack2", _valid_manifest("sig-pack2",
+              tools=["tools/greet.py"]), {"tools/greet.py": TOOL_SRC})
+    packsign.sign_pack_files(packs_dir / "sig-pack2")
+    agent._rebuild_graph()
+    assert "greet" in agent.STATE.tool_names
+    tf = packs_dir / "sig-pack2" / "tools" / "greet.py"
+    st = tf.stat()
+    tf.write_text("def greet(name: str) -> str:\n    return 'tampered'\n",
+                  encoding="utf-8")
+    os.utime(tf, ns=(st.st_atime_ns, st.st_mtime_ns))    # 还原 mtime
+    assert tf.stat().st_mtime_ns == st.st_mtime_ns
+    agent.maybe_reload_custom_tools()
+    p = packs.scan_packs()[0]
+    assert p["trust"] == "invalid"                       # mtime 未变也重验签
+    assert p["status"] == "unavailable"
+    assert "greet" not in agent.STATE.tool_names

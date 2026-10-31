@@ -15,6 +15,7 @@
   Q2：重启不丢）；ENABLED_PACKS 环境变量保持部署层白名单语义（两者都通过才启用）
 - 工具名不做命名空间（LangChain 工具名不允许点号），重名冲突 → 跳过并告警
 """
+import hashlib
 import os
 import re
 import sqlite3
@@ -240,8 +241,8 @@ def _parse_pack(pack_dir: Path) -> dict:
     # 清单重复条目不应进入跨包冲突判定造成误报，v0.17.27）
     tool_stems: set[str] = set()
     for rel in data.get("tools") or []:
-        p = pack_dir / str(rel)
-        if p.is_file() and p.suffix == ".py":
+        p = _resolve_in_pack(pack_dir, rel, "工具", name)
+        if p is not None and p.is_file() and p.suffix == ".py":
             if p.stem in tool_stems:
                 print(f"[packs] {name}: 工具名重复，跳过: {rel}")
                 continue
@@ -250,19 +251,31 @@ def _parse_pack(pack_dir: Path) -> dict:
         else:
             print(f"[packs] {name}: 工具文件不存在，跳过: {rel}")
     for rel in data.get("skills") or []:
-        p = pack_dir / str(rel)
-        if (p / "SKILL.md").is_file():
+        p = _resolve_in_pack(pack_dir, rel, "技能", name)
+        if p is not None and (p / "SKILL.md").is_file():
             info["skills"].append(p)
-        else:
+        elif p is not None:
             print(f"[packs] {name}: 技能目录缺少 SKILL.md，跳过: {rel}")
     prompt_rel = data.get("prompt")
     if prompt_rel:
-        p = pack_dir / str(prompt_rel)
-        if p.is_file():
+        p = _resolve_in_pack(pack_dir, prompt_rel, "提示词", name)
+        if p is not None and p.is_file():
             info["prompt"] = str(p)
         else:
             print(f"[packs] {name}: 提示词文件不存在，跳过: {prompt_rel}")
     return info
+
+
+def _resolve_in_pack(pack_dir: Path, rel, kind: str, name: str) -> Path | None:
+    """包资源路径解析（v0.17.33 AC2，复验 R2）：manifest 引用必须是包目录
+    内的相对路径——resolve 后做包含关系校验，越界（../、绝对路径、符号
+    链接出界）一律跳过并告警（fail-closed）。此前直接拼接 + is_file 检查
+    存在性，../outside.py 与绝对路径会以 status=ok 被接受挂载。"""
+    p = (pack_dir / str(rel)).resolve()
+    if pack_dir.resolve() not in p.parents:
+        print(f"[packs] {name}: {kind}路径越界（不在包目录内），跳过: {rel}")
+        return None
+    return p
 
 
 def invalidate_scan_cache() -> None:
@@ -577,21 +590,31 @@ def register_pack_skills() -> None:
             skills.register_extra_dir(skill_dir.parent, source=f"pack:{pack['name']}")
 
 
+def _file_sig(p: Path) -> str:
+    """单文件内容哈希签名；读失败（权限/占用）返回 '?' 参与签名——异常
+    状态的变化同样应触发重扫（检测层 fail-open 等于没有检测）。"""
+    try:
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+    except OSError:
+        return "?"
+
+
 def packs_signature() -> tuple:
-    """包目录签名（清单/工具/提示词的修改时间纳秒 + 运行时禁用集合），用于热重载检测。
-    纳秒精度（st_mtime_ns，全项目评审问题6）：与 skills/custom_tools 签名约定
-    一致——秒级 mtime 在快速连续更新时不变，会导致图不重建、包变更不生效。"""
+    """包目录签名（清单/工具/提示词的内容哈希 + 运行时禁用集合），用于热重载检测。
+    v0.17.33：mtime 改内容哈希——复验实测『篡改内容 + 还原 mtime』可完全
+    绕过检测（不重扫不重验签，SEC-4 信任缺口复现）；与 custom_tools.signature
+    同口径。清单/工具/提示词均为小文件，每轮对话一次检测开销可忽略。"""
     sig = []
     for pack in scan_packs():
-        mtimes = []
+        hs = []
         manifest = pack["dir"] / "pack.yaml"
         if manifest.is_file():
-            mtimes.append(manifest.stat().st_mtime_ns)
+            hs.append(_file_sig(manifest))
         for p in pack["tools"]:
-            mtimes.append(p.stat().st_mtime_ns)
+            hs.append(_file_sig(p))
         if pack["prompt"] and Path(pack["prompt"]).is_file():
-            mtimes.append(Path(pack["prompt"]).stat().st_mtime_ns)
-        sig.append((pack["name"], tuple(mtimes)))
+            hs.append(_file_sig(Path(pack["prompt"])))
+        sig.append((pack["name"], tuple(hs)))
     return (tuple(sig), tuple(sorted(_disabled)))
 
 

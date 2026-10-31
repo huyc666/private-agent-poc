@@ -511,6 +511,15 @@ async def chat(req: ChatRequest, request: Request):
                 yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
                 return
             try:
+                # SEC-1（v0.17.33，复验 R1）：锁外首查存在并发窗口——两个
+                # 身份可在检查通过后、进锁前先后写入同一新会话（session_id
+                # 由客户端提供，非服务端生成）。取得锁与租约后、首次写入
+                # 前再查一次：并发场景下首轮归属此时已落库可判定；被拒以
+                # SSE error 事件终止（已开流，HTTP 状态码不可再改）。
+                if auth.enabled() and _chat_session_denied(
+                        request.state.user, session_id):
+                    yield f"data: {json.dumps({'type': 'error', 'content': '会话归属校验失败，已拒绝本次写入'}, ensure_ascii=False)}\n\n"
+                    return
                 # SQLite 写为同步调用，挪到线程池避免阻塞事件循环（v0.16.1）
                 await asyncio.to_thread(sessions.append, session_id, user_id,
                                         "user", req.message)

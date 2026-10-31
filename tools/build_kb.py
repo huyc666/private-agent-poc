@@ -25,6 +25,7 @@
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -295,20 +296,21 @@ def build(kb_dir: Path, embed_fn=_UNSET) -> None:
             print(f"WARNING：向量引擎不可用，本次仅建 BM25 索引（{type(e).__name__}）")
             vecs = None
 
-    # ---- 落库（SEC-7，v0.17.32：临时库构建 → 完整性校验 → 原子替换）----
+    # ---- 落库（SEC-7；v0.17.32 临时库构建 + v0.17.33 无中断窗口替换）----
     # 旧实现先 unlink 现役库再重建：构建中途异常旧索引即丢失，重建期间查询
     # 也会打到半成品库。现在全部写入 kb.db.tmp；PRAGMA quick_check 通过后，
-    # 旧库转存 kb.db.bak（只留一版，可回滚；转存失败降级为不保留），最后
-    # 原子替换为现役库。失败路径（评审修复 C4/C8）：连接强制关闭防句柄锁住
-    # tmp（unlink 抛 PermissionError 会掩盖原始异常、残留毒化下次构建）；
-    # 转存成功而替换失败时回滚 bak，兑现「任何失败现役库保持完好」。
+    # 旧库以 copy 生成 kb.db.bak 备份（只留一版；**现役库保持原位、全程
+    # 可查**——v0.17.33 复验 R5：此前 mv 转存在后续替换前存在中断窗口，
+    # 进程被 kill 时 kb.db 缺失只剩 bak），最后单次 os.replace 原子替换
+    # 为现役库——任一时刻中断，旧库或新库必有一个在位，无需回滚分支。
+    # 失败路径（评审修复 C4）：连接强制关闭防句柄锁住 tmp（unlink 抛
+    # PermissionError 会掩盖原始异常、残留毒化下次构建）。
     import time
 
     db_path = kb_dir / "kb.db"
     tmp_path = kb_dir / "kb.db.tmp"
     bak_path = kb_dir / "kb.db.bak"
     tmp_path.unlink(missing_ok=True)   # C4：清历史崩溃残留，防 CREATE TABLE 撞表
-    moved_to_bak = False               # C8：替换失败时判定是否需要回滚
     try:
         conn = sqlite3.connect(str(tmp_path))
         try:
@@ -345,30 +347,21 @@ def build(kb_dir: Path, embed_fn=_UNSET) -> None:
 
         if db_path.exists():
             try:
-                os.replace(db_path, bak_path)   # 只留一版（覆盖上一版 bak）
-                moved_to_bak = True
+                # v0.17.33（复验 R5）：备份改 copy——现役库不再移走。copy 多
+                # 一次读旧库的开销，换「备份后、替换前任一时刻中断/失败，
+                # 现役库都完好在位」（mv 转存后 kill → 只剩 bak 无现役库）。
+                shutil.copy2(db_path, bak_path)   # 只留一版（覆盖上一版 bak）
             except OSError as e:
-                print(f"WARNING：旧索引转存 kb.db.bak 失败（继续替换，旧版不保留）: {e}")
-        try:
-            for attempt in range(3):
-                try:
-                    os.replace(tmp_path, db_path)
-                    break
-                except OSError:
-                    if attempt == 2:
-                        raise
-                    time.sleep(0.1)
-        except OSError:
-            # C8：现役库已转存 bak、新库替换失败 → 回滚保住上一版；转存未
-            # 成功（旧库仍在原位）则不动，防把陈旧 bak 覆盖到完好的旧库上。
-            if moved_to_bak:
-                try:
-                    os.replace(bak_path, db_path)
-                    print(f"WARNING：新索引替换失败，已回滚保留上一版索引: {db_path}")
-                except OSError as e:
-                    print(f"WARNING：回滚失败（现役库缺失），请手动将 {bak_path} "
-                          f"改名为 {db_path}: {e}")
-            raise
+                print(f"WARNING：旧索引备份 kb.db.bak 失败（继续替换，旧版不保留）: {e}")
+        # 单次原子替换（v0.17.33）：替换失败/中断时旧库在原位，无需回滚
+        for attempt in range(3):
+            try:
+                os.replace(tmp_path, db_path)
+                break
+            except OSError:
+                if attempt == 2:
+                    raise
+                time.sleep(0.1)
     finally:
         tmp_path.unlink(missing_ok=True)   # 成功路径 tmp 已被替换；失败清残留
 

@@ -599,10 +599,10 @@ def test_review_c4_build_exception_closes_conn_and_keeps_original(
     assert not (kb / "kb.db.tmp").exists()          # 无残留（句柄已释放）
 
 
-def test_review_c8_replace_failure_rolls_back_previous(tmp_path, monkeypatch):
-    """评审修复 C8 回归：旧库已转存 bak、新库替换现役库 3 连败 → 回滚
-    bak 保住上一版（spec「任何失败现役库保持完好」），且无 tmp 残留。
-    （旧实现在该场景 raise 后由 finally 删掉 tmp，现役库缺失只剩 bak。）"""
+def test_ac6_replace_failure_keeps_db_in_place(tmp_path, monkeypatch):
+    """v0.17.33 AC6：新库替换现役库 3 连败 → 现役库从未被移走（备份由
+    copy 生成），旧版仍为现役、bak 保留上一版、无 tmp 残留——不存在
+    『bak 已转存、现役缺失』状态，不再需要回滚分支。"""
     kb = tmp_path / "kb"
     kb.mkdir()
     (kb / "a.md").write_text("# A\n内容甲", encoding="utf-8")
@@ -620,6 +620,30 @@ def test_review_c8_replace_failure_rolls_back_previous(tmp_path, monkeypatch):
     with pytest.raises(OSError, match="现役替换被锁"):
         build_kb.build(kb, embed_fn=None)
     monkeypatch.undo()
-    assert _docs(kb / "kb.db") == {"a.md"}          # 回滚：上一版仍为现役
-    assert not (kb / "kb.db.bak").exists()          # bak 已回滚归位
+    assert _docs(kb / "kb.db") == {"a.md"}          # 现役库在原位（从未移走）
+    assert _docs(kb / "kb.db.bak") == {"a.md"}      # 备份已由 copy 生成
     assert not (kb / "kb.db.tmp").exists()          # 无临时残留
+
+
+def test_ac6_interrupt_window_db_always_present(tmp_path, monkeypatch):
+    """v0.17.33 AC6：备份后、现役替换前注入 BaseException（模拟 kill，
+    任何 except/回滚分支都不执行）→ 现役库必须仍在原位——复验实测旧
+    实现此处 kb.db 消失只剩 bak（两次 os.replace 之间的中断窗口）。"""
+    kb = tmp_path / "kb"
+    kb.mkdir()
+    (kb / "a.md").write_text("# A\n内容甲", encoding="utf-8")
+    build_kb.build(kb, embed_fn=None)
+    (kb / "b.md").write_text("# B\n内容乙", encoding="utf-8")
+
+    real_replace = os.replace
+
+    def _kill_at_replace(src, dst):
+        if str(src).endswith("kb.db.tmp") and str(dst).endswith("kb.db"):
+            raise KeyboardInterrupt("模拟进程中断")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(build_kb.os, "replace", _kill_at_replace)
+    with pytest.raises(KeyboardInterrupt):
+        build_kb.build(kb, embed_fn=None)
+    assert _docs(kb / "kb.db") == {"a.md"}          # 现役库完好
+    assert _docs(kb / "kb.db.bak") == {"a.md"}      # 备份在位

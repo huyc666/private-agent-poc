@@ -20,6 +20,7 @@
   绕过清单直呼他人专属工具
 """
 import ast
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -135,10 +136,23 @@ def list_personal_all() -> list[dict]:
 
 
 def signature() -> tuple:
-    """目录内容签名（文件名 + 修改时间纳秒），用于热重载变更检测。
-    纳秒精度（st_mtime_ns）：秒级 mtime 在快速连续更新时不变，会导致图不重建、
-    新工具不生效（全项目评审问题6，与 skills.signature 约定对齐）。"""
-    return tuple(sorted((p.name, p.stat().st_mtime_ns) for p in _dir().glob("*.py")))
+    """目录内容签名（文件名 + 内容哈希，v0.17.33），用于热重载变更检测。
+    此前用 st_mtime_ns——复验实测可被『篡改内容 + 还原 mtime』完全绕过
+    （不重建、不重验签）；内容哈希彻底封堵，工具文件均为小文本，每轮
+    对话一次检测的开销可忽略。"""
+    return tuple(sorted(
+        (p.name, _file_sig(p)) for p in _dir().glob("*.py")))
+
+
+def _file_sig(p) -> str:
+    """单文件内容哈希；读失败返回 '?'（评审修复 C1，对齐 packs._file_sig
+    口径）：每轮对话开头都会做签名检测，文件被占用/权限/竞态读失败若上抛
+    会直接打断本轮对话的 SSE 流（调用链上无 except 接手）；'?' 与任何成功
+    哈希都不同，异常状态仍会触发一次重载，不会被静默吞掉。"""
+    try:
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+    except OSError:
+        return "?"
 
 
 def _extract_doc(path: Path) -> str | None:
@@ -294,8 +308,24 @@ def exec_mode() -> str:
     auto/local/sandbox 优先；未显式配置时按运行模式联动默认——Mock 模式
     （开发）= auto（沙箱优先，不可达回退本地），真实 LLM 模式 = sandbox
     （沙箱不可达 fail-closed：生产不得静默把工具代码放进主进程执行）。
-    auto 回退本地不再静默：显著 WARNING + 60s 限频防刷屏。"""
+    auto 回退本地不再静默：显著 WARNING + 60s 限频防刷屏。
+    v0.17.33（复验 R3）：非法值白名单校验——不在 auto/local/sandbox 内的
+    配置不再静默落 auto（拼错如 sandbxo 在沙箱不可达时回退本地，等于以
+    拼写错误静默打开最大权限面），按 sandbox 处理 fail-closed（与身份头
+    白名单缺失即忽略的处置惯例一致）。含 MOCK 开发模式：MOCK 只联动
+    「未显式配置」时的默认值（宽松 auto），显式配了非法值不因开发模式
+    放宽——沙箱不可达即 sandbox-down、本轮自定义工具全清空，这是本版
+    有意的 fail-closed（评审 C4 明示，v0.17.32 该场景静默回退 local）。"""
     mode = config.CUSTOM_TOOLS_EXEC or ("auto" if config.MOCK_LLM else "sandbox")
+    if mode not in ("auto", "local", "sandbox"):
+        import time
+        now = time.time()
+        if now - _auto_warn_cache["t"] >= 60:
+            _auto_warn_cache["t"] = now
+            print(f"[custom-tools] WARNING: CUSTOM_TOOLS_EXEC={mode!r} 不是"
+                  "合法值（auto/local/sandbox），已按 sandbox 处理（fail-closed）："
+                  "沙箱不可达时工具拒绝执行，请修正配置。")
+        mode = "sandbox"
     up = _sandbox_up()
     if mode == "local":
         return "local"

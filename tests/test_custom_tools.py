@@ -217,12 +217,17 @@ def test_extract_signature_params_and_defaults():
 
 
 def test_signature_tracks_nanosecond_changes():
+    """v0.17.33 改内容哈希后口径更新：内容变化即检测（原用例的 touch-only
+    场景不再触发——内容未变时重建本就无意义，且快速连续写入的新内容
+    必然改哈希，纳秒精度问题天然消除）；仅 touch 不改内容不再触发。"""
     custom_tools.write_custom_tool("demo_tool", VALID_CODE)
     sig1 = custom_tools.signature()
     p = config.CUSTOM_TOOLS_DIR / "demo_tool.py"
     ns = time.time_ns() + 1_000_000
     os.utime(p, ns=(ns, ns))
-    assert custom_tools.signature() != sig1
+    assert custom_tools.signature() == sig1           # touch-only：内容未变不触发
+    custom_tools.write_custom_tool("demo_tool", VALID_CODE + "\n# 变更\n")
+    assert custom_tools.signature() != sig1          # 内容变化即触发
 
 
 def test_personal_index_prompt_includes_own_tools(login_as):
@@ -236,3 +241,73 @@ def test_personal_index_prompt_includes_own_tools(login_as):
 def test_personal_index_prompt_empty_for_user_without_tools(login_as):
     login_as("alice")
     assert custom_tools.personal_index_prompt() == ""
+
+
+# ---- v0.17.33 AC3/AC4：内容哈希签名 + 非法执行模式白名单（复验实测）----
+
+def test_ac3_signature_detects_tamper_with_restored_mtime(tmp_path, monkeypatch):
+    """内容哈希签名：篡改内容并还原 mtime_ns 仍触发变更检测——复验实测
+    mtime 签名可被『改内容 + 还原 mtime』绕过（不重建不重验）。"""
+    import os
+    d = tmp_path / "ct"
+    d.mkdir()
+    monkeypatch.setattr(config, "CUSTOM_TOOLS_DIR", d)
+    f = d / "t.py"
+    f.write_text("def t():\n    return 1\n", encoding="utf-8")
+    sig1 = custom_tools.signature()
+    st = f.stat()
+    f.write_text("def t():\n    return 2\n", encoding="utf-8")
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert f.stat().st_mtime_ns == st.st_mtime_ns    # mtime 已还原
+    assert custom_tools.signature() != sig1          # 哈希仍感知篡改
+
+
+def test_ac4_invalid_exec_config_fails_closed(monkeypatch):
+    """非法执行模式值（如拼错的 sandbxo）不再静默落 auto 回退本地——
+    按 sandbox 处理：沙箱不可达即 sandbox-down 拒绝（fail-closed）。"""
+    monkeypatch.setattr(config, "CUSTOM_TOOLS_EXEC", "sandbxo")
+    monkeypatch.setattr(config, "MOCK_LLM", False)
+    monkeypatch.setattr(config, "SANDBOX_URL", "")
+    assert custom_tools.exec_mode() == "sandbox-down"
+
+
+# ---- v0.17.33 评审修复：C1 读失败兜底 / C4 MOCK+非法值组合 ----
+
+def test_review_c1_signature_read_failure_falls_back(tmp_path, monkeypatch):
+    """评审修复 C1 回归防线：单文件读失败（占用/权限/竞态）不得沿签名
+    检测打断对话主链路——对齐 packs._file_sig 的 '?' 兜底；'?' 与任何
+    成功哈希不同（异常状态触发重载，不吞），其余文件哈希不受影响。"""
+    import pathlib
+    d = tmp_path / "ct"
+    d.mkdir()
+    monkeypatch.setattr(config, "CUSTOM_TOOLS_DIR", d)
+    (d / "ok_tool.py").write_text(_code_for("ok_tool"), encoding="utf-8")
+    (d / "flaky_tool.py").write_text(_code_for("flaky_tool"), encoding="utf-8")
+    sig_ok = custom_tools.signature()
+
+    real_read_bytes = pathlib.Path.read_bytes
+
+    def _boom(self):
+        if self.name == "flaky_tool.py":
+            raise PermissionError(13, "Permission denied")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", _boom)
+    sig_bad = custom_tools.signature()            # 不上抛
+    got = dict(sig_bad)
+    assert got["flaky_tool.py"] == "?"            # 读失败落 '?' 兜底
+    assert got["ok_tool.py"] == dict(sig_ok)["ok_tool.py"]
+    assert sig_bad != sig_ok                      # 异常状态仍触发重载
+
+
+def test_review_c4_mock_mode_invalid_value_still_fail_closed(monkeypatch):
+    """评审补口 C4：MOCK 开发模式（未显式配置时默认宽松 auto）下显式配
+    了非法值同样按 sandbox fail-closed——不因开发模式放宽；沙箱不可达即
+    sandbox-down、自定义工具全清空，是 v0.17.33 有意的 fail-closed
+    （v0.17.32 该场景静默回退 local）。"""
+    monkeypatch.setattr(config, "CUSTOM_TOOLS_EXEC", "sandbxo")
+    monkeypatch.setattr(config, "MOCK_LLM", True)
+    monkeypatch.setattr(config, "SANDBOX_URL", "")
+    custom_tools._up_cache["t"] = 0.0
+    custom_tools._auto_warn_cache["t"] = 0.0
+    assert custom_tools.exec_mode() == "sandbox-down"
