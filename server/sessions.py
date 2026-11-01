@@ -56,13 +56,23 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # 会话所有权元数据（v0.17.37 P0-1）：owner 注册表 + 删除 tombstone。
     # deleted：NULL=活跃；非空=删除时刻。行一经写入永不物理删除——tombstone
     # 是「删除后该 ID 永不可复用」的封禁依据（防接续旧模型上下文）。
+    # generation（v0.17.38 P0）：删除代际——删除时递增（唯一递增来源），
+    # 在途 chat 运行开场绑定当前代际，提交点校验「活跃且代际未变」，
+    # 旧代际 fail-closed（复核报告 §5 准入条件）。
     conn.execute("""
         CREATE TABLE IF NOT EXISTS session_meta (
             session_id TEXT PRIMARY KEY,
             owner_id TEXT NOT NULL,
             created REAL NOT NULL,
-            deleted REAL
+            deleted REAL,
+            generation INTEGER NOT NULL DEFAULT 0
         )""")
+    meta_cols = [r[1] for r in conn.execute(
+        "PRAGMA table_info(session_meta)").fetchall()]
+    if "generation" not in meta_cols:   # 老库自动补列（存量行视为代际 0）
+        conn.execute(
+            "ALTER TABLE session_meta ADD COLUMN generation"
+            " INTEGER NOT NULL DEFAULT 0")
 
 
 def append(session_id: str, user_id: str, role: str, content: str,
@@ -163,19 +173,120 @@ def delete_session(session_id: str) -> int:
 
 
 # ------------------------------------------------- 会话所有权（v0.17.37 P0-1）
+#
+# 删除代际 fencing（v0.17.38 P0，spec 3.1/3.2）：tombstone 进程内缓存——
+# tombstone 单调（一经删除永不复活），观察到 deleted 即永久缓存，重复校验
+# 零 DB 开销（FencedCheckpointer 每次 checkpoint 写入都会走此校验）。
+_deleted_cache: set[str] = set()
+
+
+class SessionDeletedError(RuntimeError):
+    """会话已删除：一切写提交（消息/审批/checkpoint/resume）fail-closed。"""
+
+
+def tombstoned(session_id: str) -> bool:
+    """会话是否已删除（tombstone 终局判定，含进程内缓存）。"""
+    if session_id in _deleted_cache:
+        return True
+    with _lock:
+        conn = _connect()
+        try:
+            _ensure_schema(conn)
+            row = conn.execute(
+                "SELECT deleted FROM session_meta WHERE session_id = ?",
+                (session_id,)).fetchone()
+            if row is not None and row[0] is not None:
+                _deleted_cache.add(session_id)
+                return True
+            return False
+        finally:
+            conn.close()
+
+
+def fence_value(session_id: str) -> int | None:
+    """当前代际（chat 开场绑定）：tombstoned → None；无 meta 行 → 0
+    （开放模式新会话，活跃口径）。"""
+    if tombstoned(session_id):
+        return None
+    with _lock:
+        conn = _connect()
+        try:
+            _ensure_schema(conn)
+            row = conn.execute(
+                "SELECT generation FROM session_meta WHERE session_id = ?",
+                (session_id,)).fetchone()
+            return row[0] if row is not None else 0
+        finally:
+            conn.close()
+
+
+def fence_ok(session_id: str, generation: int) -> bool:
+    """提交点终局校验：会话活跃且代际未变（无 meta 行 = 代际 0 匹配）。"""
+    if session_id in _deleted_cache:
+        return False
+    with _lock:
+        conn = _connect()
+        try:
+            _ensure_schema(conn)
+            row = conn.execute(
+                "SELECT generation, deleted FROM session_meta WHERE session_id = ?",
+                (session_id,)).fetchone()
+            if row is not None and row[1] is not None:
+                _deleted_cache.add(session_id)
+                return False
+            if row is None:
+                return generation == 0
+            return row[0] == generation
+        finally:
+            conn.close()
+
+
+def append_fenced(session_id: str, generation: int, user_id: str, role: str,
+                 content: str, extra: str | None = None) -> bool:
+    """代际栅栏消息写入（spec 3.2）：单事务 BEGIN IMMEDIATE——先取写锁再
+    校验代际/deleted，通过才 INSERT——「校验 + 写入」与 mark_deleted 的写
+    事务互斥（SQLite 同库写锁），关闭 check-then-act 竞态：写要么先于删除
+    提交（随后被 delete_session 清掉），要么看到 tombstone 被拒，不存在
+    「删除完成后落库」的中间态。返回 True=落库 / False=被拒（fail-closed）。
+    截断口径与 append 一致（对话记录不需要超大 payload）。"""
+    with _lock:
+        conn = _connect()
+        try:
+            _ensure_schema(conn)
+            conn.isolation_level = None     # 手动事务：BEGIN IMMEDIATE 原子栅栏
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT generation, deleted FROM session_meta WHERE session_id = ?",
+                (session_id,)).fetchone()
+            ok = (row is None and generation == 0) or (
+                row is not None and row[1] is None and row[0] == generation)
+            if not ok:
+                if row is not None and row[1] is not None:
+                    _deleted_cache.add(session_id)
+                conn.rollback()
+                return False
+            conn.execute(
+                "INSERT INTO messages (session_id, user_id, role, content, ts, extra)"
+                " VALUES (?,?,?,?,?,?)",
+                (session_id, user_id or "anonymous", role,
+                 content[:20_000], time.time(), extra))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
 
 
 def get_meta(session_id: str) -> dict | None:
-    """会话所有权元数据：{"owner_id", "deleted"}（deleted None=活跃，
-    非 None=删除时刻 tombstone）；无记录返回 None。"""
+    """会话所有权元数据：{"owner_id", "deleted", "generation"}（deleted
+    None=活跃，非 None=删除时刻 tombstone）；无记录返回 None。"""
     with _lock:
         conn = _connect()
         conn.row_factory = sqlite3.Row
         try:
             _ensure_schema(conn)
             row = conn.execute(
-                "SELECT owner_id, deleted FROM session_meta WHERE session_id = ?",
-                (session_id,)).fetchone()
+                "SELECT owner_id, deleted, generation FROM session_meta"
+                " WHERE session_id = ?", (session_id,)).fetchone()
             return dict(row) if row else None
         finally:
             conn.close()
@@ -211,9 +322,10 @@ def register_session(session_id: str, owner_id: str) -> str:
 
 
 def mark_deleted(session_id: str) -> None:
-    """写 tombstone（删除终局标记）：deleted=删除时刻，行永久保留。
-    会话此前无 meta 行（开放模式删除等场景）时先补 anonymous 归属行再
-    打标，保证任何路径的删除都留下封禁依据。"""
+    """写 tombstone（删除终局标记）：deleted=删除时刻 + generation 递增
+    （v0.17.38 代际 fencing——在途运行绑定旧代际，此后一切提交点校验失败），
+    行永久保留。会话此前无 meta 行（开放模式删除等场景）时先补 anonymous
+    归属行再打标，保证任何路径的删除都留下封禁依据。"""
     with _lock:
         conn = _connect()
         try:
@@ -223,11 +335,13 @@ def mark_deleted(session_id: str) -> None:
                 "INSERT OR IGNORE INTO session_meta (session_id, owner_id, created)"
                 " VALUES (?,?,?)", (session_id, "anonymous", now))
             conn.execute(
-                "UPDATE session_meta SET deleted = ? WHERE session_id = ?",
+                "UPDATE session_meta SET deleted = ?,"
+                " generation = generation + 1 WHERE session_id = ?",
                 (now, session_id))
             conn.commit()
         finally:
             conn.close()
+    _deleted_cache.add(session_id)
 
 
 def resolve_owner(session_id: str) -> str | None:

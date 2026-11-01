@@ -79,7 +79,7 @@ def test_build_agent_real_mode(monkeypatch):
     assert STATE.llm is not None
     assert STATE.agent is not None
     from langgraph.checkpoint.memory import MemorySaver
-    assert isinstance(STATE.checkpointer, MemorySaver)
+    assert isinstance(STATE.checkpointer._inner, MemorySaver)  # v0.17.38 经 FencedCheckpointer 包装
     assert "read_text_file" in STATE.tool_names
     assert STATE.system_prompt_static                 # 图重建时刷新的静态提示词
 
@@ -105,7 +105,10 @@ def test_make_checkpointer_memory(monkeypatch):
     monkeypatch.setattr(config, "CHECKPOINTER", "memory")
     asyncio.run(agent._make_checkpointer())
     from langgraph.checkpoint.memory import MemorySaver
-    assert isinstance(STATE.checkpointer, MemorySaver)
+    # v0.17.38：产出统一包 FencedCheckpointer（checkpoint 写提交终局校验），
+    # 真实后端经 _inner 解包判定
+    assert isinstance(STATE.checkpointer, agent.FencedCheckpointer)
+    assert isinstance(STATE.checkpointer._inner, MemorySaver)
 
 
 def test_make_checkpointer_postgres_fail_fast(monkeypatch):

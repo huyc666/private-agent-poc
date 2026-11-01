@@ -121,6 +121,46 @@ def create_approval(tool: str, args: dict) -> str:
     return aid
 
 
+def create_approval_fenced(session_id: str, generation: int,
+                           tool: str, args: dict) -> str | None:
+    """代际栅栏审批创建（v0.17.38 P0，spec 3.5）：单事务 BEGIN IMMEDIATE
+    校验会话活跃且代际未变，通过才 INSERT——「校验 + 写入」与 mark_deleted
+    写事务互斥，删除与审批创建竞争时不存在「删除完成后新增 pending」的
+    中间态（复核报告 §5 验收 2）。会话已删/代际过期返回 None（fail-closed，
+    调用方以 error 事件中止本轮，不等待不 resume）。
+    归属列口径与 create_approval 一致（contextvars）。session_meta 表由
+    sessions 模块维护；本事务内表尚不存在（理论边缘：审批先于任何 sessions
+    调用）时按「无 meta 行 = 活跃代际 0」口径处理。"""
+    import json
+    aid = uuid.uuid4().hex[:12]
+    with _lock:
+        conn = _connect()
+        try:
+            _ensure_schema(conn)
+            conn.isolation_level = None     # 手动事务：BEGIN IMMEDIATE 原子栅栏
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT generation, deleted FROM session_meta"
+                    " WHERE session_id = ?", (session_id,)).fetchone()
+            except sqlite3.OperationalError:
+                row = None   # session_meta 表尚未创建 = 无任何会话元数据
+            ok = (row is None and generation == 0) or (
+                row is not None and row[1] is None and row[0] == generation)
+            if not ok:
+                conn.rollback()
+                return None
+            conn.execute(
+                "INSERT INTO approvals (aid, tool, args, status, created, user_id, session_id, worker_id)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (aid, tool, json.dumps(args, ensure_ascii=False)[:2000], "pending",
+                 time.time(), current_user.get(), current_session.get(), WORKER_ID))
+            conn.commit()
+            return aid
+        finally:
+            conn.close()
+
+
 async def wait_decision(aid: str, timeout: float = APPROVAL_TIMEOUT):
     """等待用户审批决定。返回 True(批准) / False(拒绝) / None(超时或记录丢失)。
 

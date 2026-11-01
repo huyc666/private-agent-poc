@@ -41,7 +41,8 @@ for _k, _v in _ENV_DEFAULTS.items():
 
 import pytest  # noqa: E402  （须在 sys.path/env 设置之后）
 
-from server import auth, config, custom_tools, packs, skills, usage  # noqa: E402
+from server import (auth, config, custom_tools, packs, sessions, skills,
+                    usage)  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -64,6 +65,9 @@ def isolated_env(tmp_path, monkeypatch):
     packs._disabled.clear()
     skills.reset_extra_dirs()
     custom_tools._up_cache["t"] = 0.0
+    # tombstone 进程内缓存（v0.17.38）随 STATE_DB 逐测试切换一并清空，
+    # 否则上一测试（独立库）的已删会话会以同 ID 污染本测试的栅栏判定
+    sessions._deleted_cache.clear()
     # 对话上下文复位（多用户隔离用例依赖 usage.current_user）
     tokens = [usage.current_user.set("anonymous"),
               usage.current_session.set(""),

@@ -568,14 +568,27 @@ async def chat(req: ChatRequest, request: Request):
                         _chat_session_verdict, request.state.user, session_id):
                     yield f"data: {json.dumps({'type': 'error', 'content': '会话归属校验失败或会话已删除，已拒绝本次写入'}, ensure_ascii=False)}\n\n"
                     return
+                # v0.17.38 P0（spec 3.3）：代际栅栏——开场绑定当前代际（删除时
+                # 递增），此后消息写入/审批创建/checkpoint/危险工具 resume 各
+                # 提交点校验「活跃且代际未变」，旧代际 fail-closed；开放模式
+                # tombstone 同口径（认证模式经上方终判，此处双检无害）。
+                gen = await asyncio.to_thread(sessions.fence_value, session_id)
+                if gen is None:
+                    yield f"data: {json.dumps({'type': 'error', 'content': '会话已删除，本轮写入被拒'}, ensure_ascii=False)}\n\n"
+                    return
                 # SQLite 写为同步调用，挪到线程池避免阻塞事件循环（v0.16.1）
-                await asyncio.to_thread(sessions.append, session_id, user_id,
-                                        "user", req.message)
+                if not await asyncio.to_thread(
+                        sessions.append_fenced, session_id, gen, user_id,
+                        "user", req.message):
+                    yield f"data: {json.dumps({'type': 'error', 'content': '会话已删除，本轮写入被拒'}, ensure_ascii=False)}\n\n"
+                    return
+                discarded = False   # 本轮回复是否因会话删除被拒绝落库
                 try:
                     yield f"data: {json.dumps({'type': 'session', 'session_id': session_id, 'run_id': run_id}, ensure_ascii=False)}\n\n"
                     citations: list[dict] = []  # 本轮 run 的出处（多工具合并）
                     async for ev in agent.stream_reply(new_message, session_id=session_id,
-                                                       user_id=user_id, run_id=run_id):
+                                                       user_id=user_id, run_id=run_id,
+                                                       generation=gen):
                         if lease.lost:
                             # 租约被其他进程接管（心跳续租失败）：继续推进
                             # 等于两进程同时写同一会话，互斥已失效——立即中止
@@ -599,10 +612,16 @@ async def chat(req: ChatRequest, request: Request):
                         if not finished:
                             text += ("\n\n（会话租约被其他进程接管，回复中止）"
                                      if lease.lost else "\n\n（连接中断，回复不完整）")
-                        await asyncio.to_thread(
-                            sessions.append, session_id, user_id, "assistant", text,
+                        # v0.17.38 P0：assistant 写回经代际栅栏——会话在流中途
+                        # 被删除时拒绝落库（删除后存储不增），改以 error 事件告知
+                        discarded = not await asyncio.to_thread(
+                            sessions.append_fenced, session_id, gen, user_id,
+                            "assistant", text,
                             extra=(json.dumps(citations, ensure_ascii=False)
                                    if citations else None))
+                if discarded:
+                    print(f"[sessions] 会话 {session_id} 已删除，本轮 assistant 回复被丢弃")
+                    yield f"data: {json.dumps({'type': 'error', 'content': '会话已被删除，本轮回复已丢弃'}, ensure_ascii=False)}\n\n"
             finally:
                 await lease.__aexit__()  # 停心跳 + 释放租约（与 __aenter__ 配对）
 

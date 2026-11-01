@@ -18,8 +18,12 @@ import sys
 import threading
 from typing import AsyncIterator
 
-from . import approval, config, custom_tools, packs, skills, telemetry, usage, tools_admin
+from . import (approval, config, custom_tools, packs, sessions, skills,
+               telemetry, usage, tools_admin)
 from .state import STATE
+# FencedCheckpointer 继承基类以满足 langgraph 图编译期的 isinstance 校验
+# （ensure_valid_checkpointer）；langgraph 为服务端硬依赖（requirements 固定）
+from langgraph.checkpoint.base import BaseCheckpointSaver
 
 
 # ---------------------------------------------------------------- 出处块解析
@@ -235,6 +239,92 @@ async def _make_checkpointer():
 
         STATE.checkpointer = MemorySaver()
         print("[agent] checkpointer: MemorySaver（进程内存，重启即丢；生产请改 CHECKPOINTER=postgres）")
+    # v0.17.38 P0（spec 3.6）：统一包一层写提交终局校验——tombstoned 会话的
+    # 一切 checkpoint 写入 fail-closed，在途图执行在下一个写点终止。
+    # 纯委托代理；图编译期 ensure_valid_checkpointer 的 isinstance 校验经
+    # 继承 BaseCheckpointSaver 满足（见 FencedCheckpointer 类注释）。
+    STATE.checkpointer = FencedCheckpointer(STATE.checkpointer)
+
+
+class FencedCheckpointer(BaseCheckpointSaver):
+    """checkpoint 写提交前终局校验（v0.17.38 P0）：已删除会话（tombstone）的
+    checkpoint 写入抛 SessionDeletedError——异常沿 astream_events 冒泡，
+    stream_reply 以 error 事件收尾，在途执行终止（「删除后存储不增」的
+    checkpoint 层栅栏，复核报告 §5 准入条件）。
+    继承 BaseCheckpointSaver（普通 Generic 类，非 ABC、无抽象方法强制）：
+    langgraph 在图编译期（StateGraph.compile → ensure_valid_checkpointer，
+    langgraph/types.py）对 checkpointer 有 isinstance(BaseCheckpointSaver)
+    校验（全量回归 test_build_agent_real_mode 暴露；此前只核查 Pregel 与
+    create_react_agent，漏了该处）——继承即通过，委托设计不变。
+    基类以 NotImplementedError 定义的其余公开方法会在类查找链上遮蔽
+    __getattr__ 透传，故在类体之后批量改写为显式委托（见 _delegate_* 循环）。
+    校验为进程内缓存优先的同步 SQLite 单键 SELECT——「校验→写入」之间
+    无 await，单进程事件循环内原子（spec 3.7）。"""
+
+    def __init__(self, inner):
+        self._inner = inner
+        # serde 对齐 inner（基类 __init__ 默认落 JsonPlusSerializer；Pregel
+        # 写入序列化经 checkpointer.serde，须与被包装 saver 一致）
+        super().__init__(serde=getattr(inner, "serde", None))
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    @staticmethod
+    def _check(config):
+        sid = ((config or {}).get("configurable") or {}).get("thread_id", "")
+        if sid and sessions.tombstoned(sid):
+            raise sessions.SessionDeletedError(
+                f"会话 {sid} 已删除，checkpoint 写入被拒（fail-closed）")
+
+    async def aput(self, config, *args, **kwargs):
+        self._check(config)
+        await self._inner.aput(config, *args, **kwargs)
+
+    async def aput_writes(self, config, *args, **kwargs):
+        self._check(config)
+        await self._inner.aput_writes(config, *args, **kwargs)
+
+    def put(self, config, *args, **kwargs):
+        self._check(config)
+        self._inner.put(config, *args, **kwargs)
+
+    def put_writes(self, config, *args, **kwargs):
+        self._check(config)
+        self._inner.put_writes(config, *args, **kwargs)
+
+    def with_allowlist(self, *args, **kwargs):
+        """评审 C1（v0.17.38）：langgraph 在 LANGGRAPH_STRICT_MSGPACK=true 时经
+        checkpointer.with_allowlist(...) 取「allowlist 包装的 saver」——裸透传
+        inner 会返回无栅栏对象，该路径的 checkpoint 写静默绕过 tombstone 校验。
+        重套 FencedCheckpointer，栅栏语义在任何派生 saver 上一致。"""
+        return FencedCheckpointer(self._inner.with_allowlist(*args, **kwargs))
+
+
+# 基类 BaseCheckpointSaver 的其余公开方法（NotImplementedError 占位）批量
+# 改写为对 inner 的显式委托——包装后读写路径行为与被包装 saver 完全一致。
+def _delegate_sync(name):
+    def m(self, *args, **kwargs):
+        return getattr(self._inner, name)(*args, **kwargs)
+    m.__name__ = name
+    return m
+
+
+def _delegate_async(name):
+    async def m(self, *args, **kwargs):
+        return await getattr(self._inner, name)(*args, **kwargs)
+    m.__name__ = name
+    return m
+
+
+for _n in ("get", "get_tuple", "list", "delete_thread", "delete_for_runs",
+           "copy_thread", "prune", "get_delta_channel_history",
+           "get_next_version"):
+    setattr(FencedCheckpointer, _n, _delegate_sync(_n))
+for _n in ("aget", "aget_tuple", "alist", "adelete_thread",
+           "adelete_for_runs", "acopy_thread", "aprune",
+           "aget_delta_channel_history"):
+    setattr(FencedCheckpointer, _n, _delegate_async(_n))
 
 
 async def close_checkpointer():
@@ -428,16 +518,28 @@ async def _pre_model_hook(state: dict, config=None):   # 参数名须为 config�
 
 
 async def stream_reply(messages: list[dict], session_id: str = "default",
-                       user_id: str = "anonymous", run_id: str = "") -> AsyncIterator[dict]:
+                       user_id: str = "anonymous", run_id: str = "",
+                       generation: int | None = None) -> AsyncIterator[dict]:
     """yield SSE 事件 dict：
     {"type":"token","content":...} / {"type":"tool",...} / {"type":"approval_required",...}
     / {"type":"done","usage":{...}} / {"type":"error"}
+
+    generation（v0.17.38 P0，spec 3.4）：chat 开场绑定的会话代际。非 None 时
+    在三类提交点做终局校验（旧代际 fail-closed 以 error 事件收尾）：
+    每轮模型调用前 / 审批创建前 / 批准决议 resume 前（危险工具实际执行点）。
+    None = 非会话态调用方（测试/回放）不栅栏。
     """
     # token 计量与审批身份上下文：UsageCallback / create_approval 读取这三个值做归属
     # （用户/会话/任务）——必须在 Mock 分支之前设置，Mock 演示剧本同样走审批流
     usage.current_user.set(user_id)
     usage.current_session.set(session_id)
     usage.current_run.set(run_id)
+
+    def _fenced_off() -> bool:
+        """代际终局校验：会话已删/代际过期 → True（fail-closed，调用方中止）。
+        同步 SQLite 单键 SELECT，main 事件循环已用 to_thread 调用 stream 之外
+        的写路径；此处为轮级低频调用，直查可接受（同 FencedCheckpointer 口径）。"""
+        return generation is not None and not sessions.fence_ok(session_id, generation)
 
     if config.MOCK_LLM:
         from . import mock
@@ -463,6 +565,11 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
     resuming_aid = ""
 
     for _round in range(5):  # 一次对话最多 5 轮审批，防死循环
+        if _fenced_off():
+            # 每轮模型调用前校验（spec 3.4.1）：已删除/代际过期不再烧模型调用，
+            # checkpoint 层 FencedCheckpointer 兜底
+            yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+            return
         try:
             async for event in STATE.agent.astream_events(payload, config=run_config, version="v2"):
                 kind = event["event"]
@@ -495,6 +602,12 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
                     yield {"type": "tool", "status": "end",
                            "name": event.get("name", "?"),
                            "result": clean[:2000]}
+        except sessions.SessionDeletedError:
+            # 评审 C4（v0.17.38）：checkpoint 栅栏异常（FencedCheckpointer 抛出，
+            # 在途图执行在写点死亡）须以删除中止文案收尾——落入通用分支会被
+            # 误报为「模型调用失败」，与三处栅栏点口径不一致
+            yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+            return
         except Exception as e:
             # resume 轮抛错：executed_at 不标记，记录保持「已批准但未执行」
             # （审计可见，绝不让失败被误报为已执行）
@@ -519,11 +632,23 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
 
         tool = intr.get("tool", "?")
         args = intr.get("args", {})
-        aid = approval.create_approval(tool, args)
+        # 审批创建点校验（spec 3.4.2，报告验收 2）：会话已删/代际过期 →
+        # 不创建 pending（fail-closed），本轮中止
+        if generation is not None:
+            aid = approval.create_approval_fenced(session_id, generation, tool, args)
+            if aid is None:
+                yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+                return
+        else:
+            aid = approval.create_approval(tool, args)
         yield {"type": "approval_required", "approval_id": aid,
                "tool": tool, "args": args}
         decision = await approval.wait_decision(aid)
-        # decision: True 批准 / False 拒绝 / None 超时（fail-closed，一律视为拒绝）
+        # 决议落库后再校验（spec 3.4.3，报告验收 3）：批准与删除竞争时绝不把
+        # 危险操作恢复执行——无 resume 轮；拒绝/超时决议同样中止（图不推进）
+        if _fenced_off():
+            yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+            return
         payload = Command(resume={"approve": decision is True})
         if decision is True:
             resuming_aid = aid  # 批准：下一轮 resume 跑完即标记已执行
