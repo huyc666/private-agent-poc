@@ -103,6 +103,33 @@ def test_ac1_chat_anonymous_legacy_session_allowed(api):
     assert r.status_code == 200
 
 
+# ---- v0.17.37 评审修复 #2：存量会话快查与终判口径一致（最早作者归属）----
+
+def test_ac1_chat_legacy_multi_author_owner_allowed(api):
+    """存量会话（meta 无）双作者：最早作者续聊放行——旧 owners 全体口径会把
+    属主因他人也曾发言而误拒 403（过严方向，评审 #2 修复后按 resolve_owner
+    口径，与锁内终判一致）。"""
+    _mk_user("alice")
+    tok_b = _login(api, _mk_user("bob"))
+    sessions.append("s-legacy2", "bob", "user", "最早消息")
+    sessions.append("s-legacy2", "alice", "user", "后来的消息")
+    r = api.post("/api/chat", headers=_hdr(tok_b),
+                 json={"session_id": "s-legacy2", "message": "属主续聊"})
+    assert r.status_code == 200
+
+
+def test_ac1_chat_legacy_multi_author_second_user_403(api):
+    """存量会话双作者：非最早作者（历史上曾发言的第二人）不再有接续权——
+    归属收紧到最早作者（锁内外同口径，行为与旧 owners 口径的拒绝侧一致）。"""
+    _mk_user("bob")
+    tok_a = _login(api, _mk_user("alice"))
+    sessions.append("s-legacy3", "bob", "user", "最早消息")
+    sessions.append("s-legacy3", "alice", "user", "后来的消息")
+    r = api.post("/api/chat", headers=_hdr(tok_a),
+                 json={"session_id": "s-legacy3", "message": "第二作者接入"})
+    assert r.status_code == 403
+
+
 # ---- v0.17.33 AC1：锁外检查后的并发窗口（复验实测）----
 
 def test_ac1_chat_race_window_second_check_rejects(api, monkeypatch):

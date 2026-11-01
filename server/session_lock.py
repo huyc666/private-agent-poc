@@ -92,6 +92,14 @@ def release(session_id: str, owner: str) -> bool:
                     (session_id, owner)) > 0
 
 
+def purge(session_id: str) -> int:
+    """删除编排调用（v0.17.37 P0-1）：清除该会话租约行（不判持有者）——
+    运行中请求下一拍心跳续租失败即自动中止（lease.lost 语义已存在）。
+    返回删除条数。"""
+    return _execute("DELETE FROM session_locks WHERE session_id = ?",
+                    (session_id,))
+
+
 class SessionLease:
     """async 上下文：获取租约（必要时等待）→ 心跳续租 → 退出时释放。
     用法（配合进程内 asyncio.Lock 双重互斥）：

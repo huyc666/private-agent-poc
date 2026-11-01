@@ -225,6 +225,10 @@ AUTH_ENABLED = os.environ.get(
 AUTH_BOOTSTRAP_ADMIN = os.environ.get("AUTH_BOOTSTRAP_ADMIN", "")
 # 账号密码登录（v0.15.0）签发的 pat- 令牌有效期（小时）
 AUTH_TOKEN_TTL_HOURS = float(os.environ.get("AUTH_TOKEN_TTL_HOURS", "12"))
+# 登录 Cookie（v0.17.37 P0-2）Secure 标志：HTTPS 部署置 true，Cookie 仅经
+# 加密通道发送；默认 false（本地/内网 http 部署可用）。
+AUTH_COOKIE_SECURE = os.environ.get(
+    "AUTH_COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
 # SSO 钩子（v0.16.0）：反向代理身份头模式。配置后（如 X-Forwarded-User），
 # 请求带该头即信任其用户名（认证由上游企业网关/IdP 完成），角色仍查本地用户表。
 # ⚠️ v0.17.4（安全审计 F2）：身份头必须配合 AUTH_PROXY_ALLOWED_IPS 受信代理

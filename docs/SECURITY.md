@@ -104,7 +104,7 @@
 
 | # | 限制 | 影响 | 生产化方向 |
 |---|---|---|---|
-| 8.1 | 前端把 Bearer 凭据存 localStorage | 存在 XSS 窃取凭据的风险面（当前前端全部 textContent 渲染、无 innerHTML 注入点，风险受控） | 改 HttpOnly Cookie 或接企业 SSO，凭据不落浏览器存储 |
+| 8.1 | ~~前端把 Bearer 凭据存 localStorage~~（v0.17.37 P0-2 已修复） | 原风险面：pat- 令牌落 localStorage 可被同源脚本窃取；KB 原文页 docx 渲染未消毒可形成存储型 XSS。现防线：pat- 登录态迁 HttpOnly Cookie（SameSite=Lax + 非 GET 请求 X-Requested-With CSRF 纵深），pak- Key 仅 JS 内存；原文页服务端拼接全转义 + Mammoth 输出经 /api/kb/sanitize 白名单消毒 + CSP（nonce）/X-Frame-Options | 残余接受：pak- Key 在页面内存中存续至刷新/关闭；生产化可接企业 SSO 统一身份（报告 §5） |
 | 8.2 | 上下文压缩摘要由 LLM 生成 | 摘要调用的 token 消耗计入当前用户/会话用量（不单列类型）；摘要质量依赖模型能力 | usage 增加 kind 字段区分主调用/摘要调用；必要时换廉价模型承担摘要 |
 | 8.3 | 旧版单段下载链接的历史会话 | user 角色访问旧链接（文件已迁入 shared/）返回 404（不跨域回退，保持隔离）；approver/admin 自动回退 shared/ 命中 | 如需按用户归属旧文件，迁移时可按会话归属改写域目录 |
 

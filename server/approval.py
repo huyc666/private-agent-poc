@@ -185,6 +185,17 @@ def pending_count() -> int:
     return rec["n"] if rec else 0
 
 
+def reject_pending_for_session(session_id: str) -> int:
+    """会话删除编排调用（v0.17.37 P0-1）：该会话全部挂起审批 → rejected
+    （decided_by='system'）——删除会话后其挂起的危险操作不得执行
+    （fail-closed），等待方轮询读到 rejected 即中止。仅 pending 生效，
+    幂等。返回标记条数。"""
+    return _execute(
+        "UPDATE approvals SET status = 'rejected', decided = ?, decided_by = 'system'"
+        " WHERE session_id = ? AND status = 'pending'",
+        (time.time(), session_id))
+
+
 def mark_executed(aid: str) -> None:
     """Agent 已把批准决议带进图并完成 resume：标记 executed_at。
     仅对 approved 记录生效（幂等，重复调用无副作用）。

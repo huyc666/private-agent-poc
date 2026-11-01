@@ -53,6 +53,16 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     cols = [r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
     if "extra" not in cols:
         conn.execute("ALTER TABLE messages ADD COLUMN extra TEXT")
+    # 会话所有权元数据（v0.17.37 P0-1）：owner 注册表 + 删除 tombstone。
+    # deleted：NULL=活跃；非空=删除时刻。行一经写入永不物理删除——tombstone
+    # 是「删除后该 ID 永不可复用」的封禁依据（防接续旧模型上下文）。
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS session_meta (
+            session_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            created REAL NOT NULL,
+            deleted REAL
+        )""")
 
 
 def append(session_id: str, user_id: str, role: str, content: str,
@@ -137,7 +147,9 @@ def session_users(session_id: str) -> set[str]:
 
 
 def delete_session(session_id: str) -> int:
-    """删除一个会话的全部消息（隐私/治理用），返回删除条数。"""
+    """删除一个会话的全部消息（隐私/治理用），返回删除条数。
+    仅清展示记录；所有权封禁与全存储面清理由 main._purge_session 编排
+    （v0.17.37 P0-1），本函数不再是删除会话的完整语义。"""
     with _lock:
         conn = _connect()
         try:
@@ -148,3 +160,102 @@ def delete_session(session_id: str) -> int:
             return cur.rowcount
         finally:
             conn.close()
+
+
+# ------------------------------------------------- 会话所有权（v0.17.37 P0-1）
+
+
+def get_meta(session_id: str) -> dict | None:
+    """会话所有权元数据：{"owner_id", "deleted"}（deleted None=活跃，
+    非 None=删除时刻 tombstone）；无记录返回 None。"""
+    with _lock:
+        conn = _connect()
+        conn.row_factory = sqlite3.Row
+        try:
+            _ensure_schema(conn)
+            row = conn.execute(
+                "SELECT owner_id, deleted FROM session_meta WHERE session_id = ?",
+                (session_id,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
+def register_session(session_id: str, owner_id: str) -> str:
+    """新会话所有权原子抢注。返回 "ok" / "taken" / "deleted"：
+    - "ok"：注册成功，或本人幂等重注，或既有归属为 anonymous（开放态宽恕）；
+    - "taken"：已被他人注册；
+    - "deleted"：tombstone——删除是封禁依据，该 ID 永不再注册。
+    INSERT OR IGNORE + 冲突回读：并发争抢同一新 ID 时恰一人 "ok"
+    （SQLite 写锁原子性，多进程共享同一 STATE_DB 亦成立）。"""
+    with _lock:
+        conn = _connect()
+        try:
+            _ensure_schema(conn)
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO session_meta (session_id, owner_id, created)"
+                " VALUES (?,?,?)",
+                (session_id, owner_id or "anonymous", time.time()))
+            inserted = cur.rowcount > 0
+            conn.commit()
+        finally:
+            conn.close()
+    if inserted:
+        return "ok"
+    meta = get_meta(session_id)
+    if meta is None:
+        return "taken"   # 理论不可达（冲突回读必有行）；fail-closed 口径
+    if meta["deleted"] is not None:
+        return "deleted"
+    return "ok" if meta["owner_id"] in (owner_id, "anonymous") else "taken"
+
+
+def mark_deleted(session_id: str) -> None:
+    """写 tombstone（删除终局标记）：deleted=删除时刻，行永久保留。
+    会话此前无 meta 行（开放模式删除等场景）时先补 anonymous 归属行再
+    打标，保证任何路径的删除都留下封禁依据。"""
+    with _lock:
+        conn = _connect()
+        try:
+            _ensure_schema(conn)
+            now = time.time()
+            conn.execute(
+                "INSERT OR IGNORE INTO session_meta (session_id, owner_id, created)"
+                " VALUES (?,?,?)", (session_id, "anonymous", now))
+            conn.execute(
+                "UPDATE session_meta SET deleted = ? WHERE session_id = ?",
+                (now, session_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def resolve_owner(session_id: str) -> str | None:
+    """会话归属解析（存量回填）：meta 有则返回其 owner；无记录而 messages
+    有 → owner = 最早一条 user 消息的 user_id（开放模式遗留 anonymous 归
+    anonymous，宽恕口径与既有 ACL 一致），INSERT OR IGNORE 回填后回读
+    （并发他方已抢注则以回读为准）；消息亦无 → None（全新会话，归属由
+    调用方 register_session 抢注）。"""
+    meta = get_meta(session_id)
+    if meta is not None:
+        return meta["owner_id"]
+    owner = None
+    with _lock:
+        conn = _connect()
+        conn.row_factory = sqlite3.Row
+        try:
+            _ensure_schema(conn)
+            row = conn.execute(
+                "SELECT user_id FROM messages WHERE session_id = ? AND role = 'user'"
+                " ORDER BY id LIMIT 1", (session_id,)).fetchone()
+            if row is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO session_meta (session_id, owner_id, created)"
+                    " VALUES (?,?,?)", (session_id, row["user_id"], time.time()))
+                conn.commit()
+                owner = conn.execute(
+                    "SELECT owner_id FROM session_meta WHERE session_id = ?",
+                    (session_id,)).fetchone()["owner_id"]
+        finally:
+            conn.close()
+    return owner

@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import sys
 import time
 import unicodedata
@@ -28,8 +29,9 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                Response, StreamingResponse)
 from pydantic import BaseModel, Field
 
-from server import (agent, approval, audit, auth, config, custom_tools, packs,
-                    session_lock, sessions, skills, telemetry, usage)
+from server import (agent, approval, audit, auth, config, custom_tools,
+                    html_sanitize, packs, session_lock, sessions, skills,
+                    telemetry, usage)
 from tools import kb_parsers  # 定位端点按锚点重解析文档（服务器侧，不进包）
 
 
@@ -108,13 +110,18 @@ app = FastAPI(title="Private Agent POC", lifespan=lifespan)
 async def auth_middleware(request: Request, call_next):
     """认证中间件：开放模式放行（user=None，各端点按旧行为处理）；
     认证模式下 /api/*（除 /api/health 与 /api/auth/login）必须持有效身份——
-    反向代理身份头（SSO 钩子）或 Bearer 凭据（pak- Key / pat- 令牌），
-    身份解析后写入 request.state.user，成为 user_id 的唯一可信来源。"""
+    反向代理身份头（SSO 钩子）、Bearer 凭据（pak- Key / pat- 令牌）或
+    pap_token 登录 Cookie（v0.17.37 P0-2：登录态迁 HttpOnly Cookie，
+    凭据优先级 SSO 头 > Bearer > Cookie），身份解析后写入
+    request.state.user，成为 user_id 的唯一可信来源。
+    CSRF 纵深（spec 4.5）：Cookie 身份的非 GET/HEAD/OPTIONS 的 /api/* 请求
+    必须带 X-Requested-With 自定义头（跨站表单/导航无法附加），否则 403；
+    login/logout 豁免；Bearer/SSO 头凭据不自动随请求携带，免校验。"""
     request.state.user = None
     if not auth.enabled():
         return await call_next(request)
     token = _bearer_token(request)
-    # SSO 钩子：身份解析唯一入口（身份头模式优先，其次 Bearer 凭据）。
+    # SSO 钩子：身份解析唯一入口（身份头模式优先，其次 Bearer，最后 Cookie）。
     # v0.17.4（安全审计 F2）：身份头必须来自受信代理白名单才生效——
     # 未命中白名单/未配置白名单一律忽略（fail-closed），直连端口伪造头无效。
     header_user = ""
@@ -129,13 +136,38 @@ async def auth_middleware(request: Request, call_next):
         elif request.headers.get(config.AUTH_IDENTITY_HEADER):
             print("[auth] 身份头来自非受信来源（不在 AUTH_PROXY_ALLOWED_IPS 白名单），"
                   "已忽略（防伪造冒充）")
+    auth_via = ""  # header / bearer / cookie（CSRF 校验只针对 cookie 身份）
+    if header_user:
+        auth_via = "header"
+    elif token:
+        auth_via = "bearer"
+    else:
+        token = request.cookies.get("pap_token", "")
+        if token:
+            auth_via = "cookie"
     # 解析涉及 SQLite 同步调用，挪到线程池避免阻塞事件循环（v0.16.1）
     request.state.user = await asyncio.to_thread(
         auth.resolve_identity, token, header_user, header_department)
+    # Bearer 失效回退 Cookie 身份：迁移期旧客户端可能残留过期 Bearer
+    # （历史 localStorage 令牌），不阻断新 Cookie 会话
+    if auth_via == "bearer" and request.state.user is None and not header_user:
+        cookie_token = request.cookies.get("pap_token", "")
+        if cookie_token:
+            request.state.user = await asyncio.to_thread(
+                auth.resolve_identity, cookie_token, "", header_department)
+            if request.state.user is not None:
+                auth_via = "cookie"
     path = request.url.path
     if path.startswith("/api/") and path not in ("/api/health", "/api/auth/login") \
             and request.state.user is None:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    # CSRF 纵深（v0.17.37 P0-2，spec 4.5）：置于 401 之后——只对
+    # 已认证的 cookie 会话校验，未认证请求仍统一回 401
+    if auth_via == "cookie" and request.method not in ("GET", "HEAD", "OPTIONS") \
+            and path.startswith("/api/") \
+            and path not in ("/api/auth/login", "/api/auth/logout") \
+            and request.headers.get("X-Requested-With") != "XMLHttpRequest":
+        return JSONResponse({"error": "csrf"}, status_code=403)
     return await call_next(request)
 
 
@@ -159,15 +191,28 @@ async def login_endpoint(req: LoginRequest, request: Request):
         audit.log(req.username.strip()[:64], "", "登录失败", detail=ip)
         return JSONResponse({"error": "用户名或密码错误"}, status_code=401)
     audit.log(req.username.strip()[:64], "", "登录成功", detail=ip)
-    return result
+    # v0.17.37 P0-2（spec 4.5）：登录态迁 HttpOnly Cookie——JS 不可读
+    # （XSS 窃取面消除），SameSite=Lax 挡跨站附带；AUTH_COOKIE_SECURE=true
+    # （HTTPS 部署）追加 Secure；响应体 token 字段保留（程序化 curl 兼容）。
+    resp = JSONResponse(result)
+    resp.set_cookie(
+        "pap_token", result["token"], httponly=True, samesite="lax",
+        max_age=int(config.AUTH_TOKEN_TTL_HOURS * 3600), path="/",
+        secure=config.AUTH_COOKIE_SECURE)
+    return resp
 
 
 @app.post("/api/auth/logout")
 async def logout_endpoint(request: Request):
-    """注销：使当前 pat- 登录令牌立即失效（pak- Key 请用吊销/轮换）。"""
-    token = _bearer_token(request)
-    auth.logout(token)
-    return {"ok": True}
+    """注销：使当前 pat- 登录令牌立即失效（pak- Key 请用吊销/轮换）。
+    v0.17.37 P0-2：按 Bearer 或 pap_token Cookie 注销（cookie 登录态同样
+    可登出），并以 Max-Age=0 清除浏览器侧 Cookie。logout 豁免 CSRF 校验
+    （登出本身无破坏性，且 cookie 过期后登出不应被拦）。"""
+    token = _bearer_token(request) or request.cookies.get("pap_token", "")
+    await asyncio.to_thread(auth.logout, token)
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("pap_token", path="/")
+    return resp
 
 
 # ---- PLAN 3.1 管理控制台：用户与 Key 管理（admin 专属，CLI 能力收口到页面）----
@@ -471,7 +516,9 @@ async def health(request: Request):
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, request: Request):
-    session_id = req.session_id or uuid.uuid4().hex[:8]
+    # 服务端生成不可预测会话 ID（P0-1，v0.17.37）：token_hex(8)=16 位 hex，
+    # 替代 uuid4().hex[:8]（可预测且空间小）；客户端自报 ID 仍兼容（续聊既有会话）
+    session_id = req.session_id or secrets.token_hex(8)
     run_id = uuid.uuid4().hex[:12]  # 任务维度：一次请求的完整运行
     # 认证模式：user_id 只信中间件解析的身份（请求体 user_id 字段忽略，兼容旧客户端）；
     # 开放模式：沿用请求体自报（演示用）
@@ -511,14 +558,15 @@ async def chat(req: ChatRequest, request: Request):
                 yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
                 return
             try:
-                # SEC-1（v0.17.33，复验 R1）：锁外首查存在并发窗口——两个
-                # 身份可在检查通过后、进锁前先后写入同一新会话（session_id
-                # 由客户端提供，非服务端生成）。取得锁与租约后、首次写入
-                # 前再查一次：并发场景下首轮归属此时已落库可判定；被拒以
-                # SSE error 事件终止（已开流，HTTP 状态码不可再改）。
-                if auth.enabled() and _chat_session_denied(
-                        request.state.user, session_id):
-                    yield f"data: {json.dumps({'type': 'error', 'content': '会话归属校验失败，已拒绝本次写入'}, ensure_ascii=False)}\n\n"
+                # SEC-1（v0.17.33 复验 R1 → v0.17.37 P0-1 升级）：锁外首查
+                # 存在并发窗口——取得锁与租约后、首次写入前终判一次
+                # （_chat_session_verdict：tombstone 拒 / meta 归属判 / 存量
+                # 回填 / 全新会话原子抢注，并发恰一人成功）；被拒以 SSE error
+                # 事件终止（已开流，HTTP 状态码不可再改），错误语不区分原因
+                # （防探测）。SQLite 读写挪线程池（同下方 append 先例）。
+                if auth.enabled() and not await asyncio.to_thread(
+                        _chat_session_verdict, request.state.user, session_id):
+                    yield f"data: {json.dumps({'type': 'error', 'content': '会话归属校验失败或会话已删除，已拒绝本次写入'}, ensure_ascii=False)}\n\n"
                     return
                 # SQLite 写为同步调用，挪到线程池避免阻塞事件循环（v0.16.1）
                 await asyncio.to_thread(sessions.append, session_id, user_id,
@@ -572,29 +620,107 @@ def _acl_identity(request: Request) -> dict | None:
 
 
 def _can_access_session(identity: dict, session_id: str) -> bool:
-    """user/approver 角色只能访问全部消息都属于自己（或开放模式遗留
-    anonymous）的会话；admin 保留全局视图（管理职责）。v0.17.29（PLAN 3.1
-    人工测试反馈）：approver 由全局视图收紧为仅本人——会话内容属用户隐私，
-    审批所需信息经审批单流转，无需读取会话原文。"""
+    """user/approver 角色只能访问归属自己的会话；admin 保留全局视图（管理职责）。
+    v0.17.29（PLAN 3.1）：approver 由全局视图收紧为仅本人（会话内容属用户隐私，
+    审批所需信息经审批单流转，无需读取会话原文）。
+    v0.17.37（P0-1）：归属判定升级 session_meta 口径（所有权表 + anonymous
+    宽恕），不再依赖消息记录推断——admin 接入他人会话不再漂移所有权
+    （报告建议 5）；meta 无记录的存量会话经 resolve_owner 回填（最早 user
+    消息属主）后判定，与 chat 端点同口径。"""
     if identity["role"] == "admin":
         return True
-    owners = sessions.session_users(session_id)
-    return bool(owners) and owners <= {identity["username"], "anonymous"}
+    meta = sessions.get_meta(session_id)
+    if meta is not None:
+        return meta["owner_id"] in (identity["username"], "anonymous")
+    owner = sessions.resolve_owner(session_id)
+    return owner is not None and owner in (identity["username"], "anonymous")
+
+
+def _session_tombstoned(identity: dict | None, session_id: str) -> bool:
+    """tombstone 会话对非 admin 按不存在处理（404，spec 3.2.3）：删除即终局，
+    非 admin 不可再读/删（消息已清，404 防探测会话曾存在）；admin 全局视图
+    保留治理语义（审计可见「该会话曾被删除」）。开放模式无身份 → 不启用
+    该语义（行为同旧版）。"""
+    if not identity or identity.get("role") == "admin":
+        return False
+    meta = sessions.get_meta(session_id)
+    return meta is not None and meta["deleted"] is not None
 
 
 def _chat_session_denied(identity: dict, session_id: str) -> bool:
-    """chat 端点专属会话归属校验（SEC-1，v0.17.32）：登录用户向既有会话发言时，
-    会话全部属主必须是本人（或开放模式遗留 anonymous），否则 403。与
-    _can_access_session 的关键差异：空会话（新会话首轮）必须放行——chat 是
-    会话属主的判定写入来源，首轮写入前无从校验；复用后者（空 owners 返回
-    False）会把新会话也判为 forbidden，首轮即死锁。admin 放行（全局视图）。
-    返回 True = 拒绝。"""
+    """chat 锁外快查（SEC-1 快路径，v0.17.37 升级 meta 口径）：tombstone 或
+    既有归属冲突 → 403 快速返回，避免开流后才拒；空会话（新会话首轮）放行
+    ——首轮写入前无从校验归属（v0.17.32 语义保留）。返回 True = 拒绝。
+    评审 #2 修复：存量会话（meta 无）改用与锁内终判一致的 resolve_owner
+    口径（最早 user 消息作者归属，顺带回填 meta）——旧 owners 全体口径会把
+    合法属主因他人也曾发言而误拒 403（过严方向，无越权但伤可用性）。
+    终判以锁内 _chat_session_verdict 为准（锁外检查存在并发窗口，
+    沿 v0.17.33 双查先例）。"""
+    meta = sessions.get_meta(session_id)
+    if meta is not None:
+        if meta["deleted"] is not None:
+            return True                        # tombstone：删除即封禁（含 admin）
+        if identity["role"] == "admin":
+            return False
+        return meta["owner_id"] not in (identity["username"], "anonymous")
     if identity["role"] == "admin":
         return False
-    owners = sessions.session_users(session_id)
-    if not owners:
+    owner = sessions.resolve_owner(session_id)
+    if owner is None:
+        return False            # 空会话（新会话首轮）放行，终判负责原子抢注
+    return owner not in (identity["username"], "anonymous")
+
+
+def _chat_session_verdict(identity: dict, session_id: str) -> bool:
+    """chat 锁内终判（v0.17.37 P0-1）：返回 True=放行 / False=拒绝。
+    - tombstone → 拒（删除 = 不可逆终局，含 admin——admin 治理语义保留在
+      读/删端点，chat 不得复活已删除会话的模型上下文）；
+    - admin 放行（不注册不改写归属——接入他人会话不漂移所有权，报告建议 5）；
+    - meta 有归属：本人或 anonymous 宽恕放行，否则拒；
+    - meta 无：messages 有 → resolve_owner 回填存量归属后按上判；皆无 →
+      全新会话，register_session 原子抢注（并发恰一人成功，失败=被抢 → 拒）。"""
+    meta = sessions.get_meta(session_id)
+    if meta is not None and meta["deleted"] is not None:
         return False
-    return not owners <= {identity["username"], "anonymous"}
+    if identity["role"] == "admin":
+        return True
+    if meta is not None:
+        return meta["owner_id"] in (identity["username"], "anonymous")
+    owner = sessions.resolve_owner(session_id)
+    if owner is None:
+        return sessions.register_session(
+            session_id, identity["username"]) == "ok"
+    return owner in (identity["username"], "anonymous")
+
+
+async def _purge_session(session_id: str) -> int:
+    """删除编排（v0.17.37 P0-1，spec 3.3）：删除 = 不可逆终局，覆盖全存储面。
+    返回删除的消息条数。
+    1) tombstone 先封禁入口——此后该 ID 的任何复用（chat/注册）被拒；
+    2) 展示记录物理删除（既有行为）；
+    3) checkpointer thread 物理删除（MemorySaver / AsyncPostgresSaver 同口径
+       原生支持 adelete_thread）；异常记日志不阻断——tombstone 已封禁入口，
+       残留数据不可达（报告「checkpoint 无法可靠删除时至少永久封禁」的
+       兜底语义）；
+    4) 进程内压缩摘要缓存；
+    5) 挂起审批 → rejected（decided_by=system，fail-closed，等待方轮询即中止）；
+    6) 会话租约行清除（运行中请求心跳续租失败自动中止，lease.lost 已有语义）。
+    并发决策（spec 记录）：删除不取会话租约（治理动作即时性，不等待审批
+    挂起中的长租约）；与运行中 chat 极端并发下可能残留少量 checkpoint，
+    但封禁已生效、残留不可达。"""
+    await asyncio.to_thread(sessions.mark_deleted, session_id)
+    deleted = await asyncio.to_thread(sessions.delete_session, session_id)
+    cp = agent.STATE.checkpointer
+    if cp is not None:
+        try:
+            await cp.adelete_thread(session_id)
+        except Exception as e:
+            print(f"[sessions] checkpoint 删除失败（tombstone 已封禁，"
+                  f"残留不可达）: {e}")
+    agent._compact_cache.pop(session_id, None)
+    await asyncio.to_thread(approval.reject_pending_for_session, session_id)
+    await asyncio.to_thread(session_lock.purge, session_id)
+    return deleted
 
 
 @app.get("/api/sessions")
@@ -610,20 +736,31 @@ async def session_list(request: Request, limit: int = 50):
 
 @app.get("/api/sessions/{session_id}/history")
 async def session_history(request: Request, session_id: str, limit: int = 0):
-    """一个会话的最近 N 条消息（默认 SESSION_MAX_HISTORY）。user 角色限本人会话。"""
+    """一个会话的最近 N 条消息（默认 SESSION_MAX_HISTORY）。user 角色限本人
+    会话；tombstone 会话（非 admin）按不存在处理（404，v0.17.37 P0-1）。"""
     ident = _acl_identity(request)
-    if ident and not _can_access_session(ident, session_id):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
+    if ident:
+        if _session_tombstoned(ident, session_id):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if not _can_access_session(ident, session_id):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
     return {"session_id": session_id, "messages": sessions.history(session_id, limit)}
 
 
 @app.delete("/api/sessions/{session_id}")
 async def session_delete(request: Request, session_id: str):
-    """删除一个会话的对话记录（隐私/治理）。user 角色限本人会话。"""
+    """删除会话（隐私/治理，v0.17.37 P0-1 语义升级：删除 = 不可逆终局）。
+    覆盖全存储面（_purge_session）：展示记录 + checkpointer 模型上下文 +
+    压缩摘要缓存 + 挂起审批（fail-closed）+ 会话租约，并写 tombstone
+    永久封禁该 ID——删除后任何人（含原属主）不得以该 ID 接续旧上下文。
+    user/approver 限本人会话；admin 全局视图。"""
     ident = _acl_identity(request)
-    if ident and not _can_access_session(ident, session_id):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-    return {"deleted": sessions.delete_session(session_id)}
+    if ident:
+        if _session_tombstoned(ident, session_id):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if not _can_access_session(ident, session_id):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+    return {"deleted": await _purge_session(session_id)}
 
 
 # ---------------------------------------------------------------- 文档上传（v0.17.7）
@@ -1043,11 +1180,46 @@ def kb_allowed(kb: str, role: str | None, department: str | None = None,
 _KB_DOC_MAX = 200  # 文档名长度上限（防超长名资源浪费；正常文档名远小于此）
 
 
+class KbSanitizeRequest(BaseModel):
+    html: str
+
+
+_KB_SANITIZE_MAX = 2 * 1024 * 1024  # Mammoth 输出消毒上限（超限 413，防无界处理）
+
+
+@app.post("/api/kb/sanitize")
+async def kb_sanitize(request: Request):
+    """Mammoth 输出消毒通道（v0.17.37 P0-2，spec 4.3）：docx 原文页前端还原后
+    不再直写 innerHTML，先提交服务端白名单消毒（html_sanitize）再入页。
+    认证由中间件统一管（开放模式与 source 端点同口径）；cookie 身份的
+    POST 自带 X-Requested-With（前端 authHdr 统一附加，过 CSRF 校验）。
+    评审 #1 修复：Content-Length 前置预检（对齐上传端点 _check_body_limit
+    先例）——超限直接 413，不把恶意超大 body 全量读进内存（无该头的
+    chunked 请求读完后再兜底校验）。"""
+    cl = request.headers.get("content-length")
+    try:
+        if cl and int(cl) > _KB_SANITIZE_MAX:
+            return JSONResponse({"error": "payload too large"}, status_code=413)
+    except ValueError:
+        return JSONResponse({"error": "非法 Content-Length"}, status_code=400)
+    try:
+        body = await request.json()
+        req = KbSanitizeRequest(**body)
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=422)
+    if len(req.html) > _KB_SANITIZE_MAX:
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+    out = await asyncio.to_thread(html_sanitize.sanitize_html, req.html)
+    return {"html": out}
+
+
 def _source_page(title: str, body: str) -> HTMLResponse:
-    """片段视图公共壳：纯内联样式（离线前端约束），命中行 .hl 高亮。"""
-    return HTMLResponse(
+    """片段视图公共壳：纯内联样式（离线前端约束），命中行 .hl 高亮。
+    v0.17.37 P0-2（spec 4.1/4.4）：标题两处入页先转义（文档名含引号/& 时
+    不得突破元素文本上下文）；无脚本页配简版 CSP + X-Frame-Options。"""
+    resp = HTMLResponse(
         "<!doctype html><html><head><meta charset='utf-8'>"
-        f"<title>{title}</title><style>"
+        f"<title>{_esc(title)}</title><style>"
         "body{font-family:system-ui,'Segoe UI','Microsoft YaHei',sans-serif;"
         "margin:24px;color:#1f2937;max-width:900px}"
         "h1{font-size:16px}.path{color:#6b7280;font-size:13px;margin-bottom:16px}"
@@ -1059,7 +1231,11 @@ def _source_page(title: str, body: str) -> HTMLResponse:
         "p{margin:4px 0;line-height:1.7}"
         "p.hl{background:#fef9c3;outline:2px solid #eab308}"
         "</style></head><body>"
-        f"<h1>知识库原文</h1><div class='path'>{title}</div>{body}</body></html>")
+        f"<h1>知识库原文</h1><div class='path'>{_esc(title)}</div>{body}</body></html>")
+    resp.headers["Content-Security-Policy"] = \
+        "default-src 'none'; style-src 'unsafe-inline'"
+    resp.headers["X-Frame-Options"] = "SAMEORIGIN"
+    return resp
 
 
 @app.get("/api/kb/source")
@@ -1119,14 +1295,20 @@ async def kb_source(request: Request, kb: str, doc: str, kind: str = "line",
             return JSONResponse({"error": str(e)}, status_code=404)
         rows = [(ln, anc) for ln, anc in zip(text.splitlines(), _anchors)
                 if ln.strip()]
+        # v0.17.37 P0-2（spec 4.1）：文档文本/锚点值入页前一律转义——
+        # 恶意 docx 的标签字面量只能以文本呈现，不得形成可执行节点
         fallback = "".join(
-            f"<p class='hl' data-a='{(anc or {}).get('a', '')}'>{ln}</p>"
-            if anc and a <= (anc.get("a") or 0) <= b else f"<p>{ln}</p>"
+            f"<p class='hl' data-a='{_esc(str((anc or {}).get('a', '')))}'>"
+            f"{_esc(ln)}</p>"
+            if anc and a <= (anc.get("a") or 0) <= b else f"<p>{_esc(ln)}</p>"
             for ln, anc in rows)
         src_url = f"/api/kb/source?kb={quote(kb)}&doc={quote(doc)}&kind=para&a={a}&raw=1"
+        # CSP nonce（spec 4.4）：本页唯一内联脚本的放行口，逐请求随机——
+        # 任何注入的 <script>（无 nonce）都被浏览器 CSP 拦截
+        nonce = secrets.token_hex(16)
         page = (
             "<!doctype html><html><head><meta charset='utf-8'>"
-            f"<title>{doc}</title><style>"
+            f"<title>{_esc(doc)}</title><style>"
             "body{font-family:system-ui,'Segoe UI','Microsoft YaHei',sans-serif;"
             "margin:24px;color:#1f2937;max-width:860px;line-height:1.75}"
             "h1{font-size:16px}.path{color:#6b7280;font-size:13px;margin-bottom:16px}"
@@ -1135,29 +1317,46 @@ async def kb_source(request: Request, kb: str, doc: str, kind: str = "line",
             "#fallback{display:none;border:1px dashed #d1d5db;padding:12px;"
             "border-radius:8px}"
             "</style></head><body>"
-            f"<h1>知识库原文（Word 还原）</h1><div class='path'>{logical}</div>"
+            f"<h1>知识库原文（Word 还原）</h1><div class='path'>{_esc(logical)}</div>"
             "<div id='content'>加载中……</div>"
             "<div id='fallback'><p>浏览器还原失败，显示提取文本：</p>"
             + fallback + "</div>"
             "<script src='/vendor/mammoth.browser.min.js'></script>"
-            "<script>(function(){"
+            f"<script nonce='{nonce}'>(function(){{"
             "var mark=function(root){var lo=" + str(a) + ",hi=" + str(b) + ";"
             "var ps=root.querySelectorAll('p');for(var i=0;i<ps.length;i++){"
             "if(ps[i].getAttribute('data-a')&&+ps[i].getAttribute('data-a')>=lo"
             "&&+ps[i].getAttribute('data-a')<=hi){ps[i].classList.add('hl');"
             "if(!window.__scrolled){window.__scrolled=1;"
             "ps[i].scrollIntoView({block:'center'});}}}};"
+            "var fb=function(){document.getElementById('content').style.display='none';"
+            "document.getElementById('fallback').style.display='block';};"
+            # v0.17.37 P0-2（spec 4.3）：Mammoth 输出不再直写 innerHTML——
+            # 先 POST /api/kb/sanitize 服务端白名单消毒，再入页；任一环失败
+            # 走 fallback（服务端已转义的提取文本，自带 .hl 高亮）
             "fetch('" + src_url + "').then(function(r){if(!r.ok)throw 0;"
             "return r.arrayBuffer()}).then(function(buf){"
-            "mammoth.convertToHtml({arrayBuffer:buf})"
-            ".then(function(res){document.getElementById('content').innerHTML=res.value;"
-            "mark(document);})"
-            ".catch(function(){document.getElementById('content').style.display='none';"
-            "document.getElementById('fallback').style.display='block';});})"
-            ".catch(function(){document.getElementById('content').style.display='none';"
-            "document.getElementById('fallback').style.display='block';});})();</script>"
+            "return mammoth.convertToHtml({arrayBuffer:buf})})."
+            "then(function(res){"
+            "return fetch('/api/kb/sanitize',{method:'POST',"
+            "headers:{'Content-Type':'application/json',"
+            "'X-Requested-With':'XMLHttpRequest'},"
+            "body:JSON.stringify({html:res.value})})"
+            ".then(function(r){if(!r.ok)throw 0;return r.json()})"
+            ".then(function(d){"
+            "document.getElementById('content').innerHTML=d.html;"
+            "mark(document);});})"
+            ".catch(fb);})();</script>"
             "</body></html>")
-        return HTMLResponse(page)
+        resp = HTMLResponse(page)
+        # 严格 CSP（spec 4.4）：脚本只放行 self + 本页 nonce；Mammoth 内联图片
+        # 需要 data:；frame-ancestors/XFO 双保险防被嵌入恶意页
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'none'; script-src 'self' 'nonce-" + nonce + "';"
+            " style-src 'unsafe-inline'; img-src 'self' data:;"
+            " connect-src 'self'; frame-ancestors 'self'")
+        resp.headers["X-Frame-Options"] = "SAMEORIGIN"
+        return resp
 
     # ---- 其余：文本片段页（md/txt 原文件行号；xlsx/pptx/html 解析器行锚点）----
     try:
