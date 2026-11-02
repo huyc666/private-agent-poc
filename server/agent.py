@@ -279,7 +279,9 @@ class FencedCheckpointer(BaseCheckpointSaver):
 
     async def aput(self, config, *args, **kwargs):
         self._check(config)
-        await self._inner.aput(config, *args, **kwargs)
+        # N2 修复：透传 inner 返回值（BaseCheckpointSaver 契约 RunnableConfig，
+        # langgraph aupdate_state/fork/bulk update 用返回值构造 next_config）
+        return await self._inner.aput(config, *args, **kwargs)
 
     async def aput_writes(self, config, *args, **kwargs):
         self._check(config)
@@ -287,7 +289,13 @@ class FencedCheckpointer(BaseCheckpointSaver):
 
     def put(self, config, *args, **kwargs):
         self._check(config)
-        self._inner.put(config, *args, **kwargs)
+        return self._inner.put(config, *args, **kwargs)
+
+    def alist(self, *args, **kwargs):
+        """N3 修复：基类 alist 是 async generator——生成器直传，不得经
+        _delegate_async 包装成 coroutine（aget_state_history 等历史回溯
+        路径直接 async for，coroutine 无 __aiter__）。"""
+        return self._inner.alist(*args, **kwargs)
 
     def put_writes(self, config, *args, **kwargs):
         self._check(config)
@@ -321,7 +329,7 @@ for _n in ("get", "get_tuple", "list", "delete_thread", "delete_for_runs",
            "copy_thread", "prune", "get_delta_channel_history",
            "get_next_version"):
     setattr(FencedCheckpointer, _n, _delegate_sync(_n))
-for _n in ("aget", "aget_tuple", "alist", "adelete_thread",
+for _n in ("aget", "aget_tuple", "adelete_thread",
            "adelete_for_runs", "acopy_thread", "aprune",
            "aget_delta_channel_history"):
     setattr(FencedCheckpointer, _n, _delegate_async(_n))
@@ -551,6 +559,11 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
         return generation is not None and not sessions.fence_ok(session_id, generation)
 
     if config.MOCK_LLM:
+        if _fenced_off():
+            # O1 修复（外部复验，用户裁决）：mock 演示流同样过代际 fencing——
+            # 在途删除后不产出（与真实模型路径同口径，fail-closed）
+            yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+            return
         from . import mock
         async for ev in mock.mock_stream(messages[-1]["content"] if messages else ""):
             yield ev

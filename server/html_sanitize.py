@@ -91,14 +91,26 @@ class _Sanitizer(HTMLParser):
             self._suppress.append((tag, "strip"))  # 未知标签剥壳保文
             return
         url_attr = _URL_ATTRS.get(tag)
-        url_val = (dict(attrs).get(url_attr) or "") if url_attr else ""
+        # 重复同名属性取首次出现（浏览器 first-wins 语义，N1 修复）——
+        # 校验与输出同源：若按末次（dict）校验而全量输出，「危险在前、
+        # 掩护在后」形态会让危险值在浏览器端生效
+        url_val = ""
+        if url_attr:
+            for name, val in attrs:
+                if name == url_attr:
+                    url_val = val or ""
+                    break
         if url_val and not _safe_url(url_val, tag):
             if tag == "img":
                 return  # void 无文本可保 → 危险 URL 整标签丢弃
             self._suppress.append((tag, "strip"))  # 容器标签剥壳保文
             return
         parts = [tag]
+        seen = set()
         for name, val in attrs:
+            if name in seen:
+                continue  # 同名属性只发首次出现，输出永不重复
+            seen.add(name)
             if name in _ATTRS.get(tag, ()):
                 parts.append(f' {name}="{_html.escape(val or "", quote=True)}"')
         self._out.append(f"<{''.join(parts)}>")

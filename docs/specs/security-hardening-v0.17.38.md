@@ -223,3 +223,8 @@ monkeypatch `agent.stream_reply` 伪造在途流，在流内定义钩子让测�
   （test_build_agent_real_mode 即编译期守护用例）；
   开放模式 tombstone chat 拒绝是新行为（此前写库成功），属语义统一，
   无既有用例依赖旧行为（已核对 test_sessions/test_session_acl）。
+
+## 修订注（v0.17.40 外部复验整改，2026-11-02）
+
+- **FencedCheckpointer 契约对齐（N2/N3）**：aput/put 补返回值透传（基类契约 RunnableConfig，aupdate_state/fork 路径依赖）；alist 移出 _delegate_async 委托清单改类体显式生成器直传——基类 alist 是 async generator，经 async def 包装成 coroutine 会使 aget_state_history 历史回溯路径 TypeError。回归用例：test_session_delete_concurrency.py test_ac4_aput_returns_inner_config / test_ac4_alist_passthrough_async_generator / test_ac4_real_graph_history_and_update_state。
+- **MOCK_LLM 分支 fencing（O1，用户裁决修复）**：mock 演示分支入口补 `_fenced_off()` 校验，在途删除后不产出，与真实模型路径同口径。回归用例：test_o1_mock_branch_also_fenced。

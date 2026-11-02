@@ -131,5 +131,7 @@
 | 会话租约被其他进程接管 | 本轮立即中止（跨进程互斥失效不硬撑） |
 | 会话已删除（tombstone / 代际过期） | 在途 chat 一切提交点 fail-closed：消息 / 审批 / checkpoint / 危险工具 resume 拒绝并中止，SSE error 收尾（v0.17.38） |
 | SSO 部门头为空（已配置 `AUTH_IDENTITY_DEPARTMENT_HEADER`） | 部门以空生效、不回退本地表——IdP 为部门权威，空部门不命中任何部门白名单（v0.17.39；opt-in 行为变更：配置该头即声明 IdP 权威，IdP 暂不发部门头的部署请勿配置） |
+| Mammoth 消毒器重复同名属性 | 校验与输出同取首次出现（浏览器 first-wins），同名属性只发首个——「危险在前、掩护在后」形态按危险值判定（v0.17.40 外部复验 N1） |
+| 存量会话存在非 anonymous 发言（meta 缺失回填） | owner 归最早非 anonymous 发言者，不归 anonymous——anonymous 宽恕不适用于混合会话，第三方读写 403（v0.17.40 外部复验 N4 用户裁决收紧；纯 anonymous 遗留会话宽恕保留） |
 
 原则一句话：**任何拿不准的情况都朝「拒绝」方向倒**，审计上保留可区分的痕迹。

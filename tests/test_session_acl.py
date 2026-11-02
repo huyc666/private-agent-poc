@@ -105,6 +105,41 @@ def test_ac1_chat_anonymous_legacy_session_allowed(api):
 
 # ---- v0.17.37 评审修复 #2：存量会话快查与终判口径一致（最早作者归属）----
 
+# ---- v0.17.40 N4-A：存量混合会话回填收紧（归最早非 anonymous 发言者）----
+
+def test_n4_resolve_owner_prefers_earliest_named_speaker():
+    """N4-A（外部复验 §5，用户裁决收紧）：存量会话首条 anonymous、后续真人
+    发言——回填 owner = 最早非 anonymous 发言者，不再归 anonymous 触发
+    「任意登录用户可读写」的宽恕。复呼幂等（已回填则直读 meta）。"""
+    sessions.append("s-mix", "anonymous", "user", "开放模式遗留")
+    sessions.append("s-mix", "alice", "user", "真人发言")
+    assert sessions.resolve_owner("s-mix") == "alice"
+    assert sessions.resolve_owner("s-mix") == "alice"
+
+
+def test_n4_resolve_owner_all_anonymous_stays_anonymous():
+    """N4-A 宽恕保留：全部 user 消息均为 anonymous 的存量会话仍归
+    anonymous（开放态共同语义，认证用户可接续——既有行为不变）。"""
+    sessions.append("s-anon", "anonymous", "user", "其一")
+    sessions.append("s-anon", "anonymous", "user", "其二")
+    assert sessions.resolve_owner("s-anon") == "anonymous"
+
+
+def test_n4_mixed_legacy_session_third_party_denied(api):
+    """N4-A 对外行为：混合存量会话——第三方 chat 403（不再经 anonymous
+    宽恕读写），真属主放行。"""
+    tok_a = _login(api, _mk_user("alice"))
+    tok_m = _login(api, _mk_user("mallory"))
+    sessions.append("s-mix2", "anonymous", "user", "开放模式遗留")
+    sessions.append("s-mix2", "alice", "user", "真人发言")
+    r = api.post("/api/chat", headers=_hdr(tok_m),
+                 json={"session_id": "s-mix2", "message": "越权接入"})
+    assert r.status_code == 403
+    r = api.post("/api/chat", headers=_hdr(tok_a),
+                 json={"session_id": "s-mix2", "message": "属主续聊"})
+    assert r.status_code == 200
+
+
 def test_ac1_chat_legacy_multi_author_owner_allowed(api):
     """存量会话（meta 无）双作者：最早作者续聊放行——旧 owners 全体口径会把
     属主因他人也曾发言而误拒 403（过严方向，评审 #2 修复后按 resolve_owner

@@ -241,6 +241,71 @@ def _cfg(sid):
     return {"configurable": {"thread_id": sid}}
 
 
+async def _aiter_collect(agen):
+    return [x async for x in agen]
+
+
+def test_ac4_aput_returns_inner_config():
+    """N2（外部复验 2026-11-02-v0.17.39-8bba994-review §5）：aput/put 必须
+    透传 inner 返回值——BaseCheckpointSaver 契约返回 RunnableConfig，
+    langgraph time-travel/update_state/fork 路径（pregel main.py aupdate_state
+    等）用返回值构造 next_config，吞掉会静默丢 config。"""
+    sentinel = {"configurable": {"thread_id": "t-ret", "checkpoint_id": "new-id"}}
+
+    class _RetCP:
+        async def aput(self, config, *a, **kw):
+            return sentinel
+
+        def put(self, config, *a, **kw):
+            return sentinel
+
+    fcp = agent.FencedCheckpointer(_RetCP())
+    sessions.register_session("t-ret", "alice")
+    assert asyncio.run(fcp.aput(_cfg("t-ret"), object(), None, {})) is sentinel
+    assert fcp.put(_cfg("t-ret"), object(), None, {}) is sentinel
+
+
+def test_ac4_alist_passthrough_async_generator():
+    """N3（外部复验 §5）：基类 alist 是 async generator——委托不得经
+    async def 包装成 coroutine（aget_state_history 等历史回溯路径直接
+    async for，coroutine 无 __aiter__ 会 TypeError）。"""
+    class _ListCP:
+        async def alist(self, config, *a, **kw):
+            yield "cp1"
+            yield "cp2"
+
+    fcp = agent.FencedCheckpointer(_ListCP())
+    out = asyncio.run(_aiter_collect(fcp.alist(_cfg("any"))))
+    assert out == ["cp1", "cp2"]
+
+
+def test_ac4_real_graph_history_and_update_state():
+    """N2+N3 集成回归：真实编译图经 FencedCheckpointer——aget_state_history
+    （alist 路径）与 aupdate_state（aput 返回值构造 next_config 路径）均正常。"""
+    from typing import TypedDict
+
+    from langgraph.graph import END, START, StateGraph
+
+    class S(TypedDict):
+        v: int
+
+    g = StateGraph(S)
+    g.add_node("bump", lambda s: {"v": s["v"] + 1})
+    g.add_edge(START, "bump")
+    g.add_edge("bump", END)
+    cg = g.compile(checkpointer=agent.FencedCheckpointer(MemorySaver()))
+    cfg = {"configurable": {"thread_id": "t-hist"}}
+    sessions.register_session("t-hist", "alice")
+    asyncio.run(cg.ainvoke({"v": 0}, cfg))
+    # N3：历史回溯（内部走 checkpointer.alist）
+    hist = asyncio.run(_aiter_collect(cg.aget_state_history(cfg)))
+    assert len(hist) >= 2
+    # N2：update_state 用 aput 返回值构造 next_config——吞返回值则
+    # checkpoint_id 为 None
+    new_cfg = asyncio.run(cg.aupdate_state(cfg, {"v": 5}))
+    assert new_cfg["configurable"].get("checkpoint_id") is not None
+
+
 def test_ac4_fenced_checkpointer_blocks_deleted_thread():
     """AC4：FencedCheckpointer——活跃线程写正常透传；tombstoned 线程的
     aput/aput_writes（含同步 put/put_writes）抛 SessionDeletedError；
@@ -267,6 +332,20 @@ def test_ac4_fenced_checkpointer_blocks_deleted_thread():
     asyncio.run(fcp.aget_tuple(_cfg("t-dead")))
     asyncio.run(fcp.adelete_thread("t-live"))
     assert ("adelete_thread", "t-live") in inner.calls
+
+
+def test_o1_mock_branch_also_fenced(monkeypatch):
+    """O1（外部复验观察项，用户裁决修复）：MOCK_LLM 演示分支同样过代际
+    fencing——在途删除（代际过期）后 mock 流不得产出，error 事件收尾。"""
+    monkeypatch.setattr(config, "MOCK_LLM", True)
+    sid = "s-mock-fence"
+    assert sessions.register_session(sid, "alice") == "ok"
+    sessions.mark_deleted(sid)                     # 代际过期（0 → 1）
+    out = _collect_stream(agent.stream_reply(
+        [{"role": "user", "content": "hi"}], session_id=sid, user_id="alice",
+        run_id="", generation=0))
+    assert out[-1]["type"] == "error" and "删除" in out[-1]["content"]
+    assert all(e["type"] not in ("token", "done") for e in out)
 
 
 def test_ac4_make_checkpointer_wraps_memory(monkeypatch):

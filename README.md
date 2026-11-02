@@ -1,10 +1,12 @@
 # Private Agent POC — 私有化 Agent 开发运行框架
 
-**版本：v0.17.39**（2026-11-02）
+**版本：v0.17.40**（2026-11-02）
 
 最小可运行的私有化 Agent 框架：**vLLM（Qwen 27B）+ LangGraph（Agent 循环 + 多 Agent 编排）+ MCP（工具协议）+ Skills（技能系统）+ 对话式自定义工具 + 人工审批流 + 代码沙箱 + 知识库问答（RAG，五类文档入库 + 混合检索 + 出处标注与点击定位 + 部门专属库隔离与跨领域知识库共享）+ API 认证与多用户（部门/角色/专属域 + 管理控制台）+ 用量计量（token / 金额 / 健康度 / 部门报表）+ Langfuse 观测 + FastAPI（SSE 流式接口）+ 离线聊天前端**。
 
 ## 版本记录
+
+- **v0.17.40**：v0.17.39 外部复验整改（复验报告 8.6/10，4 新发现 + 2 观察项，处理记录：docs/reviews/2026-11-02-v0.17.39-8bba994-review-response.md）——3 项真缺陷 red-test-first 修复：①Mammoth 消毒器重复属性绕过（中）：`dict(attrs).get()` 取末次校验、输出全量保留，「危险在前、掩护在后」可注入危险 URL；现校验与输出同取首次出现（浏览器 first-wins 语义），同名属性只发首个。②FencedCheckpointer aput/put 吞返回值（中低）：langgraph 契约返回 RunnableConfig，aupdate_state/fork 路径依赖，已补透传。③alist 经委托包装成 coroutine（低）：基类 alist 是 async generator，aget_state_history 历史回溯路径会 TypeError，改为显式生成器直传。1 项设计权衡用户裁决收紧（N4，对外行为变更，fail-closed 方向）：存量混合会话（首条 anonymous + 后续真人发言）回填 owner 归**最早非 anonymous 发言者**，不再归 anonymous 触发「任意登录用户可读写」宽恕；纯 anonymous 遗留会话宽恕保留——仅影响 v0.17.37 前存量数据，即后续轮次待办 #3「存量混合归属收紧」交付。1 项观察项用户裁决修复（O1）：MOCK_LLM 演示分支补代际 fencing 校验，与真实模型路径同口径。O2（anonymous→admin 缺位契约）维持 v0.17.9 既有取舍。新增 8 个用例，全量 677 个用例通过（18 skipped 语义不变）。
 
 - **v0.17.39**：SSO 身份一致性（请求级不可变身份快照）——后续轮次待办 #1（复核报告 §2 P1，架构审核报告 §5）整改：此前 HTTP 层 `resolve_identity` 让受信 SSO 部门头覆盖本地表，执行层 `current_role()/current_department()` 却按用户名重查本地表重建——调岗后同一请求两层口径不一致，破坏最小权限与撤权及时性。现引入 `usage.Identity`（frozen dataclass：username/role/department/auth_source∈{sso,bearer,cookie,open}）+ `usage.current_identity` ContextVar：中间件解析一次 → chat 端点构造快照（auth_via 映射 header→sso）→ `stream_reply(identity=...)` 注入 → 执行层只读快照、禁止按用户名重查本地表（AC6 以 user_by_name 爆炸固化），HTTP 层与执行层同源（调岗即时生效）；SSO 空部门头 fail-closed——已配置 `AUTH_IDENTITY_DEPARTMENT_HEADER` 即视 IdP 为部门权威，空头值以空生效不回退本地表（空部门不命中任何部门白名单，opt-in 行为变更见 SECURITY.md）；凭据优先级 SSO 头 > Bearer > Cookie 既有行为固化（SSO 用户不存在 401 不回退 / Bearer 失效回退 Cookie / 非白名单来源身份头忽略，AC5 四子案例真实 HTTP 断言）；ContextVar 并发隔离双流交错用例固化（AC4）；非对话路径（快照为 None：测试/回放/后台）维持既有契约不变。TRAE-code-review 双子代理评审 4 候选：修复 1 项（开放模式 identity.username 固定 "anonymous" 与自报 user_id 分叉 → 对齐，附 AC5⑥ 用例）、证伪排除 2 项（ContextVar 无 reset 泄漏——每请求独立 task 复制上下文 / admin 快照注入——Identity 仅 chat 两处构造、认证分支 role 恒本地表）、有意保留 1 项（SSO 空部门头行为变更属 spec §3.5 有意取舍）。新增 8 个用例（AC1-AC6 共 7 个 + 评审修复 1 个），全量 669 个用例通过（18 skipped 语义不变）。
 

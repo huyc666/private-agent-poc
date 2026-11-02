@@ -120,6 +120,27 @@ def test_ac7_sanitize_matrix():
     assert "<script" not in sanitize_html("&lt;script&gt;x&lt;/script&gt;")
 
 
+def test_ac7_duplicate_attribute_first_wins():
+    """N1（外部复验 2026-11-02-v0.17.39-8bba994-review §5）：重复同名属性——
+    校验与输出同取首次出现（浏览器 first-wins 语义），「危险在前、掩护在后」
+    不得绕过「输出即可信 HTML」契约。"""
+    from server.html_sanitize import sanitize_html
+    # 危险在前、掩护在后：按首次出现判定——容器剥壳保文，void 整标签丢弃
+    out = sanitize_html(
+        '<a href="javascript:alert(1)" href="https://safe.example">x</a>')
+    assert "javascript:" not in out and "<a" not in out and "x" in out
+    assert "<img" not in sanitize_html(
+        '<img src="javascript:alert(1)" src="data:image/png;base64,AA">')
+    # 安全在前、危险在后：首个（安全）保留，重复项不输出
+    out = sanitize_html(
+        '<a href="https://safe.example" href="javascript:alert(1)">x</a>')
+    assert "javascript:" not in out and out.count("href=") == 1 \
+        and "https://safe.example" in out
+    # 合法重复同名属性同样只发首次（输出永不含重复属性）
+    out = sanitize_html('<a href="https://a.example" href="https://b.example">x</a>')
+    assert out.count("href=") == 1 and "https://a.example" in out
+
+
 # ---------------------------------------------------------------- AC9 CSP 与框架防护
 
 

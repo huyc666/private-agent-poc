@@ -260,3 +260,8 @@ X-Frame-Options: SAMEORIGIN
   （服务端透传，前端无格式假设）；cookie 改造涉及两个页面全部 fetch
   请求路径（authHdr 语义变化逐点核对）；cookie 迁移后浏览器侧登录/登出/
   会话恢复全流程需人工过一遍（AC11 一并验证）。
+
+## 修订注（v0.17.40 外部复验整改，2026-11-02）
+
+- **消毒器重复同名属性（N1）**：原 `dict(attrs).get(url_attr)` 取末次校验、输出全量保留，「危险在前、掩护在后」可绕过「输出即可信 HTML」契约。现 URL 校验与输出同取首次出现（浏览器 first-wins 语义），同名属性只发首个。回归用例：test_kb_source_xss.py::test_ac7_duplicate_attribute_first_wins。
+- **存量混合会话回填（N4，用户裁决收紧，对外行为变更）**：resolve_owner 回填规则由「最早 user 消息作者」收紧为「最早非 anonymous 发言者；全部 anonymous 才归 anonymous」——混合会话不再触发 anonymous 宽恕（任意登录用户可读写），fail-closed 方向，仅影响 v0.17.37 前存量数据。回归用例：test_session_acl.py test_n4_*（×3，含宽恕保留对照）。

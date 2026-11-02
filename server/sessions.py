@@ -346,10 +346,13 @@ def mark_deleted(session_id: str) -> None:
 
 def resolve_owner(session_id: str) -> str | None:
     """会话归属解析（存量回填）：meta 有则返回其 owner；无记录而 messages
-    有 → owner = 最早一条 user 消息的 user_id（开放模式遗留 anonymous 归
-    anonymous，宽恕口径与既有 ACL 一致），INSERT OR IGNORE 回填后回读
+    有 → owner = 最早一条 user 消息的 user_id，INSERT OR IGNORE 回填后回读
     （并发他方已抢注则以回读为准）；消息亦无 → None（全新会话，归属由
-    调用方 register_session 抢注）。"""
+    调用方 register_session 抢注）。
+    v0.17.40（外部复验 N4，用户裁决收紧）：混合存量会话——存在非 anonymous
+    发言时 owner 归「最早非 anonymous 发言者」，不归 anonymous——否则
+    anonymous 宽恕会让任意登录用户读写含真人内容的会话（授权放宽方向）。
+    全部发言均为 anonymous 的纯开放遗留会话仍归 anonymous（宽恕保留）。"""
     meta = get_meta(session_id)
     if meta is not None:
         return meta["owner_id"]
@@ -359,9 +362,15 @@ def resolve_owner(session_id: str) -> str | None:
         conn.row_factory = sqlite3.Row
         try:
             _ensure_schema(conn)
+            # 优先最早非 anonymous 发言者（N4）；全 anonymous 才回退 anonymous
             row = conn.execute(
                 "SELECT user_id FROM messages WHERE session_id = ? AND role = 'user'"
-                " ORDER BY id LIMIT 1", (session_id,)).fetchone()
+                " AND user_id != 'anonymous' ORDER BY id LIMIT 1",
+                (session_id,)).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT user_id FROM messages WHERE session_id = ? AND role = 'user'"
+                    " ORDER BY id LIMIT 1", (session_id,)).fetchone()
             if row is not None:
                 conn.execute(
                     "INSERT OR IGNORE INTO session_meta (session_id, owner_id, created)"
