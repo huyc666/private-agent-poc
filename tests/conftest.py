@@ -71,11 +71,14 @@ def isolated_env(tmp_path, monkeypatch):
     # 对话上下文复位（多用户隔离用例依赖 usage.current_user）
     tokens = [usage.current_user.set("anonymous"),
               usage.current_session.set(""),
-              usage.current_run.set("")]
+              usage.current_run.set(""),
+              # 请求级身份快照（v0.17.39）逐测试复位，防跨用例泄漏
+              usage.current_identity.set(None)]
     yield
     usage.current_user.reset(tokens[0])
     usage.current_session.reset(tokens[1])
     usage.current_run.reset(tokens[2])
+    usage.current_identity.reset(tokens[3])
 
 
 @pytest.fixture

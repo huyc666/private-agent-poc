@@ -118,6 +118,7 @@ async def auth_middleware(request: Request, call_next):
     必须带 X-Requested-With 自定义头（跨站表单/导航无法附加），否则 403；
     login/logout 豁免；Bearer/SSO 头凭据不自动随请求携带，免校验。"""
     request.state.user = None
+    request.state.auth_via = ""  # header / bearer / cookie（v0.17.39 供端点构造身份快照）
     if not auth.enabled():
         return await call_next(request)
     token = _bearer_token(request)
@@ -168,6 +169,7 @@ async def auth_middleware(request: Request, call_next):
             and path not in ("/api/auth/login", "/api/auth/logout") \
             and request.headers.get("X-Requested-With") != "XMLHttpRequest":
         return JSONResponse({"error": "csrf"}, status_code=403)
+    request.state.auth_via = auth_via
     return await call_next(request)
 
 
@@ -529,8 +531,21 @@ async def chat(req: ChatRequest, request: Request):
         # 泄露 + 会话状态污染）。校验先于任何写库/进流完成。
         if _chat_session_denied(request.state.user, session_id):
             return JSONResponse({"error": "forbidden"}, status_code=403)
+        # v0.17.39（spec 3.2）：请求级不可变身份快照——中间件解析一次，
+        # 执行层经 stream_reply 注入后只读（HTTP 层与执行层同源；SSO 部门
+        # 取 IdP 头值，角色恒为本地表）。auth_via 映射 "header" → "sso"。
+        u = request.state.user
+        identity = usage.Identity(
+            username=u["username"], role=u.get("role") or "user",
+            department=u.get("department") or "",
+            auth_source={"header": "sso"}.get(request.state.auth_via,
+                                              request.state.auth_via))
     else:
         user_id = (req.user_id or "anonymous").strip()[:64] or "anonymous"
+        # 开放模式无凭据来源，身份固定 admin/无部门（同旧版全局开放契约）；
+        # username 与自报 user_id 对齐，避免下游两口径分叉（评审 minor-1）
+        identity = usage.Identity(username=user_id, role="admin",
+                                  department="", auth_source="open")
 
     # 对话记录落库在下方锁内进行（顺序与执行顺序一致）；模型上下文由
     # checkpointer 接续，所以只把本轮新消息交给图，历史不再重复传入。
@@ -588,7 +603,7 @@ async def chat(req: ChatRequest, request: Request):
                     citations: list[dict] = []  # 本轮 run 的出处（多工具合并）
                     async for ev in agent.stream_reply(new_message, session_id=session_id,
                                                        user_id=user_id, run_id=run_id,
-                                                       generation=gen):
+                                                       generation=gen, identity=identity):
                         if lease.lost:
                             # 租约被其他进程接管（心跳续租失败）：继续推进
                             # 等于两进程同时写同一会话，互斥已失效——立即中止

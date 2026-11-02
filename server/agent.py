@@ -519,7 +519,8 @@ async def _pre_model_hook(state: dict, config=None):   # 参数名须为 config�
 
 async def stream_reply(messages: list[dict], session_id: str = "default",
                        user_id: str = "anonymous", run_id: str = "",
-                       generation: int | None = None) -> AsyncIterator[dict]:
+                       generation: int | None = None,
+                       identity: "usage.Identity | None" = None) -> AsyncIterator[dict]:
     """yield SSE 事件 dict：
     {"type":"token","content":...} / {"type":"tool",...} / {"type":"approval_required",...}
     / {"type":"done","usage":{...}} / {"type":"error"}
@@ -528,12 +529,20 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
     在三类提交点做终局校验（旧代际 fail-closed 以 error 事件收尾）：
     每轮模型调用前 / 审批创建前 / 批准决议 resume 前（危险工具实际执行点）。
     None = 非会话态调用方（测试/回放）不栅栏。
+
+    identity（v0.17.39，spec 3.3）：chat 端点由中间件解析结果构造的请求级
+    不可变身份快照；注入 current_identity 后执行层（current_role/
+    current_department）只读快照、与 HTTP 层同源。None = 非对话调用方，
+    执行层维持既有契约（按 current_user 查本地表）。
     """
     # token 计量与审批身份上下文：UsageCallback / create_approval 读取这三个值做归属
     # （用户/会话/任务）——必须在 Mock 分支之前设置，Mock 演示剧本同样走审批流
     usage.current_user.set(user_id)
     usage.current_session.set(session_id)
     usage.current_run.set(run_id)
+    # 请求级身份快照（v0.17.39）：ContextVar 并发隔离——asyncio 任务创建时
+    # 复制上下文，本请求的 set 不泄漏给其他会话；非对话调用方传 None 即复位
+    usage.current_identity.set(identity)
 
     def _fenced_off() -> bool:
         """代际终局校验：会话已删/代际过期 → True（fail-closed，调用方中止）。

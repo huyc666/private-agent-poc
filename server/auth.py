@@ -380,10 +380,15 @@ def user_by_name(username: str) -> dict | None:
 
 def current_role() -> str:
     """当前对话上下文的角色（工具侧权限判断用，v0.17.9）。
-    从 usage.current_user（stream_reply 注入的对话归属身份）查用户表取角色；
-    开放模式/匿名/身份缺失 → "admin"（行为等同旧版全局开放）；
-    用户不存在或已吊销 → "user"（最小权限，fail-closed）。"""
+    v0.17.39（spec 3.4）：对话请求内只读 usage.current_identity 请求级快照
+    （中间件解析一次，含 SSO 头/Bearer/Cookie 来源与 IdP 部门），禁止按
+    用户名重查用户表重建——HTTP 层与执行层口径同源（调岗即时生效）。
+    非对话路径（快照为 None：测试/回放/后台）维持旧契约：开放模式/匿名 →
+    "admin"；按 current_user 查表，用户不存在或已吊销 → "user"（fail-closed）。"""
     from . import usage   # 函数内导入：避免模块级循环依赖
+    identity = usage.current_identity.get()
+    if identity is not None:
+        return identity.role
     u = usage.current_user.get() or ""
     if not enabled() or not u or u == "anonymous":
         return "admin"
@@ -392,12 +397,16 @@ def current_role() -> str:
 
 def current_department() -> str:
     """当前对话上下文的部门（工具执行层/提示层的部门判定用，v0.17.26，PLAN 2.3）。
-    从 usage.current_user 查用户表取 department；开放模式/匿名 → ""（无部门概念，
-    跨部门放行由 current_role 的 admin 契约负责）；用户不存在或已吊销 → ""
-    （最小权限，fail-closed：不命中任何部门白名单）。
-    口径说明：HTTP 端点用请求身份（SSO 部门头优先，见 resolve_identity）；本函数
-    与 current_role 同源，仅供对话内判定，与 6.2 部门报表口径一致。"""
+    v0.17.39（spec 3.4）：对话请求内只读 usage.current_identity 请求级快照
+    （SSO 部门头优先于本地表，IdP 为部门权威源；空部门 fail-closed 不命中
+    任何部门白名单），禁止按用户名重查用户表重建。
+    非对话路径（快照为 None）维持旧契约：开放模式/匿名 → ""；按 current_user
+    查表，用户不存在或已吊销 → ""（fail-closed）。
+    口径说明：HTTP 端点与执行层同源同一份请求身份，与 6.2 部门报表口径一致。"""
     from . import usage   # 函数内导入：避免模块级循环依赖
+    identity = usage.current_identity.get()
+    if identity is not None:
+        return identity.department
     u = usage.current_user.get() or ""
     if not enabled() or not u or u == "anonymous":
         return ""
@@ -439,7 +448,11 @@ def resolve_identity(bearer_token: str, header_user: str = "",
     """
     if header_user:
         ident = user_by_name(header_user)
-        if ident is not None and header_department:
+        # v0.17.39（spec 3.5）：头值非空恒覆盖本地表（IdP 权威源）；配置了
+        # 部门头时空头值同样以空生效（不回退本地表，fail-closed：空部门不
+        # 命中任何部门白名单），避免「IdP 已清空部门、本地旧值续命」的授权滞后
+        if ident is not None and (header_department
+                                  or config.AUTH_IDENTITY_DEPARTMENT_HEADER):
             ident["department"] = header_department.strip()[:64]
         return ident
     if bearer_token:

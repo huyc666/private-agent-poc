@@ -21,6 +21,7 @@
 """
 import contextvars
 import csv
+import dataclasses
 import io
 import json
 import logging
@@ -37,6 +38,27 @@ logger = logging.getLogger(__name__)
 current_user = contextvars.ContextVar("usage_user", default="anonymous")
 current_session = contextvars.ContextVar("usage_session", default="")
 current_run = contextvars.ContextVar("usage_run", default="")
+
+
+@dataclasses.dataclass(frozen=True)
+class Identity:
+    """请求级不可变身份快照（v0.17.39，spec security-hardening-v0.17.39 §3.1）。
+
+    中间件 resolve_identity 解析一次（SSO 头 > Bearer > Cookie，部门取 IdP
+    权威头值），chat 端点构造后经 stream_reply 注入 current_identity，
+    执行层（current_role/current_department）只读本快照、禁止按用户名重查
+    本地表重建——保证同一请求内 HTTP 层与执行层口径一致（调岗即时生效）。
+    auth_source ∈ {"sso", "bearer", "cookie", "open"}（审计与诊断用）。"""
+    username: str
+    role: str
+    department: str
+    auth_source: str
+
+
+# 请求级身份快照（中间件解析 → chat 端点构造 → stream_reply 注入，
+# 执行层经 auth.current_role()/current_department() 只读；default None =
+# 非对话路径（测试/回放/后台任务），维持既有契约不变）
+current_identity = contextvars.ContextVar("usage_identity", default=None)
 
 _lock = threading.Lock()
 
