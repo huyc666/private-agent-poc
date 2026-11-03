@@ -150,3 +150,105 @@ def test_run_isolated_internal_error_no_exception_leak(monkeypatch):
     assert res["error"] == "沙箱内部错误（已终止，详情见服务端日志）"
     assert "boom" not in res["error"]
     assert "E:\\" not in res["error"]
+
+
+# ---- B 批次：拒绝路径与边界分支（覆盖率补齐，不堆正向用例）----
+
+def test_health_endpoint(client):
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+
+def test_run_isolated_timeout(monkeypatch):
+    """执行超时 → 归类文案，不把异常原文外抛。"""
+    def _timeout(*a, **kw):
+        raise sbx.subprocess.TimeoutExpired("py", 1)
+    monkeypatch.setattr(sbx.subprocess, "run", _timeout)
+    assert "执行超时" in sbx._run_isolated({"code": "print(1)"})["error"]
+
+
+def test_run_isolated_unlink_failure_ignored(monkeypatch):
+    """临时文件删除失败（Windows 占用）→ 忽略，结果照常返回。"""
+    monkeypatch.setattr(sbx.os, "unlink", lambda p: (_ for _ in ()).throw(OSError("busy")))
+    res = sbx._run_isolated({"code": "print('ok')"})
+    assert res["returncode"] == 0 and "ok" in res["output"]
+
+
+def test_run_tool_code_too_long(client):
+    r = client.post("/run_tool",
+                    json={"name": "add_two", "code": "x" * 20_001, "args": {}},
+                    headers={"X-Sandbox-Token": "shared-secret"})
+    assert "代码过长" in r.json()["error"]
+
+
+def test_run_tool_args_unserializable():
+    """JSON 入参理论上可序列化；直接调用兜底分支，拒绝且不落临时目录。"""
+    res = sbx.run_tool(sbx.ToolRequest(name="add_two", args={"o": object()}))
+    assert "参数无法序列化" in res["error"]
+
+
+def test_run_tool_env_limit_and_value_truncation(client):
+    ok = client.post("/run_tool",
+                     json={"name": "add_two", "code": _ADD_TWO,
+                           "args": {"a": 1},
+                           "env": {"OK_VAR": "y" * 5000}},
+                     headers={"X-Sandbox-Token": "shared-secret"})
+    assert ok.status_code == 200 and ok.json()["result"] == "3"
+
+    many = {f"K{i}": "v" for i in range(51)}
+    r = client.post("/run_tool",
+                    json={"name": "add_two", "args": {}, "env": many},
+                    headers={"X-Sandbox-Token": "shared-secret"})
+    assert "环境变量过多" in r.json()["error"]
+
+
+def test_run_tool_bad_pack_name_and_missing_tool(client):
+    r = client.post("/run_tool",
+                    json={"name": "add_two", "pack": "Bad Pack", "args": {}},
+                    headers={"X-Sandbox-Token": "shared-secret"})
+    assert "非法领域包名" in r.json()["error"]
+
+    r = client.post("/run_tool",
+                    json={"name": "no_such_tool", "pack": "demo", "args": {}},
+                    headers={"X-Sandbox-Token": "shared-secret"})
+    assert "不存在" in r.json()["error"]
+
+
+def test_run_tool_source_write_failure(monkeypatch):
+    """直传源码落盘失败 → 明确报错且清理临时目录（不残留未审批代码）。"""
+    def _boom(*a, **kw):
+        raise OSError("MARKER disk full")
+    monkeypatch.setattr(sbx, "open", _boom, raising=False)
+    res = sbx.run_tool(sbx.ToolRequest(name="add_two", code=_ADD_TWO, args={"a": 1}))
+    assert res["error"] == "工具源码落盘失败"
+    assert "MARKER" not in res["error"]
+
+
+def test_run_tool_cleanup_failure_ignored(monkeypatch, client):
+    """临时目录清理抛异常（Windows 句柄未释放）→ 忽略，仍返回执行结果。"""
+    def _boom(*a, **kw):
+        raise OSError("busy")
+    monkeypatch.setattr(sbx.shutil, "rmtree", _boom)
+    r = client.post("/run_tool",
+                    json={"name": "add_two", "code": _ADD_TWO, "args": {"a": 2}},
+                    headers={"X-Sandbox-Token": "shared-secret"})
+    assert r.json()["result"] == "4"
+
+
+def test_run_tool_run_error_passthrough_and_bad_result(monkeypatch):
+    """执行层 error 原样返回；结果标记行不是合法 JSON → 归类为未返回结果。"""
+    monkeypatch.setattr(sbx, "_run_isolated",
+                        lambda *a, **kw: {"error": "沙箱内部错误（已终止，详情见服务端日志）"})
+    assert "沙箱内部错误" in sbx.run_tool(
+        sbx.ToolRequest(name="add_two", code=_ADD_TWO, args={}))["error"]
+
+    monkeypatch.setattr(sbx, "_run_isolated",
+                        lambda *a, **kw: {"output": "__RESULT__not-json\n"})
+    assert "工具未返回结果" in sbx.run_tool(
+        sbx.ToolRequest(name="add_two", code=_ADD_TWO, args={}))["error"]
+
+    monkeypatch.setattr(sbx, "_run_isolated",
+                        lambda *a, **kw: {"output": "plain output, no marker"})
+    assert "工具未返回结果" in sbx.run_tool(
+        sbx.ToolRequest(name="add_two", code=_ADD_TWO, args={}))["error"]

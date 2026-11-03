@@ -261,3 +261,176 @@ def test_s4_skill_signature_error_sentinel_sanitized(monkeypatch):
     assert "C:\\secret" not in text
     sentinels = [h for _rel, h in sig if _rel.startswith("__error__:")]
     assert sentinels and all(h == "__scan_error__" for h in sentinels)
+
+
+# ---- B 批次：拒绝路径与边界分支（覆盖率补齐，不堆正向用例）----
+
+def test_current_scope_none_when_auth_disabled(monkeypatch):
+    monkeypatch.setattr(config, "AUTH_ENABLED", False)
+    assert skills.current_scope() is None
+
+
+def test_register_extra_dir_resolve_failure_is_skipped(monkeypatch):
+    """路径解析异常（链接循环）→ fail-closed 跳过注册，不上抛。"""
+    class _BoomPath:
+        def __init__(self, *a, **k):
+            pass
+
+        def resolve(self):
+            raise RuntimeError("symlink loop")
+
+    monkeypatch.setattr(skills, "Path", _BoomPath)
+    skills.register_extra_dir("/tmp/extra", "pack:p")
+    assert skills._extra_dirs == []
+
+
+def test_register_extra_dir_merges_allowed_and_snapshot(tmp_path):
+    """同一父目录重复注册：允许集合与内容快照合并，不覆盖旧值。"""
+    d = tmp_path / "packs_skills"
+    d.mkdir()
+    skills.register_extra_dir(d, "pack:p", allowed={"one"}, texts={"one": "x"})
+    skills.register_extra_dir(d, "pack:p", allowed={"two"}, texts={"two": "y"})
+    assert len(skills._extra_dirs) == 1
+    _d, _src, allowed, _root, texts = skills._extra_dirs[0]
+    assert allowed == {"one", "two"} and texts == {"one": "x", "two": "y"}
+
+
+def test_parse_skill_md_fallback_heading_and_body():
+    """无 frontmatter：名称取首个标题，描述取首个正文行。"""
+    meta = skills._parse_skill_md("# 标题\n\n第一行正文\n第二行\n")
+    assert meta["name"] == "标题"
+    assert meta["description"] == "第一行正文"
+
+
+def test_list_skills_skips_missing_snapshot(tmp_path):
+    d = tmp_path / "packs_skills"
+    (d / "sk-one").mkdir(parents=True)
+    (d / "sk-one" / "SKILL.md").write_text("---\nname: sk-one\n---\n", encoding="utf-8")
+    skills.register_extra_dir(d, "pack:p", allowed={"sk-one"}, texts={})
+    assert skills.list_skills() == []          # 快照缺失 fail-closed，不读盘
+
+
+def test_list_skills_skips_unreadable_entry(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "SKILLS_DIR", tmp_path / "skills")
+    (config.SKILLS_DIR / "bad-skill" / "SKILL.md").mkdir(parents=True)
+    assert skills.list_skills() == []          # SKILL.md 是目录 → 读失败跳过
+
+
+def test_list_skills_skips_duplicate_name(tmp_path):
+    d = tmp_path / "packs_skills"
+    for dirname in ("sk-a", "sk-b"):
+        (d / dirname).mkdir(parents=True)
+        (d / dirname / "SKILL.md").write_text(
+            "---\nname: dup-skill\ndescription: d\n---\n", encoding="utf-8")
+    skills.register_extra_dir(d, "pack:p", allowed={"sk-a", "sk-b"})
+    names = [s["name"] for s in skills.list_skills()]
+    assert names == ["dup-skill"]              # 第二个同名被遮蔽
+
+
+def test_list_skills_parse_failure_skipped(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "SKILLS_DIR", tmp_path / "skills")
+    (config.SKILLS_DIR / "boom-skill").mkdir(parents=True)
+    (config.SKILLS_DIR / "boom-skill" / "SKILL.md").write_text("# x", encoding="utf-8")
+
+    def _boom(text):
+        raise RuntimeError("parse boom")
+    monkeypatch.setattr(skills, "_parse_skill_md", _boom)
+    assert skills.list_skills() == []
+
+
+def test_load_skill_snapshot_missing_direct_and_fallback(tmp_path):
+    d = tmp_path / "packs_skills"
+    (d / "sk-two").mkdir(parents=True)
+    (d / "sk-two" / "SKILL.md").write_text("---\nname: sk-two\n---\n", encoding="utf-8")
+    (d / "sk-three").mkdir(parents=True)
+    (d / "sk-three" / "SKILL.md").write_text(
+        "---\nname: alias-name\n---\n", encoding="utf-8")
+    skills.register_extra_dir(d, "pack:p", allowed={"sk-two", "sk-three"}, texts={})
+    assert skills.load_skill("sk-two") is None            # 直查快照缺失
+    assert skills.load_skill("alias-name") is None        # 兜底扫描快照缺失
+
+
+def test_load_skill_unreadable_and_parse_failure_skipped(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "SKILLS_DIR", tmp_path / "skills")
+    (config.SKILLS_DIR / "bad-skill" / "SKILL.md").mkdir(parents=True)
+    assert skills.load_skill("no-such") is None           # 兜底读失败跳过
+
+    (config.SKILLS_DIR / "ok-skill").mkdir(parents=True)
+    (config.SKILLS_DIR / "ok-skill" / "SKILL.md").write_text("# ok", encoding="utf-8")
+
+    def _boom(text):
+        raise RuntimeError("parse boom")
+    monkeypatch.setattr(skills, "_parse_skill_md", _boom)
+    assert skills.load_skill("no-such") is None           # 兜底解析失败跳过
+
+
+def test_load_skill_personal_fallback_and_error(login_as):
+    """专属域按 frontmatter 名兜底加载；损坏条目跳过、不阻断其他条目。"""
+    login_as("alice")
+    scope = config.user_scope("alice")
+    root = config.PERSONAL_SKILLS_DIR / scope
+    (root / "dir-name").mkdir(parents=True)
+    (root / "dir-name" / "SKILL.md").write_text(
+        "---\nname: fm-name\n---\n正文\n", encoding="utf-8")
+    (root / "broken-skill" / "SKILL.md").mkdir(parents=True)
+    assert skills.load_skill("fm-name", scope) is not None
+
+
+def test_create_skill_cleanup_oserror_ignored(login_as, monkeypatch):
+    """覆盖更新时旧附属文件清理失败 → 忽略，技能本体更新成功。"""
+    login_as("admin1", role="admin")
+    skills.create_skill("cleanup-skill", "d", "v1")
+    stale = config.SKILLS_DIR / "cleanup-skill" / "old-dir"
+    stale.mkdir()
+
+    def _boom(*a, **k):
+        raise OSError("locked")
+    monkeypatch.setattr(skills.shutil, "rmtree", _boom)
+    out = skills.create_skill("cleanup-skill", "d2", "v2", overwrite=True)
+    assert "已更新" in out
+
+
+def test_import_overwrite_rename_failure_rolls_back(login_as, monkeypatch):
+    """换名失败（Windows 目录被占用）→ 原技能复位，不损坏已有内容。"""
+    login_as("admin1", role="admin")
+    skills.import_skill_zip(_make_zip({"demo-skill/SKILL.md": SKILL_MD}))
+    real_rename = Path.rename
+    calls = {"n": 0}
+
+    def _flaky(self, target):
+        calls["n"] += 1
+        if calls["n"] == 2:                    # tmp → target 这一步失败
+            raise OSError("MARKER rename failed")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", _flaky)
+    with pytest.raises(OSError, match="rename failed"):
+        skills.import_skill_zip(_make_zip({"demo-skill/SKILL.md": SKILL_MD}),
+                                overwrite=True)
+    assert "演示技能" in skills.load_skill("demo-skill")    # 原内容仍在
+
+
+def test_skill_index_prompt_non_empty(login_as):
+    login_as("admin1", role="admin")
+    skills.create_skill("index-skill", "索引演示", "# 内容")
+    prompt = skills.skill_index_prompt(None)
+    assert "index-skill" in prompt and "load_skill" in prompt
+
+
+def test_personal_index_prompt_shadowed_and_parse_error(login_as):
+    """专属同名被遮蔽 + SKILL.md 是目录（读失败）→ 索引为空串。"""
+    login_as("admin1", role="admin")
+    skills.create_skill("shadow-skill", "通用", "# 内容")
+    scope = "alice"
+    root = config.PERSONAL_SKILLS_DIR / scope
+    (root / "shadow-skill").mkdir(parents=True)
+    (root / "shadow-skill" / "SKILL.md").write_text(
+        "---\nname: shadow-skill\n---\n", encoding="utf-8")
+    (root / "broken-skill" / "SKILL.md").mkdir(parents=True)
+    assert skills.personal_index_prompt(scope) == ""
+
+
+def test_signature_skips_non_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(skills, "_all_skill_dirs",
+                        lambda: [(tmp_path / "ghost-dir", "", None, None, None)])
+    assert skills.signature() == ()

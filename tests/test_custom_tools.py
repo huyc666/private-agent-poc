@@ -323,3 +323,324 @@ def test_s4_validate_syntax_error_sanitized():
     assert "invalid syntax" not in err
     assert "<unknown>" not in err
     assert "SyntaxError" not in err
+
+
+# ---- B 批次：拒绝路径与边界分支（覆盖率补齐，不堆正向用例）----
+
+def test_personal_dir_none_and_path_guards():
+    """空域 → 无专属目录；非法名 / 空域 → personal_tool_path 一律拒绝。"""
+    assert custom_tools._personal_dir(None) is None
+    assert custom_tools._personal_dir("") is None
+    assert custom_tools.personal_tool_path("Bad-Name", "alice") is None
+    assert custom_tools.personal_tool_path("ok_tool", "") is None
+
+
+def test_personal_scopes_empty_when_root_missing(tmp_path, monkeypatch):
+    """专属根目录不存在 → 空清单（不是异常）。"""
+    monkeypatch.setattr(custom_tools, "_personal_root", lambda: tmp_path / "nope")
+    assert custom_tools.personal_scopes() == []
+
+
+def test_list_personal_tools_skips_illegal_file_name(login_as):
+    login_as("alice")
+    scope = config.user_scope("alice")
+    d = config.PERSONAL_CUSTOM_TOOLS_DIR / scope
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "Bad-Name.py").write_text(_code_for("bad_name"), encoding="utf-8")
+    assert custom_tools.list_personal_tools(scope) == []
+
+
+def test_list_personal_all_skips_missing_scope(monkeypatch):
+    """全局视图：域目录不存在 → 跳过，不抛异常。"""
+    monkeypatch.setattr(custom_tools, "personal_scopes", lambda: ["ghost"])
+    assert custom_tools.list_personal_all() == []
+
+
+def test_list_personal_all_skips_illegal_name():
+    d = config.PERSONAL_CUSTOM_TOOLS_DIR / "weird"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "Bad-Name.py").write_text(_code_for("bad_name"), encoding="utf-8")
+    assert custom_tools.list_personal_all() == []
+
+
+def test_extract_doc_no_matching_function(tmp_path, monkeypatch):
+    """文件里没有同名顶层函数 → None（索引标注损坏，不执行代码）。"""
+    d = tmp_path / "ct"
+    d.mkdir()
+    monkeypatch.setattr(config, "CUSTOM_TOOLS_DIR", d)
+    (d / "lonely.py").write_text("def other_name():\n    '''x'''\n", encoding="utf-8")
+    assert custom_tools._extract_doc(d / "lonely.py") is None
+    assert custom_tools.list_custom_tools()[0]["description"].startswith("⚠️")
+
+
+def test_ann_to_type_unknown_annotation_falls_back_str():
+    """不认识的注解（Subscript 等）按 str 处理，不抛异常。"""
+    src = ("def demo_tool(x: list[int] = None, y: 'int' = 'a') -> str:\n"
+           "    '''文档'''\n    return 'x'\n")
+    custom_tools.write_custom_tool("demo_tool", src)
+    meta = custom_tools._extract_signature(config.CUSTOM_TOOLS_DIR / "demo_tool.py")
+    assert [p["type"] for p in meta["params"]] == [str, str]
+
+
+def test_extract_signature_broken_and_missing_function(tmp_path):
+    broken = tmp_path / "broken_tool.py"
+    broken.write_text("def broken(:\n", encoding="utf-8")
+    assert custom_tools._extract_signature(broken) is None     # SyntaxError 兜底
+
+    other = tmp_path / "other_tool.py"
+    other.write_text("def different_name():\n    '''x'''\n", encoding="utf-8")
+    assert custom_tools._extract_signature(other) is None      # 无同名函数
+
+
+class _FakeUrlOpen:
+    def __init__(self, payload: bytes = b"", status: int = 200):
+        self._payload, self.status = payload, status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._payload
+
+
+def test_sandbox_up_success_and_exec_mode_auto(monkeypatch):
+    monkeypatch.setattr(config, "SANDBOX_URL", "http://sbx.local")
+    monkeypatch.setattr(custom_tools.urllib.request, "urlopen",
+                        lambda *a, **k: _FakeUrlOpen(status=200))
+    custom_tools._up_cache["t"] = 0.0
+    assert custom_tools._sandbox_up() is True
+
+    monkeypatch.setattr(config, "CUSTOM_TOOLS_EXEC", "")
+    monkeypatch.setattr(config, "MOCK_LLM", True)
+    assert custom_tools.exec_mode() == "sandbox"
+
+
+def test_sandbox_run_tool_ok_failure_and_unreachable(monkeypatch):
+    """沙箱调用三态：成功取值 / 沙箱侧失败透传 error / 网络失败只回类型名。"""
+    monkeypatch.setattr(config, "SANDBOX_URL", "http://sbx.local")
+    monkeypatch.setattr(config, "SANDBOX_AUTH_TOKEN", "tok")
+    seen = {}
+
+    def _ok(req, timeout=0):
+        seen["header"] = dict(req.header_items())
+        return _FakeUrlOpen(b'{"ok": true, "result": 7}')
+
+    monkeypatch.setattr(custom_tools.urllib.request, "urlopen", _ok)
+    assert custom_tools._sandbox_run_tool("demo_tool", {"x": 1}) == "7"
+    assert "x-sandbox-token" in {k.lower() for k in seen["header"]}
+
+    monkeypatch.setattr(custom_tools.urllib.request, "urlopen",
+                        lambda *a, **k: _FakeUrlOpen(b'{"ok": false, "error": "boom"}'))
+    assert "沙箱执行失败: boom" in custom_tools._sandbox_run_tool("demo_tool", {})
+
+    def _down(*a, **k):
+        raise ConnectionError("MARKER http://internal:8080")
+    monkeypatch.setattr(custom_tools.urllib.request, "urlopen", _down)
+    out = custom_tools._sandbox_run_tool("demo_tool", {})
+    assert "沙箱调用失败（ConnectionError）" in out
+    assert "internal:8080" not in out          # 原始异常不回流调用方
+
+
+def test_make_sandbox_tool_schema_and_proxy(monkeypatch):
+    """ast 签名 → args_schema（必填/可选）→ 执行代理回沙箱。"""
+    meta = {"name": "demo_tool", "description": "演示", "params": [
+        {"name": "x", "type": int, "required": True, "default": None},
+        {"name": "y", "type": str, "required": False, "default": "a"},
+    ], "is_async": False}
+    monkeypatch.setattr(custom_tools, "_sandbox_run_tool",
+                        lambda name, args, pack="", env=None, code="": "代理结果")
+    tool = custom_tools._make_sandbox_tool(meta)
+    assert tool.name == "demo_tool"
+    assert tool.args_schema.model_fields["x"].is_required()
+    assert not tool.args_schema.model_fields["y"].is_required()
+    assert tool.func(x=1, y="b") == "代理结果"
+
+
+def test_make_local_tool_non_callable_and_import_failure(tmp_path, monkeypatch):
+    d = tmp_path / "ct"
+    d.mkdir()
+    monkeypatch.setattr(config, "CUSTOM_TOOLS_DIR", d)
+    (d / "no_fn.py").write_text("no_fn = 1\n", encoding="utf-8")
+    assert custom_tools.make_local_tool(d / "no_fn.py") is None
+
+    (d / "boom_tool.py").write_text("raise RuntimeError('import boom')\n", encoding="utf-8")
+    assert custom_tools.make_local_tool(d / "boom_tool.py") is None
+
+
+def test_build_tool_sandbox_signature_failure_and_success(tmp_path, monkeypatch):
+    monkeypatch.setattr(custom_tools, "exec_mode", lambda: "sandbox")
+    broken = tmp_path / "broken_tool.py"
+    broken.write_text("def broken(:\n", encoding="utf-8")
+    assert custom_tools.build_tool(broken) is None      # 签名提取失败 fail-closed
+
+    ok = tmp_path / "ok_tool.py"
+    ok.write_text(_code_for("ok_tool"), encoding="utf-8")
+    assert custom_tools.build_tool(ok) is not None
+
+
+def test_load_langchain_tools_skips_bad_names_and_failed_build(monkeypatch):
+    monkeypatch.setattr(config, "CUSTOM_TOOLS_EXEC", "local")
+    custom_tools._dir().mkdir(parents=True, exist_ok=True)
+    (config.CUSTOM_TOOLS_DIR / "Bad-Name.py").write_text(_code_for("bad_name"),
+                                                         encoding="utf-8")
+    (config.CUSTOM_TOOLS_DIR / "broken_tool.py").write_text("def broken(:\n",
+                                                            encoding="utf-8")
+    assert custom_tools.load_langchain_tools() == []
+
+
+def test_resolve_personal_admin_not_found(login_as):
+    login_as("root", role="admin")
+    out = custom_tools._resolve_personal("ghost_tool")
+    assert isinstance(out, str) and "不存在或不可见" in out
+
+
+def test_run_personal_tool_unexpected_mode_and_read_failure(login_as, tmp_path,
+                                                            monkeypatch):
+    login_as("alice")
+    p = tmp_path / "mine_tool.py"
+    p.write_text(_code_for("mine_tool"), encoding="utf-8")
+    monkeypatch.setattr(custom_tools, "_resolve_personal", lambda name: ("alice", p))
+    monkeypatch.setattr(custom_tools, "exec_mode", lambda: "weird")
+    out = asyncio.run(custom_tools.run_personal_tool("mine_tool", {}))
+    assert "沙箱不可达" in out
+
+    monkeypatch.setattr(custom_tools, "_resolve_personal",
+                        lambda name: ("alice", tmp_path / "gone.py"))
+    monkeypatch.setattr(custom_tools, "exec_mode", lambda: "sandbox")
+    assert "源码读取失败" in asyncio.run(custom_tools.run_personal_tool("mine_tool", {}))
+
+
+def test_run_personal_tool_signature_failure(tmp_path, monkeypatch, login_as):
+    login_as("alice")
+    p = tmp_path / "broken_tool.py"
+    p.write_text("def broken(:\n", encoding="utf-8")
+    monkeypatch.setattr(custom_tools, "_resolve_personal", lambda name: ("alice", p))
+    monkeypatch.setattr(custom_tools, "exec_mode", lambda: "sandbox")
+    out = asyncio.run(custom_tools.run_personal_tool("broken_tool", {}))
+    assert "签名提取失败" in out
+
+
+def test_run_personal_tool_success_and_sanitized_error(login_as, monkeypatch, tmp_path):
+    class _OkTool:
+        async def ainvoke(self, args):
+            return "执行结果"
+
+    login_as("alice")
+    p = tmp_path / "mine_tool.py"
+    p.write_text(_code_for("mine_tool"), encoding="utf-8")
+    monkeypatch.setattr(custom_tools, "_resolve_personal", lambda name: ("alice", p))
+    monkeypatch.setattr(custom_tools, "exec_mode", lambda: "sandbox")
+    monkeypatch.setattr(custom_tools, "_make_sandbox_tool", lambda meta, code="": _OkTool())
+    assert asyncio.run(custom_tools.run_personal_tool("mine_tool", {})) == "执行结果"
+
+    class _BoomTool:
+        async def ainvoke(self, args):
+            raise RuntimeError(r"E:\secret\path boom")
+
+    monkeypatch.setattr(custom_tools, "_make_sandbox_tool", lambda meta, code="": _BoomTool())
+    out = asyncio.run(custom_tools.run_personal_tool("mine_tool", {}))
+    assert "执行失败（内部错误）" in out
+    assert "secret" not in out and "E:\\" not in out
+
+
+def test_personal_index_prompt_guards(login_as, monkeypatch):
+    from server import auth
+    monkeypatch.setattr(config, "AUTH_ENABLED", False)
+    assert custom_tools.personal_index_prompt() == ""      # 开放模式无专属域
+
+    monkeypatch.setattr(config, "AUTH_ENABLED", True)
+    login_as("alice")
+    monkeypatch.setattr(custom_tools, "current_scope", lambda: None)
+    assert custom_tools.personal_index_prompt() == ""      # user 无域
+
+    monkeypatch.setattr(auth, "current_role", lambda: "guest")
+    assert custom_tools.personal_index_prompt() == ""      # 未知角色
+
+
+def test_personal_index_prompt_skips_broken_and_qualifies_admin(login_as):
+    login_as("root", role="admin")
+    scope = "alice"
+    d = config.PERSONAL_CUSTOM_TOOLS_DIR / scope
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "broken_tool.py").write_text("def broken(:\n", encoding="utf-8")
+    assert custom_tools.personal_index_prompt() == ""       # 损坏工具不进索引
+
+    (d / "good_tool.py").write_text(_code_for("good_tool"), encoding="utf-8")
+    prompt = custom_tools.personal_index_prompt()
+    assert "good_tool" in prompt and "（专属域：" in prompt  # 全局视图带域前缀
+
+
+def test_sandbox_up_probe_error_is_false(monkeypatch):
+    """探测抛异常（网络错误）→ 按不可达处理，不向上抛。"""
+    monkeypatch.setattr(config, "SANDBOX_URL", "http://sbx.local")
+    custom_tools._up_cache["t"] = 0.0
+
+    def _boom(*a, **k):
+        raise OSError("MARKER probe failed")
+    monkeypatch.setattr(custom_tools.urllib.request, "urlopen", _boom)
+    assert custom_tools._sandbox_up() is False
+
+
+def test_sandbox_run_tool_passes_code_source(monkeypatch):
+    """专属工具源码随请求直传沙箱（code 非空分支），调用方拿回结果。"""
+    monkeypatch.setattr(config, "SANDBOX_URL", "http://sbx.local")
+    seen = {}
+
+    def _ok(req, timeout=0):
+        import json as _json
+        seen["body"] = _json.loads(req.data.decode())
+        return _FakeUrlOpen(b'{"ok": true, "result": "done"}')
+
+    monkeypatch.setattr(custom_tools.urllib.request, "urlopen", _ok)
+    out = custom_tools._sandbox_run_tool("demo_tool", {"x": 1},
+                                         code="def demo_tool(x):\n    return x\n")
+    assert out == "done"
+    assert seen["body"]["code"].startswith("def demo_tool")
+
+
+def test_resolve_personal_user_without_scope_and_unknown_role(login_as, monkeypatch):
+    from server import auth
+    login_as("alice")
+    monkeypatch.setattr(custom_tools, "current_scope", lambda: None)
+    assert custom_tools._resolve_personal("mine_tool") == "专属自定义工具仅对登录用户可用"
+
+    monkeypatch.setattr(custom_tools, "current_scope", lambda: "alice")
+    monkeypatch.setattr(auth, "current_role", lambda: "guest")
+    assert custom_tools._resolve_personal("mine_tool") == "专属自定义工具仅对登录用户可用"
+
+
+def test_run_personal_tool_rejects_bad_args_and_unresolved(login_as):
+    login_as("alice")
+    assert "args 必须是参数对象" in asyncio.run(
+        custom_tools.run_personal_tool("mine_tool", ["not-a-dict"]))
+    out = asyncio.run(custom_tools.run_personal_tool("Bad-Name", {}))
+    assert "非法工具名" in out                                # 解析失败原样返回
+
+
+def test_run_personal_tool_sandbox_down_fail_closed(login_as, tmp_path, monkeypatch):
+    login_as("alice")
+    p = tmp_path / "mine_tool.py"
+    p.write_text(_code_for("mine_tool"), encoding="utf-8")
+    monkeypatch.setattr(custom_tools, "_resolve_personal", lambda name: ("alice", p))
+    monkeypatch.setattr(custom_tools, "exec_mode", lambda: "sandbox-down")
+    assert "沙箱不可达" in asyncio.run(custom_tools.run_personal_tool("mine_tool", {}))
+
+
+def test_build_and_load_local_tools(monkeypatch):
+    """local 模式正向链路：make_local_tool 成功构造 + 列表非空（日志分支）。"""
+    monkeypatch.setattr(config, "CUSTOM_TOOLS_EXEC", "local")
+    custom_tools.write_custom_tool("ok_tool", _code_for("ok_tool"))
+    tool = custom_tools.make_local_tool(config.CUSTOM_TOOLS_DIR / "ok_tool.py")
+    assert tool is not None and tool.name == "ok_tool"
+    assert [t.name for t in custom_tools.load_langchain_tools()] == ["ok_tool"]
+
+
+def test_sandbox_down_build_and_load_return_empty(monkeypatch):
+    """sandbox-down（fail-closed）：不构造任何工具，列表为空。"""
+    monkeypatch.setattr(custom_tools, "exec_mode", lambda: "sandbox-down")
+    custom_tools.write_custom_tool("ok_tool2", _code_for("ok_tool2"))
+    assert custom_tools.build_tool(config.CUSTOM_TOOLS_DIR / "ok_tool2.py") is None
+    assert custom_tools.load_langchain_tools() == []
