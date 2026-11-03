@@ -70,19 +70,19 @@ def scope_segment(name: str) -> str:
     return s.strip("_")[:57] or "shared"
 
 # 单文件大小上限（MB），防超大文件灌爆内存/磁盘
-UPLOAD_MAX_MB = int(os.getenv("UPLOAD_MAX_MB", "10"))
+UPLOAD_MAX_MB = int(os.environ.get("UPLOAD_MAX_MB", "10"))
 
 # ---- 上下文压缩（v0.17.7：滑动窗口 + 滚动摘要，只改模型视野不动历史）----
 # 历史估算 token 超过「模型窗口 × 比例」时触发：窗口外旧消息滚动摘要注入模型视野；
 # checkpointer 原始历史完整保留（界面恢复/审计不受影响）。按 token 而非轮数触发。
-CONTEXT_COMPACT_ENABLED = os.getenv("CONTEXT_COMPACT_ENABLED", "true").lower() in ("1", "true", "yes")
+CONTEXT_COMPACT_ENABLED = os.environ.get("CONTEXT_COMPACT_ENABLED", "true").lower() in ("1", "true", "yes")
 # v0.17.33（复验 R4）：默认对齐自带 vLLM 窗口（32768）——此前默认 128000，
 # 长会话在压缩触发前先超 32k 模型窗口（文档警示不改变默认行为）；大窗口
 # 模型部署须显式设 128000
-CONTEXT_MAX_TOKENS = int(os.getenv("CONTEXT_MAX_TOKENS", "32768"))        # 模型上下文窗口
-CONTEXT_COMPACT_RATIO = float(os.getenv("CONTEXT_COMPACT_RATIO", "0.6"))   # 触发比例
-CONTEXT_RECENT_TOKENS = int(os.getenv("CONTEXT_RECENT_TOKENS", "8000"))    # 永不裁的近期窗口
-CONTEXT_SUMMARY_HYSTERESIS_TOKENS = int(os.getenv("CONTEXT_SUMMARY_HYSTERESIS_TOKENS", "4000"))  # 重摘滞回
+CONTEXT_MAX_TOKENS = int(os.environ.get("CONTEXT_MAX_TOKENS", "32768"))        # 模型上下文窗口
+CONTEXT_COMPACT_RATIO = float(os.environ.get("CONTEXT_COMPACT_RATIO", "0.6"))   # 触发比例
+CONTEXT_RECENT_TOKENS = int(os.environ.get("CONTEXT_RECENT_TOKENS", "8000"))    # 永不裁的近期窗口
+CONTEXT_SUMMARY_HYSTERESIS_TOKENS = int(os.environ.get("CONTEXT_SUMMARY_HYSTERESIS_TOKENS", "4000"))  # 重摘滞回
 
 # 文本类文件白名单后缀（上传与模型输出共用）：可执行二进制一律不在名单内
 FILE_TEXT_EXTS = {".md", ".markdown", ".txt", ".csv", ".tsv", ".json",

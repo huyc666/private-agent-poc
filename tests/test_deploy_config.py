@@ -54,7 +54,7 @@ def test_ac5_context_tokens_default_and_example_aligned():
     v0.17.32 只做文档警示，默认行为未闭环（默认 128000 + 自带 vLLM 32k，
     长会话在压缩触发前先超窗）。静态读文件断言，不受运行时 .env 干扰。"""
     src = _read("server/config.py")
-    assert 'os.getenv("CONTEXT_MAX_TOKENS", "32768")' in src
+    assert 'os.environ.get("CONTEXT_MAX_TOKENS", "32768")' in src
     env = _read(".env.example")
     assert "# CONTEXT_MAX_TOKENS=32768" in env          # 有效示例同值
     assert "# CONTEXT_MAX_TOKENS=128000" not in env
