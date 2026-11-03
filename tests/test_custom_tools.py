@@ -312,3 +312,14 @@ def test_review_c4_mock_mode_invalid_value_still_fail_closed(monkeypatch):
     custom_tools._up_cache["t"] = 0.0
     custom_tools._auto_warn_cache["t"] = 0.0
     assert custom_tools.exec_mode() == "sandbox-down"
+
+
+def test_s4_validate_syntax_error_sanitized():
+    """S4(b)：语法错误对外文案不拼 SyntaxError 原文——其文本含异常类型、
+    行号与出错行代码片段（经 tools_admin/packs 透传到用户/模型通道），
+    细节只落本机日志（对齐 tools_builtin 保存失败文案先例）。"""
+    err = custom_tools.validate_tool_code("demo_tool", "def broken(:\n")
+    assert err is not None and "语法错误" in err
+    assert "invalid syntax" not in err
+    assert "<unknown>" not in err
+    assert "SyntaxError" not in err

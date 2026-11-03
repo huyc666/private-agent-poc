@@ -847,7 +847,7 @@ def test_ac3_swap_in_check_read_gap_no_outside_content(packs_dir, monkeypatch,
     assert skills.signature() != sig_before      # 检测层捕获换链 → 触发重建重验
 
 
-def test_ac4_scan_survives_root_resolve_loop(packs_dir, monkeypatch):
+def test_ac4_scan_survives_root_resolve_loop(packs_dir, monkeypatch, caplog):
     """AC4/R9 修复要求 2：扫描入口对链接循环收口——包根/资源 resolve 抛
     RuntimeError（注入复现报告 Symlink loop）不得中断 scan_packs，异常包
     fail-closed 转 error 态，健康包继续扫描（沿 C2 注入先例，本机恒跑）。"""
@@ -864,7 +864,11 @@ def test_ac4_scan_survives_root_resolve_loop(packs_dir, monkeypatch):
     monkeypatch.setattr(Path, "resolve", _loop)
     infos = {p["name"]: p for p in packs.scan_packs()}
     assert infos["boom"]["status"] == "error"          # 异常包 fail-closed
-    assert "Symlink loop" in infos["boom"]["error"]     # 错误可定位
+    # S4(b)：对外 error 归类为固定文案，原始异常（Symlink loop）落本机日志
+    assert "包扫描异常" in infos["boom"]["error"]
+    assert "链接循环" in infos["boom"]["error"]         # 错误类别仍可定位
+    assert "Symlink loop" not in infos["boom"]["error"]
+    assert "Symlink loop" in caplog.text                # 日志保留原始异常
     assert infos["healthy"]["status"] == "ok"           # 健康包不受影响
 
 
@@ -947,3 +951,36 @@ def test_review_nested_alias_same_basename_snapshot_not_clobbered(packs_dir):
     assert flat is not None and "平铺技能" in flat
     idx = {s["name"] for s in skills.list_skills()}
     assert idx == {"nested-z", "flat-z"}            # 串包时两者会解析成同名
+
+
+def test_s4_parse_yaml_error_sanitized(packs_dir):
+    """S4(b)：pack.yaml 解析失败的对外 error 不拼 YAML 异常原文——
+    ScannerError 文本含文件内容片段（经包列表/启用拒绝文案透传到用户
+    通道），细节只落本机日志。"""
+    d = packs_dir / "bad-yaml"
+    d.mkdir(parents=True)
+    (d / "pack.yaml").write_text(
+        "name: [unclosed MARKER_YAML_SECRET\n  broken: {", encoding="utf-8")
+    packs.invalidate_scan_cache()
+    p = packs.scan_packs()[0]
+    assert p["status"] == "error"
+    assert "pack.yaml 解析失败" in p["error"]
+    assert "MARKER_YAML_SECRET" not in p["error"]
+    assert "ScannerError" not in p["error"]
+
+
+def test_s4_scan_pack_exception_sanitized(packs_dir, monkeypatch):
+    """S4(b)：包扫描异常（链接循环/IO）的对外 error 不拼异常类型与原文
+    ——OSError 文本含服务器绝对路径，细节只落本机日志。"""
+    _mk_pack(packs_dir, "boom-pack", _valid_manifest("boom-pack"))
+
+    def _boom(pack_dir):
+        raise OSError("MARKER_LINK_LOOP C:\\secret\\packs")
+    monkeypatch.setattr(packs, "_parse_pack", _boom)
+    packs.invalidate_scan_cache()
+    p = packs.scan_packs()[0]
+    assert p["status"] == "error"
+    assert "包扫描异常" in p["error"]
+    assert "MARKER_LINK_LOOP" not in p["error"]
+    assert "OSError" not in p["error"]
+    assert "C:\\secret" not in p["error"]

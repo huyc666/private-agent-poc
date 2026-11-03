@@ -192,7 +192,10 @@ def validate_tool_code(name: str, code: str) -> str | None:
     try:
         tree = ast.parse(code)
     except SyntaxError as e:
-        return f"Python 语法错误: {e}"
+        # S4(b)：不拼 {e}——SyntaxError 文本含异常类型与出错行代码片段；
+        # 对外文案固定，原始异常只落本机日志（对齐 tools_builtin 先例）
+        logger.warning(f"[custom_tools] 工具「{name}」代码语法校验失败: {e}")
+        return "Python 语法错误，请检查代码（详见服务日志）"
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             if not ast.get_docstring(node):

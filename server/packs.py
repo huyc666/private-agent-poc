@@ -108,8 +108,11 @@ def _parse_pack(pack_dir: Path) -> dict:
     try:
         data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
     except Exception as e:
+        # S4(b)：不拼 {e}——YAML 异常文本含文件内容片段；对外文案固定，
+        # 原始异常只落本机日志（对齐 tools_builtin 先例）
         info["status"] = "error"
-        info["error"] = f"pack.yaml 解析失败: {e}"
+        info["error"] = "pack.yaml 解析失败（YAML 格式错误，详见服务日志）"
+        logger.warning(f"[packs] {pack_dir.name} pack.yaml 解析失败: {e}")
         return info
     if not isinstance(data, dict):
         info["status"] = "error"
@@ -382,8 +385,10 @@ def scan_packs() -> list[dict]:
                     # 链路（报告修复要求 2：同步收口扫描入口）
                     info = _new_pack_info(sub)
                     info["status"] = "error"
-                    info["error"] = f"包扫描异常（链接循环/IO？）: {type(e).__name__}: {e}"
-                    logger.warning(f"[packs] {sub.name}: {info['error']}")
+                    # S4(b)：不拼异常类型/原文——OSError 文本含服务器绝对
+                    # 路径；对外文案归类，原始异常只落本机日志
+                    info["error"] = "包扫描异常（链接循环或 IO 错误，详见服务日志）"
+                    logger.warning(f"[packs] {sub.name}: {type(e).__name__}: {e}")
                     result.append(info)
         _mark_shared_kb_tool_conflicts(result)
         _scan_cache = result

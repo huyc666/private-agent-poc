@@ -9,9 +9,12 @@
 两个数据源都不可达时返回明确的错误说明，由上层决定降级策略。
 """
 import json
+import logging
 import os
 import urllib.parse
 import urllib.request
+
+logger = logging.getLogger(__name__)
 
 GEOCODING_URL = os.environ.get(
     "WEATHER_GEOCODING_URL", "https://geocoding-api.open-meteo.com/v1/search")
@@ -130,7 +133,10 @@ def query_weather(city: str) -> str:
         except LookupError as e:
             not_found = str(e)  # 城市未找到：记录后继续尝试下一个数据源
         except Exception as e:
-            errors.append(f"{source.__name__}: {e}")
+            # S4(b)：不拼 {e}——网络异常文本常含内部代理/解析地址；对外
+            # 只归类到数据源名，原始异常只落本机日志
+            logger.warning(f"[weather] {source.__name__} 查询失败: {e}")
+            errors.append(source.__name__)
     if not_found and not errors:
         return not_found
     detail = "；".join(errors + ([not_found] if not_found else []))

@@ -240,3 +240,24 @@ def test_ac1_skill_signature_read_failure_fallback(login_as, monkeypatch):
     monkeypatch.setattr(Path, "read_bytes", _boom)
     sig = skills.signature()
     assert sig and all(h == "?" for _rel, h in sig)
+
+
+def test_s4_skill_signature_error_sentinel_sanitized(monkeypatch):
+    """S4(b)：签名遍历异常哨兵不拼异常原文——OSError 文本含服务器绝对
+    路径；哨兵固定为 __scan_error__（异常态≠正常态仍触发重扫自愈，
+    哨兵语义不变），细节只落本机日志。"""
+    d = config.SKILLS_DIR / "sentinel-skill"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("---\nname: sentinel-skill\n---\nx",
+                                encoding="utf-8")
+
+    def _boom(p, allowed, root, src):
+        raise OSError("MARKER_ABS_PATH C:\\secret\\skills")
+    monkeypatch.setattr(skills, "_skill_entry_ok", _boom)
+    sig = skills.signature()
+    text = repr(sig)
+    assert "MARKER_ABS_PATH" not in text
+    assert "OSError" not in text
+    assert "C:\\secret" not in text
+    sentinels = [h for _rel, h in sig if _rel.startswith("__error__:")]
+    assert sentinels and all(h == "__scan_error__" for h in sentinels)

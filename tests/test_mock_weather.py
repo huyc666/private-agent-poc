@@ -405,3 +405,18 @@ def test_mock_tool_create_rejected():
     assert "拒绝" in answer
     assert not (config.CUSTOM_TOOLS_DIR / "dice_roll.py").exists()
     assert "dice_roll" not in [t["name"] for t in custom_tools.list_custom_tools()]
+
+
+def test_s4_query_weather_error_sanitized(monkeypatch):
+    """S4(b)：全部数据源失败时对外文案不拼异常原文——网络异常文本常含
+    内部代理/解析地址（经工具返回透传到用户/模型通道），细节只落本机
+    日志。"""
+    def _raise(city):
+        raise ConnectionError("MARKER_INTERNAL_URL http://proxy.internal:8080")
+    monkeypatch.setattr(weather, "_via_open_meteo", _raise)
+    monkeypatch.setattr(weather, "_via_itboy", _raise)
+    result = weather.query_weather("北京")
+    assert "天气查询失败" in result
+    assert "MARKER_INTERNAL_URL" not in result
+    assert "proxy.internal" not in result
+    assert "ConnectionError" not in result

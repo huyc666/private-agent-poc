@@ -486,9 +486,9 @@ def signature() -> tuple:
     ——快照只在重建时刷新、重建只由签名变化触发（可加载内容变化 ⇒ 必先
     反映为签名变化 ⇒ 重建重验 ⇒ 快照整体替换）。
     v0.17.36 R9：每来源目录 rglob/条目构建遇链接循环（OSError/RuntimeError，
-    含 RecursionError）→ 哨兵条目参与比较，不上抛中断热检测；哨兵随异常
-    变化、故障恢复后回归正常形态，差异触发重扫（与 packs.packs_signature
-    同口径）。"""
+    含 RecursionError）→ 哨兵条目参与比较，不上抛中断热检测；S4(b) 起哨
+    兵为固定值（不拼异常原文防外泄）、与正常形态不同，故障恢复后回归正常
+    形态，差异触发重扫（与 packs.packs_signature 同口径）。"""
     items = []
     for d, _src, allowed, root, _texts in _all_skill_dirs():
         if not d.is_dir():
@@ -502,6 +502,8 @@ def signature() -> tuple:
             # 评审 F2（P2）：哨兵键带来源标签（包来源 pack:<名>，内核用
             # 目录名）便于定位；补告警对齐 scan_packs 的可定位口径
             logger.warning(f"[skills] 来源「{_src or d.name}」技能签名遍历遇链接循环/IO"
-                           f" 异常（{type(e).__name__}），哨兵条目参与比较待重建自愈")
-            items.append((f"__error__:{_src or d.name}", f"{type(e).__name__}:{e}"))
+                           f" 异常（{type(e).__name__}: {e}），哨兵条目参与比较待重建自愈")
+            # S4(b)：哨兵值固定、不拼异常原文（含服务器绝对路径）——异常态
+            # ≠正常态仍触发重扫自愈，哨兵语义不变；细节只落本机日志
+            items.append((f"__error__:{_src or d.name}", "__scan_error__"))
     return tuple(items)
