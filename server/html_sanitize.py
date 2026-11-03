@@ -71,12 +71,12 @@ class _Sanitizer(HTMLParser):
     """白名单消毒器：_suppress 栈双模式——"drop"（子树全丢，压栈配对
     嵌套主动内容）、"strip"（剥壳保文，子内容照常处理）。"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._out: list[str] = []
         self._suppress: list[tuple[str, str]] = []  # [(tag, "drop"|"strip")]
 
-    def handle_starttag(self, tag, attrs):
+    def handle_starttag(self, tag, attrs) -> None:
         if self._suppress and self._suppress[-1][1] == "drop":
             # 已在被丢子树内：只跟踪嵌套的主动内容用于闭合配对，其余静默
             if tag in _DROP_TREE:
@@ -115,7 +115,7 @@ class _Sanitizer(HTMLParser):
                 parts.append(f' {name}="{_html.escape(val or "", quote=True)}"')
         self._out.append(f"<{''.join(parts)}>")
 
-    def handle_endtag(self, tag):
+    def handle_endtag(self, tag) -> None:
         if self._suppress:
             top_tag, top_mode = self._suppress[-1]
             if tag == top_tag:
@@ -127,7 +127,7 @@ class _Sanitizer(HTMLParser):
         if tag in _TAGS and tag not in _VOID:
             self._out.append(f"</{tag}>")
 
-    def handle_data(self, data):
+    def handle_data(self, data) -> None:
         if self._suppress and self._suppress[-1][1] == "drop":
             return
         # convert_charrefs=True 下实体已解码为字面文本，输出统一转义

@@ -212,14 +212,14 @@ class _HTMLText(HTMLParser):
     _BLOCK = {"p", "div", "li", "tr", "td", "th", "section", "article", "br",
               "ul", "ol", "table", "pre", "blockquote", "title"}
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.lines: list[str] = []
         self._skip = 0        # script/style 嵌套深度
         self._head = 0        # 当前标题级别（0=普通块）
         self._buf: list[str] = []
 
-    def handle_starttag(self, tag, attrs):
+    def handle_starttag(self, tag, attrs) -> None:
         if tag in ("script", "style"):
             self._skip += 1
         elif self._skip:
@@ -230,7 +230,7 @@ class _HTMLText(HTMLParser):
         elif tag in self._BLOCK:
             self._flush()
 
-    def handle_endtag(self, tag):
+    def handle_endtag(self, tag) -> None:
         if tag in ("script", "style"):
             self._skip = max(0, self._skip - 1)
         elif self._skip:
@@ -241,11 +241,11 @@ class _HTMLText(HTMLParser):
         elif tag in self._BLOCK:
             self._flush()
 
-    def handle_data(self, data):
+    def handle_data(self, data) -> None:
         if self._skip == 0 and data.strip():
             self._buf.append(data.strip())
 
-    def _flush(self):
+    def _flush(self) -> None:
         if self._buf:
             text = "".join(self._buf)
             self._buf = []
@@ -255,7 +255,7 @@ class _HTMLText(HTMLParser):
                 else:
                     self.lines.append(text)
 
-    def close(self):
+    def close(self) -> None:
         super().close()
         self._flush()
 

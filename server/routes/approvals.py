@@ -1,5 +1,6 @@
 """审批端点：审批记录查询与危险操作决议。自 server/main.py 原样搬迁。"""
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -13,7 +14,7 @@ router = APIRouter()
 
 
 @router.get("/api/approvals")
-async def approval_list(request: Request, limit: int = 50):
+async def approval_list(request: Request, limit: int = 50) -> dict:
     """最近审批记录（审计）：工具、参数摘要、状态（pending/approved/rejected/
     expired/abandoned，abandoned = 已批准但执行丢失，见 approval.mark_abandoned）。
     user 角色只看自己创建的；approver/admin 看全部。"""
@@ -25,7 +26,7 @@ async def approval_list(request: Request, limit: int = 50):
 
 
 @router.post("/api/approve")
-async def approve(req: ApproveRequest, request: Request):
+async def approve(req: ApproveRequest, request: Request) -> Any:
     """前端提交危险操作审批决定。
     决议权限（v0.17.9 收紧）：仅 admin/approver 可决议任何 pending——此前
     「user 可决议自己创建的」存在自审自批漏洞（发起者自己批准即可放行

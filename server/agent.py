@@ -17,7 +17,7 @@ import logging
 import re
 import sys
 import threading
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from . import (approval, config, custom_tools, packs, sessions, skills,
                telemetry, usage, tools_admin)
@@ -75,7 +75,7 @@ async def load_mcp_tools() -> list:
 
 # ---------------------------------------------------------------- Agent 构建
 
-def _rebuild_graph():
+def _rebuild_graph() -> None:
     """组装 内置 + MCP + 自定义 + 领域包工具 并重建 Agent 图。
     自定义工具/领域包变化时调用本函数即可免重启生效（checkpointer 复用，会话不丢）。
     同名工具先挂载者优先（内置 > MCP > 自定义 > 领域包）：ToolNode 按名做
@@ -158,7 +158,7 @@ def _dynamic_prompt(state: dict) -> list:
     return [SystemMessage(content=system)] + list(msgs)
 
 
-async def build_agent():
+async def build_agent() -> None:
     """在应用启动时调用一次。Mock 模式下只登记工具名。"""
     # 启动即打印压缩配置（评审 P3：阈值配错/忘配时在日志一眼可见，不必等触发）
     if config.CONTEXT_COMPACT_ENABLED:
@@ -188,7 +188,7 @@ async def build_agent():
         覆盖的是私有转换方法：升级 langchain-openai 后需复核签名。"""
 
         def _convert_chunk_to_generation_chunk(self, chunk, default_chunk_class,
-                                               base_generation_info):
+                                               base_generation_info) -> Any:
             gen = super()._convert_chunk_to_generation_chunk(
                 chunk, default_chunk_class, base_generation_info)
             if gen is not None and isinstance(gen.message, AIMessageChunk):
@@ -214,7 +214,7 @@ async def build_agent():
     logger.info(f"[agent] 已连接模型 {config.MODEL_NAME} @ {config.LLM_BASE_URL}，工具: {STATE.tool_names}")
 
 
-async def _make_checkpointer():
+async def _make_checkpointer() -> None:
     """按 CHECKPOINTER 配置创建 checkpointer（会话与审批中断现场的持久化层）。
     postgres 模式首次连接自动建表；连接失败时给出明确指引（fail-fast）。"""
     if config.CHECKPOINTER == "postgres":
@@ -264,47 +264,47 @@ class FencedCheckpointer(BaseCheckpointSaver):
     校验为进程内缓存优先的同步 SQLite 单键 SELECT——「校验→写入」之间
     无 await，单进程事件循环内原子（spec 3.7）。"""
 
-    def __init__(self, inner):
+    def __init__(self, inner) -> None:
         self._inner = inner
         # serde 对齐 inner（基类 __init__ 默认落 JsonPlusSerializer；Pregel
         # 写入序列化经 checkpointer.serde，须与被包装 saver 一致）
         super().__init__(serde=getattr(inner, "serde", None))
 
-    def __getattr__(self, name):
+    def __getattr__(self, name) -> Any:
         return getattr(self._inner, name)
 
     @staticmethod
-    def _check(config):
+    def _check(config) -> None:
         sid = ((config or {}).get("configurable") or {}).get("thread_id", "")
         if sid and sessions.tombstoned(sid):
             raise sessions.SessionDeletedError(
                 f"会话 {sid} 已删除，checkpoint 写入被拒（fail-closed）")
 
-    async def aput(self, config, *args, **kwargs):
+    async def aput(self, config, *args, **kwargs) -> Any:
         self._check(config)
         # N2 修复：透传 inner 返回值（BaseCheckpointSaver 契约 RunnableConfig，
         # langgraph aupdate_state/fork/bulk update 用返回值构造 next_config）
         return await self._inner.aput(config, *args, **kwargs)
 
-    async def aput_writes(self, config, *args, **kwargs):
+    async def aput_writes(self, config, *args, **kwargs) -> None:
         self._check(config)
         await self._inner.aput_writes(config, *args, **kwargs)
 
-    def put(self, config, *args, **kwargs):
+    def put(self, config, *args, **kwargs) -> Any:
         self._check(config)
         return self._inner.put(config, *args, **kwargs)
 
-    def alist(self, *args, **kwargs):
+    def alist(self, *args, **kwargs) -> Any:
         """N3 修复：基类 alist 是 async generator——生成器直传，不得经
         _delegate_async 包装成 coroutine（aget_state_history 等历史回溯
         路径直接 async for，coroutine 无 __aiter__）。"""
         return self._inner.alist(*args, **kwargs)
 
-    def put_writes(self, config, *args, **kwargs):
+    def put_writes(self, config, *args, **kwargs) -> None:
         self._check(config)
         self._inner.put_writes(config, *args, **kwargs)
 
-    def with_allowlist(self, *args, **kwargs):
+    def with_allowlist(self, *args, **kwargs) -> "FencedCheckpointer":
         """评审 C1（v0.17.38）：langgraph 在 LANGGRAPH_STRICT_MSGPACK=true 时经
         checkpointer.with_allowlist(...) 取「allowlist 包装的 saver」——裸透传
         inner 会返回无栅栏对象，该路径的 checkpoint 写静默绕过 tombstone 校验。
@@ -314,15 +314,15 @@ class FencedCheckpointer(BaseCheckpointSaver):
 
 # 基类 BaseCheckpointSaver 的其余公开方法（NotImplementedError 占位）批量
 # 改写为对 inner 的显式委托——包装后读写路径行为与被包装 saver 完全一致。
-def _delegate_sync(name):
-    def m(self, *args, **kwargs):
+def _delegate_sync(name) -> Callable[..., Any]:
+    def m(self, *args, **kwargs) -> Any:
         return getattr(self._inner, name)(*args, **kwargs)
     m.__name__ = name
     return m
 
 
-def _delegate_async(name):
-    async def m(self, *args, **kwargs):
+def _delegate_async(name) -> Callable[..., Any]:
+    async def m(self, *args, **kwargs) -> Any:
         return await getattr(self._inner, name)(*args, **kwargs)
     m.__name__ = name
     return m
@@ -338,7 +338,7 @@ for _n in ("aget", "aget_tuple", "adelete_thread",
     setattr(FencedCheckpointer, _n, _delegate_async(_n))
 
 
-async def close_checkpointer():
+async def close_checkpointer() -> None:
     """应用退出时关闭 PostgresSaver 连接（lifespan 里调用）。"""
     if STATE.checkpointer_cm is not None:
         await STATE.checkpointer_cm.__aexit__(None, None, None)
@@ -348,7 +348,7 @@ async def close_checkpointer():
 _reload_lock = threading.Lock()
 
 
-def maybe_reload_custom_tools():
+def maybe_reload_custom_tools() -> None:
     """自定义工具/领域包/沙箱可达性/技能文件有变化时重建图（每轮对话开头检查，开销可忽略）。
     加锁串行化：并发会话同时检测到变化时只重建一次；调用方应经
     asyncio.to_thread 调用（沙箱探测是同步网络 IO，不能阻塞事件循环）。"""
@@ -492,7 +492,7 @@ async def prepare_compaction(session_id: str) -> None:
         logger.warning(f"[agent] 上下文压缩失败（本轮回退纯窗口模式）: {e}")
 
 
-async def _pre_model_hook(state: dict, config=None):   # 参数名须为 config（RunnableCallable 按名注入）
+async def _pre_model_hook(state: dict, config=None) -> dict:   # 参数名须为 config（RunnableCallable 按名注入）
     """pre_model_hook：每轮模型调用前改写模型视野。
     ① 命中摘要缓存时裁掉已摘要前缀、注入摘要 SystemMessage（尾部超触发线才裁）；
     ② 无摘要时总量超触发线才裁到近期窗口（否则全量保留）；

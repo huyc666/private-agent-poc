@@ -2,6 +2,7 @@
 自 server/main.py 原样搬迁。"""
 import asyncio
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -73,7 +74,7 @@ async def _purge_session(session_id: str) -> int:
 
 
 @router.get("/api/sessions")
-async def session_list(request: Request, limit: int = 50):
+async def session_list(request: Request, limit: int = 50) -> dict:
     """会话列表（对话记录来自 SQLite，重启后仍在）。
     user/approver 只列自己的会话（v0.17.29 收紧）；admin 列全部。"""
     ident = _acl_identity(request)
@@ -84,7 +85,7 @@ async def session_list(request: Request, limit: int = 50):
 
 
 @router.get("/api/sessions/{session_id}/history")
-async def session_history(request: Request, session_id: str, limit: int = 0):
+async def session_history(request: Request, session_id: str, limit: int = 0) -> Any:
     """一个会话的最近 N 条消息（默认 SESSION_MAX_HISTORY）。user 角色限本人
     会话；tombstone 会话（非 admin）按不存在处理（404，v0.17.37 P0-1）。"""
     ident = _acl_identity(request)
@@ -97,7 +98,7 @@ async def session_history(request: Request, session_id: str, limit: int = 0):
 
 
 @router.delete("/api/sessions/{session_id}")
-async def session_delete(request: Request, session_id: str):
+async def session_delete(request: Request, session_id: str) -> Any:
     """删除会话（隐私/治理，v0.17.37 P0-1 语义升级：删除 = 不可逆终局）。
     覆盖全存储面（_purge_session）：展示记录 + checkpointer 模型上下文 +
     压缩摘要缓存 + 挂起审批（fail-closed）+ 会话租约，并写 tombstone

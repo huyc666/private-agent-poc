@@ -38,7 +38,7 @@ _TOOL_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,49}$")
 _PACK_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,49}$")
 
 
-def check_token(x_sandbox_token: str = Header(default="")):
+def check_token(x_sandbox_token: str = Header(default="")) -> None:
     """共享令牌鉴权（fail-closed）：
     1) 配置了 SANDBOX_AUTH_TOKEN → 强制校验 X-Sandbox-Token，不匹配 401；
     2) 未配置令牌 → 默认拒绝（503），仅 SANDBOX_OPEN_MODE=true 时放行
@@ -87,7 +87,7 @@ class ToolRequest(BaseModel):
 
 
 @app.get("/health")
-def health():
+def health() -> dict:
     return {"status": "ok", "timeout": RUN_TIMEOUT,
             "tools_dir": TOOLS_DIR, "packs_dir": PACKS_DIR}
 
@@ -128,14 +128,14 @@ def _run_isolated(argv: list[str], extra_env: dict | None = None) -> dict:
 
 
 @app.post("/run", dependencies=[Depends(check_token)])
-def run(req: RunRequest):
+def run(req: RunRequest) -> dict:
     if len(req.code) > 20_000:
         return {"error": "代码过长（>20KB），已拒绝"}
     return _run_isolated({"code": req.code})
 
 
 @app.post("/run_tool", dependencies=[Depends(check_token)])
-def run_tool(req: ToolRequest):
+def run_tool(req: ToolRequest) -> dict:
     """执行工具。工具代码来自 Agent 侧人工审批落盘的文件（只读挂载卷），
     或专属工具场景随请求直传的源码（v0.17.12，与 /run 同等隔离执行）。
     此处只做名称合法性/存在性/大小校验，执行本身走与 /run 相同的隔离子进程。

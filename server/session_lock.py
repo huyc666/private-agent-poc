@@ -113,7 +113,7 @@ class SessionLease:
     """
 
     def __init__(self, session_id: str, owner: str, ttl: float = LEASE_TTL,
-                 wait_timeout: float = LEASE_ACQUIRE_TIMEOUT):
+                 wait_timeout: float = LEASE_ACQUIRE_TIMEOUT) -> None:
         self.session_id = session_id
         self.owner = owner
         self.ttl = ttl
@@ -122,7 +122,7 @@ class SessionLease:
         self.lost = False  # 心跳发现租约被他人接管 → 调用方应中止本轮对话
         self._hb: asyncio.Task | None = None
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "SessionLease":
         # 有界等待（架构评审 P3）：此前 while 循环无上限，同会话另一请求
         # 长时间持有租约（如审批 resume 挂起）时新请求会无限挂起且无反馈。
         # 超时抛 LeaseTimeout，由调用方向用户返回可理解的错误事件。
@@ -140,7 +140,7 @@ class SessionLease:
         self._hb = asyncio.create_task(self._heartbeat())
         return self
 
-    async def _heartbeat(self):
+    async def _heartbeat(self) -> None:
         try:
             while True:
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
@@ -156,7 +156,7 @@ class SessionLease:
         except asyncio.CancelledError:
             pass
 
-    async def __aexit__(self, *exc):
+    async def __aexit__(self, *exc) -> None:
         if self._hb is not None:
             self._hb.cancel()
         if self.acquired:

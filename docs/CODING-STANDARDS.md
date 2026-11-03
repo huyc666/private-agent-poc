@@ -27,7 +27,7 @@
 |---|---|---|
 | should | 新函数标注参数与返回类型，尤其是跨模块调用与工具函数 | [agent.py](file:///e:/codebase/GitHub/private-agent-poc/server/agent.py#L34-L50) `parse_citations(...) -> tuple[str, list \| None]` |
 | should | 联合类型用 PEP 604 写法（`str \| None`），不用 `Optional[str]` | 同上；[auth.py](file:///e:/codebase/GitHub/private-agent-poc/server/auth.py#L416) `remote_host: str \| None` |
-| 现状/待收敛 | 存量代码标注覆盖不均：agent/usage/auth 较完整，部分 tools_*、main 端点内部辅助函数无标注。不强求回填，改动到的函数顺手补齐 | — |
+| 现状/待收敛 | ~~存量标注覆盖不均~~ 批 4 后半已回填：server/+sandbox 覆盖率约 88%（317/362，单行签名口径）。残留缺口为有意留空——返回第三方对象或动态结构处标 `Any`/留空（如 `usage.UsageCallback.handler`、`tools/build_kb._get_engine`），不猜不错标。注意：FastAPI 端点若返回 dict 与 Response 子类的混合 union，注解只能写 `-> Any`（union 含 Response 子类会让 FastAPI 响应建模报错） | — |
 
 ### 1.3 异常处理
 

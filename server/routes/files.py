@@ -8,6 +8,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -110,7 +111,7 @@ def _scope_files(base: Path, scope: str | None) -> list[Path]:
 
 
 @router.post("/api/uploads")
-async def upload_doc(request: Request, name: str = ""):
+async def upload_doc(request: Request, name: str = "") -> Any:
     """上传文档（raw body，免 python-multipart 依赖）：存 TOOL_WORKSPACE/uploads/
     <用户域>/（落在 read_text_file 工作区边界内，模型直接可读分析）。.docx 解包
     提取为文本落盘（<原名>.docx.md）。多用户按身份分域（开放模式 shared）。"""
@@ -163,7 +164,7 @@ async def upload_doc(request: Request, name: str = ""):
 
 
 @router.get("/api/files/{name:path}")
-async def download_output_file(request: Request, name: str):
+async def download_output_file(request: Request, name: str) -> Any:
     """下载模型输出的文件（仅限 OUTPUTS_DIR 目录内，即 save_output_file 落盘处；
     不开放 uploads/ 与工作区其余路径——下载面只暴露模型主动产出的结果文件）。
     多用户按身份分域：user 角色只能访问自己域的文件；approver/admin/开放模式
@@ -202,7 +203,7 @@ async def download_output_file(request: Request, name: str):
 
 
 @router.get("/api/uploads")
-async def uploads_list(request: Request):
+async def uploads_list(request: Request) -> dict:
     """已上传文档清单（相对名/大小/修改时间）。user 角色只列自己域，
     approver/admin/开放模式列全部域（相对名带 <域>/ 前缀）。"""
     scope = None if _global_file_view(request) else _user_scope(request)
@@ -218,7 +219,7 @@ async def uploads_list(request: Request):
 
 
 @router.post("/api/skillpacks")
-async def upload_skillpack(request: Request, overwrite: bool = False):
+async def upload_skillpack(request: Request, overwrite: bool = False) -> Any:
     """上传技能包 zip：服务端安全解包直接挂载（多文件技能：SKILL.md +
     references/ 等）。存储按角色分流（v0.17.9）：user 角色导入本人专属域
     skills_personal/<域>/（仅本人可见），approver/admin/开放模式导入通用
@@ -257,7 +258,7 @@ async def upload_skillpack(request: Request, overwrite: bool = False):
 
 
 @router.delete("/api/uploads/{name:path}")
-async def upload_delete(request: Request, name: str):
+async def upload_delete(request: Request, name: str) -> Any:
     """删除一个已上传文档（相对名寻址）。user 角色只能删除自己域的文档。"""
     rel = _safe_rel(name)
     if not rel:

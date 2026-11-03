@@ -10,6 +10,7 @@ import re
 import secrets
 import unicodedata
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request
@@ -29,7 +30,7 @@ _KB_SANITIZE_MAX = 2 * 1024 * 1024  # Mammoth 输出消毒上限（超限 413，
 
 
 @router.post("/api/kb/sanitize")
-async def kb_sanitize(request: Request):
+async def kb_sanitize(request: Request) -> Any:
     """Mammoth 输出消毒通道（v0.17.37 P0-2，spec 4.3）：docx 原文页前端还原后
     不再直写 innerHTML，先提交服务端白名单消毒（html_sanitize）再入页。
     认证由中间件统一管（开放模式与 source 端点同口径）；cookie 身份的
@@ -81,7 +82,7 @@ def _source_page(title: str, body: str) -> HTMLResponse:
 
 @router.get("/api/kb/source")
 async def kb_source(request: Request, kb: str, doc: str, kind: str = "line",
-                    a: int = 0, b: int = 0, sheet: str = "", raw: int = 0):
+                    a: int = 0, b: int = 0, sheet: str = "", raw: int = 0) -> Any:
     """知识库原文定位视图（只读）：出处卡片点击后按锚点打开对应格式。
 
     分流（spec 2.2 澄清 2 分层排版还原）：

@@ -14,7 +14,7 @@ router = APIRouter()
 
 
 @router.post("/api/auth/login")
-async def login_endpoint(req: LoginRequest, request: Request):
+async def login_endpoint(req: LoginRequest, request: Request) -> JSONResponse:
     """账号密码登录（v0.15.0）：签发 pat- 短期令牌。
     成功失败都走同一路径，不区分「用户不存在」与「密码错误」（防枚举）。
     PLAN 6.3：登录成败均落审计（who/when/what + 来源 IP）。"""
@@ -40,7 +40,7 @@ async def login_endpoint(req: LoginRequest, request: Request):
 
 
 @router.post("/api/auth/logout")
-async def logout_endpoint(request: Request):
+async def logout_endpoint(request: Request) -> JSONResponse:
     """注销：使当前 pat- 登录令牌立即失效（pak- Key 请用吊销/轮换）。
     v0.17.37 P0-2：按 Bearer 或 pap_token Cookie 注销（cookie 登录态同样
     可登出），并以 Max-Age=0 清除浏览器侧 Cookie。logout 豁免 CSRF 校验

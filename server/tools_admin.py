@@ -21,7 +21,7 @@ from .tools_builtin import (delete_workspace_file, list_uploaded_docs,
 logger = logging.getLogger(__name__)
 
 
-def _reload_graph():
+def _reload_graph() -> None:
     """管理操作改变能力边界后重建 Agent 图（懒导入避免与 agent.py 循环依赖）。"""
     from . import agent
     agent.maybe_reload_custom_tools()
@@ -188,7 +188,7 @@ async def enable_pack(name: str) -> str:
     if name not in known:
         return f"领域包「{name}」不存在，可用 list_packs 查看全部领域包"
 
-    def _do():
+    def _do() -> str:
         result = packs.enable_pack(name)
         _reload_graph()  # 立即重建图，免重启生效
         return result
@@ -210,7 +210,7 @@ async def disable_pack(name: str) -> str:
         # 平台包治理规则：运行时不可禁用，直接拒绝（不发起审批）
         return packs.disable_pack(name)
 
-    def _do():
+    def _do() -> str:
         result = packs.disable_pack(name)
         _reload_graph()  # 立即重建图，免重启生效
         return result
@@ -243,7 +243,7 @@ async def create_pack(name: str, description: str, prompt: str = "",
     if name in known:
         return f"领域包「{name}」已存在，可用 list_packs 查看全部领域包"
 
-    def _do():
+    def _do() -> str:
         result = packs.create_pack(name, description, prompt, tool_name, tool_code,
                                    skill_name, skill_description, skill_instructions,
                                    env=env, requires_env=requires_env,
@@ -270,7 +270,7 @@ async def sign_pack(name: str) -> str:
     if name not in known:
         return f"领域包「{name}」不存在，可用 list_packs 查看全部领域包"
 
-    def _do():
+    def _do() -> str:
         result = packs.sign_pack(name)
         _reload_graph()  # 签名后信任状态变化，重建图立即生效
         return result
@@ -285,7 +285,7 @@ async def delete_pack(name: str) -> str:
     if name not in known:
         return f"领域包「{name}」不存在，可用 list_packs 查看全部领域包"
 
-    def _do():
+    def _do() -> str:
         result = packs.delete_pack(name)
         _reload_graph()  # 立即重建图，免重启生效
         return result
@@ -352,7 +352,7 @@ BUILTIN_TOOLS = [read_text_file, list_uploaded_docs, save_output_file,
                  sign_pack, orchestrate_subtasks]
 
 
-def builtin_langchain_tools():
+def builtin_langchain_tools() -> list:
     """包装为 LangChain StructuredTool（内置工具不依赖第三方，始终可用）。
     注意：通用业务能力（时间/计算等）不在此处——它们是平台包 core-utils 的工具，
     经 packs.load_pack_tools() 挂载，与内核运行时管理工具分层。"""

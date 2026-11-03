@@ -22,7 +22,7 @@ def _bearer_token(request: Request) -> str:
     return h[7:].strip() if h.startswith("Bearer ") else ""
 
 
-def _admin_guard(request: Request):
+def _admin_guard(request: Request) -> JSONResponse | None:
     """管理端点统一守卫（七端点复用；与包级 RBAC 同构的双层拦截——前端隐藏
     入口只是体验层，服务端判定才是防线）。返回 JSONResponse 表示拦截。"""
     if not auth.enabled():

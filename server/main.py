@@ -17,6 +17,7 @@ import re
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any, AsyncIterator
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 APPROVAL_SCAN_INTERVAL = 300.0  # 周期扫描间隔（秒）：已批准但未执行的审批 → abandoned
 
 
-async def _approval_scan_loop():
+async def _approval_scan_loop() -> None:
     """后台周期任务：把「已批准但从未执行」的审批标记为 abandoned。
     等待协程可能在进程存活时死亡（如客户端断开被取消），仅靠启动扫描
     捕捉不到，需周期兜底（v0.17.2）。单条 UPDATE，开销可忽略。
@@ -55,7 +56,7 @@ async def _approval_scan_loop():
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 启动清理带宽限期：同机多进程共享 STATE_DB 时，其他进程可能有在途
     # resume（approved 尚未 mark_executed），刚决议的记录不判为丢失
     cleaned = approval.cleanup_stale(
@@ -106,7 +107,7 @@ app = FastAPI(title="Private Agent POC", lifespan=lifespan)
 
 
 @app.middleware("http")
-async def auth_middleware(request: Request, call_next):
+async def auth_middleware(request: Request, call_next) -> Any:
     """认证中间件：开放模式放行（user=None，各端点按旧行为处理）；
     认证模式下 /api/*（除 /api/health 与 /api/auth/login）必须持有效身份——
     反向代理身份头（SSO 钩子）、Bearer 凭据（pak- Key / pat- 令牌）或
@@ -173,19 +174,19 @@ async def auth_middleware(request: Request, call_next):
 
 
 @app.get("/")
-async def index():
+async def index() -> FileResponse:
     return FileResponse(config.PROJECT_ROOT / "web" / "index.html")
 
 
 @app.get("/console")
-async def console_page():
+async def console_page() -> FileResponse:
     """管理控制台页面（v0.17.29，PLAN 3.1）。页面级路径不受认证中间件拦截
     （与 / 同口径），登录态由页面自行经 /api/health 判定后展示遮罩或跳转。"""
     return FileResponse(config.PROJECT_ROOT / "web" / "console.html")
 
 
 @app.get("/tokens.css")
-async def tokens_css():
+async def tokens_css() -> FileResponse:
     """共享设计 token（v0.17.28 快赢体系落盘，聊天页与控制台共用单一来源）。
     白名单式静态文件，不做任意路径文件服务。"""
     return FileResponse(config.PROJECT_ROOT / "web" / "tokens.css",
@@ -193,7 +194,7 @@ async def tokens_css():
 
 
 @app.get("/api/health")
-async def health(request: Request):
+async def health(request: Request) -> dict:
     # 认证模式未携带有效 Key：只回最小信息（不泄露模型/工具/包等内部状态）
     if auth.enabled() and request.state.user is None:
         return {"status": "ok", "auth_enabled": True}
@@ -331,7 +332,7 @@ def _migrate_scope_dirs() -> None:
 # ---------------------------------------------------------------- 知识库定位（v0.17.25，PLAN 2.2）
 
 @app.get("/vendor/{name}")
-def vendor_file(name: str):
+def vendor_file(name: str) -> Any:
     """本地 vendor 静态资源（离线前端约束：mammoth 等第三方库 vendor 到
     web/vendor/，内网断网可用，不引 CDN）。仅纯文件名，防穿越。"""
     if not name or name != Path(name).name or ".." in name \
@@ -389,7 +390,7 @@ from server.routes import register  # noqa: E402
 register(app)
 
 
-def _parse_host_port():
+def _parse_host_port() -> tuple[str, int]:
     host, port = "0.0.0.0", 7100
     argv = sys.argv[1:]
     for i, a in enumerate(argv):

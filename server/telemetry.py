@@ -10,6 +10,7 @@ import os
 import threading
 import time
 from contextlib import contextmanager
+from typing import Any, Iterator
 
 try:
     from dotenv import load_dotenv
@@ -31,7 +32,7 @@ def enabled() -> bool:
     return os.environ.get("LANGFUSE_ENABLED", "false").lower() in ("1", "true", "yes")
 
 
-def get_client():
+def get_client() -> Any:
     """返回 Langfuse 客户端；未启用或暂不可用返回 None。
     连接失败不再永久停用（架构评审 P3）：失败后进入 RETRY_COOLDOWN 冷却，
     期满自动重试——观测服务后启动/临时宕机恢复后，埋点无需重启即可接回。"""
@@ -83,7 +84,7 @@ def langchain_callbacks() -> list:
 
 
 @contextmanager
-def trace_span(name: str, as_type: str = "span", input=None):
+def trace_span(name: str, as_type: str = "span", input=None) -> Iterator[Any]:
     """手动埋点用。观测不可用时 yield None，业务代码照常执行。"""
     client = get_client()
     if client is None:
@@ -97,7 +98,7 @@ def trace_span(name: str, as_type: str = "span", input=None):
         yield None
 
 
-def set_trace_io(input=None, output=None):
+def set_trace_io(input=None, output=None) -> None:
     """设置当前 trace 的输入/输出（在 trace_span 上下文内调用）。"""
     client = get_client()
     if client is None:
@@ -108,7 +109,7 @@ def set_trace_io(input=None, output=None):
         pass
 
 
-def flush():
+def flush() -> None:
     """应用关闭时冲刷缓冲的观测数据。"""
     if _client is not None:
         try:

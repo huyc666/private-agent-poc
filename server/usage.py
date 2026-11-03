@@ -86,7 +86,7 @@ def parse_model_prices(raw: str) -> dict:
         logger.warning("[usage] MODEL_PRICES 需为 {模型名: {input, output}} JSON 对象，"
                        "金额折算停用（token 照常记录）")
         return {}
-    def _num(v):
+    def _num(v) -> bool:
         return isinstance(v, (int, float)) and not isinstance(v, bool)
     prices = {}
     for name, item in data.items():
@@ -197,14 +197,14 @@ class UsageCallback:
     contextvar 单值会互相覆盖，run_id 是每次调用的天然配对键）；
     任何回调内异常吞掉，计量失败绝不阻塞主链路。"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         from langchain_core.callbacks import BaseCallbackHandler
 
         starts: dict = {}  # run_id → monotonic 起始时刻（end/error 后弹出；
         # 客户端中断的滞留条目由 _STARTS_MAX 超限清理兜底）
 
         class _Handler(BaseCallbackHandler):
-            def on_llm_start(self, serialized, prompts, **kwargs):
+            def on_llm_start(self, serialized, prompts, **kwargs) -> None:
                 try:
                     rid = str(kwargs.get("run_id") or "")
                     if rid:
@@ -218,7 +218,7 @@ class UsageCallback:
                 except Exception:
                     pass  # 计时失败不影响落账与主链路
 
-            def on_llm_end(self, response, **kwargs):
+            def on_llm_end(self, response, **kwargs) -> None:
                 try:
                     rid = str(kwargs.get("run_id") or "")
                     with _lock:
@@ -234,7 +234,7 @@ class UsageCallback:
                 except Exception:
                     pass  # 计量失败绝不阻塞主链路
 
-            def on_llm_error(self, error, **kwargs):
+            def on_llm_error(self, error, **kwargs) -> None:
                 try:
                     rid = str(kwargs.get("run_id") or "")
                     with _lock:

@@ -6,6 +6,7 @@ import logging
 import os
 import secrets
 import uuid
+from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -65,7 +66,7 @@ def _chat_session_verdict(identity: dict, session_id: str) -> bool:
 
 
 @router.post("/api/chat")
-async def chat(req: ChatRequest, request: Request):
+async def chat(req: ChatRequest, request: Request) -> Any:
     # 服务端生成不可预测会话 ID（P0-1，v0.17.37）：token_hex(8)=16 位 hex，
     # 替代 uuid4().hex[:8]（可预测且空间小）；客户端自报 ID 仍兼容（续聊既有会话）
     session_id = req.session_id or secrets.token_hex(8)
@@ -102,7 +103,7 @@ async def chat(req: ChatRequest, request: Request):
     collected: list[str] = []
     finished = False
 
-    async def event_stream():
+    async def event_stream() -> AsyncIterator[str]:
         nonlocal finished
         owner = f"{run_id}@{os.getpid()}"
         # 同会话串行化（v0.16.4 + v0.17.1 加固）：

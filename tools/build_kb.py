@@ -29,6 +29,7 @@ import shutil
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -95,7 +96,7 @@ def _embed_openai(texts: list[str]) -> list[list[float]]:
     return out
 
 
-def _resolve_embed():
+def _resolve_embed() -> Callable[[list[str]], list[list[float]]]:
     if os.environ.get("EMBED_BACKEND", "local").strip().lower() == "openai":
         return _embed_openai
     return _embed_local
@@ -111,7 +112,7 @@ def tokenize(text: str) -> list[str]:
     terms = list(_WORD.findall(text))
     buf: list[str] = []
 
-    def flush():
+    def flush() -> None:
         if len(buf) == 1:
             terms.append(buf[0])
         else:
@@ -134,7 +135,7 @@ def chunk_markdown(text: str) -> list[tuple[str, str]]:
     heading = "（前言）"
     buf: list[str] = []
 
-    def flush():
+    def flush() -> None:
         body = "\n".join(buf).strip()
         if body:
             chunks.append((heading, body))
@@ -186,7 +187,7 @@ def chunk_markdown_anchored(text: str, anchors: list) -> list[tuple[str, str, di
     heading = "（前言）"
     buf: list[int] = []
 
-    def flush():
+    def flush() -> None:
         idxs = list(buf)
         buf.clear()
         if any(lines[i].strip() for i in idxs):

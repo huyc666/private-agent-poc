@@ -1,6 +1,7 @@
 """管理控制台端点（admin 专属）：用户与 Key 管理（PLAN 3.1）+
 包管理（PLAN 3.2）。自 server/main.py 原样搬迁。"""
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -25,7 +26,7 @@ def _audit(operator: str, action: str, target: str, role: str = "") -> None:
 
 
 @router.get("/api/admin/users")
-async def admin_list_users(request: Request):
+async def admin_list_users(request: Request) -> Any:
     """用户全量清单（AC2）：口径与 CLI list 一致，状态判定（正常/已过期/已吊销）
     由前端按 revoked / expires_at 呈现。"""
     if err := _admin_guard(request):
@@ -34,7 +35,7 @@ async def admin_list_users(request: Request):
 
 
 @router.post("/api/admin/users")
-async def admin_create_user(request: Request, req: AdminUserCreate):
+async def admin_create_user(request: Request, req: AdminUserCreate) -> Any:
     """建用户（AC3）：响应携带一次性明文 Key，服务端不落日志不复存。"""
     if err := _admin_guard(request):
         return err
@@ -51,7 +52,7 @@ async def admin_create_user(request: Request, req: AdminUserCreate):
 
 @router.post("/api/admin/users/{username}/rotate")
 async def admin_rotate_key(request: Request, username: str,
-                           req: AdminUserOption):
+                           req: AdminUserOption) -> Any:
     """轮换 Key（AC4）：旧 Key 立即失效。已吊销用户拒绝轮换——rotate 会清
     吊销位，须封死「借轮换复活」的口子（吊销不可恢复，spec 澄清 4）。"""
     if err := _admin_guard(request):
@@ -71,7 +72,7 @@ async def admin_rotate_key(request: Request, username: str,
 
 @router.post("/api/admin/users/{username}/password")
 async def admin_reset_password(request: Request, username: str,
-                               req: AdminPasswordSet):
+                               req: AdminPasswordSet) -> Any:
     """重置密码（AC5）：长度服务端强校验，明文不落日志。"""
     if err := _admin_guard(request):
         return err
@@ -89,7 +90,7 @@ async def admin_reset_password(request: Request, username: str,
 
 
 @router.post("/api/admin/users/{username}/role")
-async def admin_set_role(request: Request, username: str, req: AdminRoleSet):
+async def admin_set_role(request: Request, username: str, req: AdminRoleSet) -> Any:
     """设角色（AC6）：立即生效；admin 不能把自己的角色改为非 admin
     （防最后一个管理员自锁，端点层判定——CLI 保持原行为）。"""
     if err := _admin_guard(request):
@@ -110,7 +111,7 @@ async def admin_set_role(request: Request, username: str, req: AdminRoleSet):
 
 @router.post("/api/admin/users/{username}/department")
 async def admin_set_department(request: Request, username: str,
-                               req: AdminDepartmentSet):
+                               req: AdminDepartmentSet) -> Any:
     """设部门（AC7）：空串清除；调岗即时生效（报表/知识库分库权限按新部门）。"""
     if err := _admin_guard(request):
         return err
@@ -124,7 +125,7 @@ async def admin_set_department(request: Request, username: str,
 
 
 @router.post("/api/admin/users/{username}/revoke")
-async def admin_revoke_user(request: Request, username: str):
+async def admin_revoke_user(request: Request, username: str) -> Any:
     """吊销账号（AC8）：pak- Key 与 pat- 令牌立即失效，不可恢复（无解禁）。"""
     if err := _admin_guard(request):
         return err
@@ -140,7 +141,7 @@ async def admin_revoke_user(request: Request, username: str):
 
 # ---- PLAN 3.2 包与审批面板：包管理端点（admin 专属，packs.py 函数收口到页面）----
 
-def _pack_toggle_result(result: tuple[str, str]):
+def _pack_toggle_result(result: tuple[str, str]) -> dict | JSONResponse:
     """启停结构化结果 → HTTP 响应（评审①：按状态分流，不靠文案子串猜测）。"""
     status, msg = result
     if status == "ok":
@@ -151,7 +152,7 @@ def _pack_toggle_result(result: tuple[str, str]):
 
 
 @router.get("/api/admin/packs")
-async def admin_list_packs(request: Request):
+async def admin_list_packs(request: Request) -> Any:
     """包全量清单（AC1）：口径与 packs.list_packs 管理视图一致，含平台包。"""
     if err := _admin_guard(request):
         return err
@@ -159,7 +160,7 @@ async def admin_list_packs(request: Request):
 
 
 @router.post("/api/admin/packs/{name}/disable")
-async def admin_disable_pack(request: Request, name: str):
+async def admin_disable_pack(request: Request, name: str) -> Any:
     """停用领域包（AC2/AC3）：立即生效并持久化（STATE_DB disabled_packs 表）。
     平台包拒停（400，前端按钮隐藏只是体验层，服务端是防线）。"""
     if err := _admin_guard(request):
@@ -172,7 +173,7 @@ async def admin_disable_pack(request: Request, name: str):
 
 
 @router.post("/api/admin/packs/{name}/enable")
-async def admin_enable_pack(request: Request, name: str):
+async def admin_enable_pack(request: Request, name: str) -> Any:
     """启用领域包（AC2/AC3）：status≠ok 拒启（400，不把故障包引进运行时）。"""
     if err := _admin_guard(request):
         return err
