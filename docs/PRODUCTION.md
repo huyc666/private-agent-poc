@@ -36,7 +36,18 @@ python -c "import secrets; print(secrets.token_hex(32))"   # 生成 4 个不同�
       定期轮换用 `rotate <用户名> --days N`，限期 Key 用 `add --days N`）
 - [ ] 浏览器端使用者建议改走账号密码登录：`python tools/manage_users.py passwd <用户名>`
       设置密码后，前端登录框输入账号密码即可（签发 12 小时 pat- 令牌，
-      `AUTH_TOKEN_TTL_HOURS` 可调）；Key 留给脚本/服务调用
+      `AUTH_TOKEN_TTL_HOURS` 可调）；Key 留给脚本/服务调用。
+      会话策略（v0.17.42 起）：固定 TTL 到期强制重新登录（不滑动续签）；
+      同一账号允许多端并发登录（每次登录签发独立令牌）；登出只注销当前端；
+      改密/重置密码/吊销用户会立即吊销该账号全部令牌（全端登出）
+- [ ] **HTTPS 前置（浏览器密码登录的生产前置条件）**：生产部署必须把 Agent 置于
+      HTTPS 之后（反向代理如 nginx/Caddy 终止 TLS，Agent 本身可继续监听 HTTP——
+      Cookie 的 Secure 是浏览器侧语义，与 Agent 监听协议无关），并在 `.env`
+      设置 `AUTH_COOKIE_SECURE=true`（v0.17.37 起浏览器登录态为
+      HttpOnly SameSite=Lax Cookie，置 true 后追加 Secure，浏览器只在 HTTPS
+      回传）。未配置时认证模式启动会打 WARNING 提醒（不阻断，仅本地 HTTP
+      开发可忽略）。反向代理需把外部主机名/端口正确透传，且仍须剥离客户端
+      自报的 SSO 同名身份头
 - [ ] 验收：无 Key 访问 `/api/chat` 返回 401；持 user Key 决议他人审批返回 403；
       错误密码登录返回 401 且不区分「用户不存在/密码错误」；同一账号连错 5 次
       锁定 30 秒（v0.17.2 登录限流）

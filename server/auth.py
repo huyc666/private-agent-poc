@@ -196,16 +196,23 @@ def _verify_password(password: str, stored: str) -> bool:
 
 def set_password(username: str, password: str) -> bool:
     """设置/重置用户密码（只存 PBKDF2 加盐散列）。
-    用户不存在或密码短于 MIN_PASSWORD_LEN 返回 False。"""
+    用户不存在或密码短于 MIN_PASSWORD_LEN 返回 False。
+    v0.17.42（PLAN #4 Cookie 生产化，用户裁决采纳）：改密即全端登出——
+    清空该用户全部 pat- 登录令牌（与 revoke_user 同口径），防改密/重置后
+    旧浏览器会话续存至过期；其他用户会话不受影响。"""
     if len(password or "") < MIN_PASSWORD_LEN:
         return False
     with _lock:
         conn = _connect()
         try:
             _ensure_schema(conn)
+            username = username.strip()
             cur = conn.execute(
                 "UPDATE api_users SET password_hash = ? WHERE username = ?",
-                (_hash_password(password), username.strip()))
+                (_hash_password(password), username))
+            if cur.rowcount > 0:
+                conn.execute("DELETE FROM auth_tokens WHERE username = ?",
+                             (username,))
             conn.commit()
             return cur.rowcount > 0
         finally:

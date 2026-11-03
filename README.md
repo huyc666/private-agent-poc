@@ -1,10 +1,12 @@
 # Private Agent POC — 私有化 Agent 开发运行框架
 
-**版本：v0.17.41**（2026-11-03）
+**版本：v0.17.42**（2026-11-03）
 
 最小可运行的私有化 Agent 框架：**vLLM（Qwen 27B）+ LangGraph（Agent 循环 + 多 Agent 编排）+ MCP（工具协议）+ Skills（技能系统）+ 对话式自定义工具 + 人工审批流 + 代码沙箱 + 知识库问答（RAG，五类文档入库 + 混合检索 + 出处标注与点击定位 + 部门专属库隔离与跨领域知识库共享）+ API 认证与多用户（部门/角色/专属域 + 管理控制台）+ 用量计量（token / 金额 / 健康度 / 部门报表）+ Langfuse 观测 + FastAPI（SSE 流式接口）+ 离线聊天前端**。
 
 ## 版本记录
+
+- **v0.17.42**：Cookie 生产化——后续轮次待办 #4（v0.17.37 rereview P2）整改，用户裁决五项全按建议：①改密即全端登出——`set_password` 清空该用户全部 pat- 登录令牌（与 `revoke_user` 同口径），防改密/重置后旧浏览器会话续存至过期，admin 重置密码端点与 CLI `passwd` 同路径生效（CLI 提示同步新语义）；②Secure 全链路收口——`AUTH_ENABLED=true` 且 `AUTH_COOKIE_SECURE=false` 时启动 WARNING 告警生产 HTTPS 须开 Secure（不阻断本地 HTTP 开发，与 SSO 白名单告警同一惯例），`.env.example` 补 `AUTH_COOKIE_SECURE` 条目，PRODUCTION.md 补 HTTPS/反向代理前置要求（反向代理可终止 TLS、Agent 继续监听 HTTP——Secure 仅浏览器侧语义），SECURITY.md 新增 7.7 部署红线检查项；③会话策略经裁决固化并写入部署文档——固定 TTL（默认 12h）到期强制重登录不滑动续签、同一账号多端并发登录无上限（登出只注销当前端，吊销/改密全端失效）、登录响应体 token 字段维持保留（v0.17.37 既有裁决，程序化 curl 兼容）。TRAE-code-review 双子代理评审 4 候选：修复 2 项（AC15 补 auth_tokens 行数硬断言 / CLI passwd 提示同步全端登出语义）、有意保留 2 项（跨进程改密竞态窗口与 revoke_user 同口径既有存在非本次引入 / 测试默认配置下告警日志噪音）。新增 6 个用例（AC15 改密全端登出 ×3 + AC16 启动告警 ×3），全量 694 个用例通过（18 skipped 语义不变）。
 
 - **v0.17.41**：共享技能审批收口 + 审批职责分离——后续轮次待办 #2（复核报告 §2 P1 + v0.17.38 spec「不做」注）整改（spec：docs/specs/security-hardening-v0.17.41.md，用户裁决四个取舍点全按建议）：①共享技能写入统一审批——`tools_admin.create_skill` 非专属域分支（approver/admin/开放模式写全员可见的通用 `skills/`）包 `approval.require_approval` 审批门（args 含名称/描述/overwrite/指令前 300 字预览，与 create_custom_tool 同口径），批准后才落盘；user 角色专属域路径保持自助免审批（影响面限于本人原则不变），存储函数 `skills.create_skill` 保持纯写盘（审批门在工具入口层）；②审批发起/批准职责分离——`approval.resolve` 增加自批校验：发起者身份可判定（非 NULL、非 anonymous）且等于决议人时一律 forbidden（全部审批类型统一分离，不维护高风险豁免清单），堵「admin/approver 自审自批」；豁免面：开放模式（双方 anonymous，SECURITY.md 标注）与存量 NULL user_id 记录；硬分离不加配置开关，部署要求至少两名决议角色（SECURITY.md 8.4）；③mock 演示流审批创建改走代际栅栏——`mock_stream` 透传 session_id/generation，三处演示审批点改 `create_approval_fenced`，栅栏拒绝即中止演示不创建 pending；此后无栅栏 `create_approval` 仅存于 agent.py 防御分支（generation=None，生产不可达）与测试；mock 技能演示剧本同步改「审批后落盘」（与 create_pack 演示同构）。POST /api/skillpacks 通用导入本轮不做（spec 记「不做」，SECURITY.md 8.5 标注已知取舍）。TRAE-code-review 双子代理评审 4 候选：修复 2 项（C1 mock 演示流批准决议后执行前缺代际终局再校验——审批等待期间会话被删仍会在已删会话上落盘，与真实路径 spec 3.4.3「决议落库后再校验」口径不一致，mock 四处审批点补 _fenced_off 终局校验 + 批准与删除竞争防线用例 / C2 create_skill 审批卡片展示原始入参与落盘规范化名不一致——先 strip().lower() 再进审批，对齐 create_pack）、有意保留 1 项（C3 tools_admin 与 skills 两侧分流判定重复——同一对 ContextVar 求值恒等，与 _file_sig 务实重复先例同级）、证伪排除 1 项（C4 认证模式空 username 决议绕过——main.py:162-164 未认证 401，空 username 仅开放模式既有约定）。新增 9 个用例（AC1-AC6 共 8 个 + 评审防线 1 个），修订 1 个（mock 技能演示按新口径），全量 686 个用例通过（18 skipped 语义不变）。
 

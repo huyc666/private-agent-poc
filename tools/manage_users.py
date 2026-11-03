@@ -96,7 +96,8 @@ def main() -> int:
                 print("两次输入不一致，未修改")
                 return 1
         if auth.set_password(args.username, password):
-            print(f"用户「{args.username}」的登录密码已更新。")
+            print(f"用户「{args.username}」的登录密码已更新，"
+                  "其全部已登录会话（Cookie/令牌）已失效，需重新登录。")
             return 0
         print(f"设置失败：用户「{args.username}」不存在，"
               f"或密码少于 {auth.MIN_PASSWORD_LEN} 位")

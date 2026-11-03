@@ -98,6 +98,15 @@ async def lifespan(app: FastAPI):
         logger.warning("[auth] WARNING: 已配置 AUTH_IDENTITY_DEPARTMENT_HEADER 但未配置"
                        " AUTH_IDENTITY_HEADER——部门头不会被读取（部门头随身份头一同生效），"
                        "SSO 部门透传未启用。")
+    # v0.17.42（PLAN #4 Cookie 生产化，rereview P2，用户裁决 a）：认证开启但
+    # 未开 AUTH_COOKIE_SECURE 时启动告警——pap_token 不带 Secure 会在 HTTP 明文
+    # 链路回传凭据。不阻断启动（本地 HTTP 开发场景合法），与 SSO 白名单告警同一
+    # 惯例；Secure 是浏览器侧语义，反向代理终止 TLS 时 Agent 可继续监听 HTTP。
+    if auth.enabled() and not config.AUTH_COOKIE_SECURE:
+        logger.warning("[auth] WARNING: 认证已开启但 AUTH_COOKIE_SECURE=false——"
+                       "pap_token Cookie 未带 Secure，HTTP 明文链路上凭据有窃取风险。"
+                       "生产 HTTPS 部署（含反向代理终止 TLS 的场景）请在 .env 设置"
+                       " AUTH_COOKIE_SECURE=true；仅本地 HTTP 开发可忽略本告警。")
     await agent.build_agent()
     scan_task = asyncio.create_task(_approval_scan_loop())
     yield

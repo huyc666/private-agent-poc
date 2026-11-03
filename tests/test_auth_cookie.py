@@ -8,7 +8,14 @@
 - CSRF 纵深：cookie 身份的非 GET 请求必须带 X-Requested-With，否则 403
   （login/logout 豁免；Bearer/SSO 头路径免校验）；
 - 登出按 Bearer 或 cookie 令牌注销 + Set-Cookie Max-Age=0 清除浏览器侧。
+
+v0.17.42（PLAN #4 Cookie 生产化，rereview P2）追加：
+- AC15 改密全端登出：set_password / admin 重置密码清空该用户全部 pat-
+  令牌（与 revoke_user 同口径），旧 Cookie 立即失效；其他用户不受影响；
+- AC16 启动 WARNING：AUTH_ENABLED=true 且 AUTH_COOKIE_SECURE=false 时
+  启动告警（不阻断本地 HTTP 开发）；Secure 开启或开放模式不告警。
 """
+import logging
 import sqlite3
 
 import pytest
@@ -168,3 +175,91 @@ def test_ac14_bearer_logout_regression(api):
     assert r.status_code == 200 and r.json()["ok"] is True
     assert api.get("/api/sessions",
                    headers={"Authorization": f"Bearer {tok}"}).status_code == 401
+
+
+# ---------------------------------------------------------------- AC15 改密全端登出
+
+
+def test_ac15_set_password_revokes_sessions(api):
+    """AC15：改密吊销该用户全部 pat- 会话——旧 Cookie 立即失效（全端登出）；
+    旧密码不可再登录，新密码可正常登录。"""
+    _mk_password_user("pw1")
+    tok = _login(api, "pw1")
+    assert api.get("/api/sessions", headers=_cookie(tok)).status_code == 200
+    assert auth.set_password("pw1", "newpassword456")
+    # 硬断言：auth_tokens 行已删（改密即全端登出的直接证据）
+    conn = sqlite3.connect(config.STATE_DB)
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM auth_tokens").fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 0
+    # 旧 Cookie 立即失效
+    assert api.get("/api/sessions", headers=_cookie(tok)).status_code == 401
+    # 旧密码拒绝、新密码可登录
+    assert api.post("/api/auth/login", json={
+        "username": "pw1", "password": "password123"}).status_code == 401
+    assert api.post("/api/auth/login", json={
+        "username": "pw1", "password": "newpassword456"}).status_code == 200
+
+
+def test_ac15_set_password_other_user_unaffected(api):
+    """AC15：改密只吊销目标用户会话——其他用户 Cookie 不受波及
+    （与 revoke_user 同口径）。"""
+    _mk_password_user("pw2")
+    _mk_password_user("pw3")
+    tok_a = _login(api, "pw2")
+    tok_b = _login(api, "pw3")
+    assert auth.set_password("pw2", "newpassword456")
+    assert api.get("/api/sessions", headers=_cookie(tok_a)).status_code == 401
+    assert api.get("/api/sessions", headers=_cookie(tok_b)).status_code == 200
+
+
+def test_ac15_admin_reset_password_revokes_sessions(api):
+    """AC15：admin 重置密码端点同样全端登出（与 set_password 同一路径）。"""
+    admin_key = auth.add_user("root", role="admin")
+    assert admin_key
+    _mk_password_user("pw4")
+    tok = _login(api, "pw4")
+    r = api.post("/api/admin/users/pw4/password",
+                 headers={"Authorization": f"Bearer {admin_key}"},
+                 json={"password": "adminreset999"})
+    assert r.status_code == 200
+    assert api.get("/api/sessions", headers=_cookie(tok)).status_code == 401
+
+
+# ---------------------------------------------------------------- AC16 启动 WARNING
+
+
+def test_ac16_startup_warns_when_cookie_insecure(
+        client_factory, monkeypatch, caplog):
+    """AC16：AUTH_ENABLED=true 且 AUTH_COOKIE_SECURE=false → 启动 WARNING
+    告警生产 HTTPS 须开 Secure（不阻断本地 HTTP 开发）。"""
+    monkeypatch.setattr(config, "AUTH_ENABLED", True)
+    monkeypatch.setattr(config, "AUTH_COOKIE_SECURE", False)
+    with caplog.at_level(logging.WARNING, logger="server.main"):
+        with client_factory():
+            pass
+    assert any("AUTH_COOKIE_SECURE" in r.message for r in caplog.records)
+
+
+def test_ac16_no_warning_when_cookie_secure(
+        client_factory, monkeypatch, caplog):
+    """AC16：AUTH_COOKIE_SECURE=true（生产 HTTPS 部署）→ 不告警。"""
+    monkeypatch.setattr(config, "AUTH_ENABLED", True)
+    monkeypatch.setattr(config, "AUTH_COOKIE_SECURE", True)
+    with caplog.at_level(logging.WARNING, logger="server.main"):
+        with client_factory():
+            pass
+    assert not any("AUTH_COOKIE_SECURE" in r.message for r in caplog.records)
+
+
+def test_ac16_no_warning_when_auth_disabled(
+        client_factory, monkeypatch, caplog):
+    """AC16：开放模式（AUTH_ENABLED=false）无 Cookie 认证面 → 不告警。"""
+    monkeypatch.setattr(config, "AUTH_ENABLED", False)
+    monkeypatch.setattr(config, "AUTH_COOKIE_SECURE", False)
+    with caplog.at_level(logging.WARNING, logger="server.main"):
+        with client_factory():
+            pass
+    assert not any("AUTH_COOKIE_SECURE" in r.message for r in caplog.records)

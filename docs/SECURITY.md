@@ -100,6 +100,7 @@
 | 7.4 | 沙箱已部署且鉴权生效 | `/api/health` 的 custom_tools_exec=sandbox；不带令牌调 `/run` | sandbox；无令牌 401 | 🖥️ 目标环境（令牌机制已实测） |
 | 7.5 | 签名强制已开启 | 未签名包加载结果 | 不可用 | 🖥️ 目标环境 |
 | 7.6 | SSO 头防伪 | `AUTH_PROXY_ALLOWED_IPS` 白名单 + 网关剥离客户端自报同名头 | 身份头只来自白名单代理 | 🖥️ 目标环境 |
+| 7.7 | Cookie Secure 已开启（v0.17.42） | `.env` AUTH_COOKIE_SECURE=true + 登录响应 Set-Cookie | pap_token 带 HttpOnly+Secure+SameSite=Lax；HTTPS 前置（反向代理可终止 TLS，Secure 仅浏览器侧语义） | 🖥️ 目标环境（未配置时启动 WARNING 兜底提醒） |
 
 ## 八、已知限制与接受风险（POC 阶段明示）
 
