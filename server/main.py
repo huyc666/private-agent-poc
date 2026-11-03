@@ -1,4 +1,5 @@
-"""FastAPI 入口：静态页面 + SSE 流式聊天接口 + 健康检查 + 会话/审批记录查询。
+﻿"""FastAPI 入口：应用装配（lifespan/中间件）+ 静态页面 + 健康检查；
+业务端点按资源域拆在 server/routes/（编码规范批 4），本文件末尾 register(app) 挂载。
 
 启动：python server/main.py [--host 0.0.0.0] [--port 7100]
 
@@ -28,19 +29,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi import FastAPI, Request
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                Response, StreamingResponse)
-from pydantic import BaseModel, Field
 
 from server import (agent, approval, audit, auth, config, custom_tools,
                     html_sanitize, packs, session_lock, sessions, skills,
                     telemetry, usage)
+from server.webdeps import (_bearer_token, _admin_guard, _acl_identity,
+                            LoginRequest, ChatRequest, KbSanitizeRequest,
+                            ApproveRequest)
 from tools import kb_parsers  # 定位端点按锚点重解析文档（服务器侧，不进包）
 
 logger = logging.getLogger(__name__)
-
-
-def _bearer_token(request: Request) -> str:
-    h = request.headers.get("Authorization", "")
-    return h[7:].strip() if h.startswith("Bearer ") else ""
 
 
 APPROVAL_SCAN_INTERVAL = 300.0  # 周期扫描间隔（秒）：已批准但未执行的审批 → abandoned
@@ -185,301 +183,6 @@ async def auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-@app.post("/api/auth/login")
-async def login_endpoint(req: LoginRequest, request: Request):
-    """账号密码登录（v0.15.0）：签发 pat- 短期令牌。
-    成功失败都走同一路径，不区分「用户不存在」与「密码错误」（防枚举）。
-    PLAN 6.3：登录成败均落审计（who/when/what + 来源 IP）。"""
-    if not auth.enabled():
-        return JSONResponse({"error": "当前为开放模式，无需登录"}, status_code=400)
-    ip = request.client.host if request.client else ""
-    # PBKDF2 200k 迭代是 CPU 密集同步调用（实测 300ms+），挪线程池避免阻塞
-    # 事件循环（全项目评审问题4；同 resolve_identity 的 to_thread 先例）
-    result = await asyncio.to_thread(auth.login, req.username, req.password)
-    if result is None:
-        audit.log(req.username.strip()[:64], "", "登录失败", detail=ip)
-        return JSONResponse({"error": "用户名或密码错误"}, status_code=401)
-    audit.log(req.username.strip()[:64], "", "登录成功", detail=ip)
-    # v0.17.37 P0-2（spec 4.5）：登录态迁 HttpOnly Cookie——JS 不可读
-    # （XSS 窃取面消除），SameSite=Lax 挡跨站附带；AUTH_COOKIE_SECURE=true
-    # （HTTPS 部署）追加 Secure；响应体 token 字段保留（程序化 curl 兼容）。
-    resp = JSONResponse(result)
-    resp.set_cookie(
-        "pap_token", result["token"], httponly=True, samesite="lax",
-        max_age=int(config.AUTH_TOKEN_TTL_HOURS * 3600), path="/",
-        secure=config.AUTH_COOKIE_SECURE)
-    return resp
-
-
-@app.post("/api/auth/logout")
-async def logout_endpoint(request: Request):
-    """注销：使当前 pat- 登录令牌立即失效（pak- Key 请用吊销/轮换）。
-    v0.17.37 P0-2：按 Bearer 或 pap_token Cookie 注销（cookie 登录态同样
-    可登出），并以 Max-Age=0 清除浏览器侧 Cookie。logout 豁免 CSRF 校验
-    （登出本身无破坏性，且 cookie 过期后登出不应被拦）。"""
-    token = _bearer_token(request) or request.cookies.get("pap_token", "")
-    await asyncio.to_thread(auth.logout, token)
-    resp = JSONResponse({"ok": True})
-    resp.delete_cookie("pap_token", path="/")
-    return resp
-
-
-# ---- PLAN 3.1 管理控制台：用户与 Key 管理（admin 专属，CLI 能力收口到页面）----
-
-def _admin_guard(request: Request):
-    """管理端点统一守卫（七端点复用；与包级 RBAC 同构的双层拦截——前端隐藏
-    入口只是体验层，服务端判定才是防线）。返回 JSONResponse 表示拦截。"""
-    if not auth.enabled():
-        return JSONResponse(
-            {"error": "开放模式无用户体系，管理端点不可用"}, status_code=400)
-    if request.state.user is None:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    if request.state.user.get("role") != "admin":
-        return JSONResponse({"error": "需要管理员角色"}, status_code=403)
-    return None
-
-
-def _audit(operator: str, action: str, target: str, role: str = "") -> None:
-    """管理动作结构化日志（AC10）+ 统一审计落库（PLAN 6.3）。
-    绝不打印明文 Key 等敏感值。"""
-    logger.info(f"[admin] {operator} {action} {target}")
-    audit.log(operator, role, action, target=target)
-
-
-class AdminUserCreate(BaseModel):
-    username: str
-    role: str = "user"
-    # 上界 10 年：防止超大值写出永不触发的 expires_at（评审问题3；CLI 暂未加）
-    days: int = Field(default=0, ge=0, le=3650)
-    department: str = ""
-
-
-class AdminUserOption(BaseModel):
-    days: int = Field(default=0, ge=0, le=3650)
-
-
-class AdminPasswordSet(BaseModel):
-    password: str
-
-
-class AdminRoleSet(BaseModel):
-    role: str
-
-
-class AdminDepartmentSet(BaseModel):
-    department: str = ""
-
-
-@app.get("/api/admin/users")
-async def admin_list_users(request: Request):
-    """用户全量清单（AC2）：口径与 CLI list 一致，状态判定（正常/已过期/已吊销）
-    由前端按 revoked / expires_at 呈现。"""
-    if err := _admin_guard(request):
-        return err
-    return {"users": auth.list_users()}
-
-
-@app.post("/api/admin/users")
-async def admin_create_user(request: Request, req: AdminUserCreate):
-    """建用户（AC3）：响应携带一次性明文 Key，服务端不落日志不复存。"""
-    if err := _admin_guard(request):
-        return err
-    key = auth.add_user(req.username, role=req.role, days=req.days,
-                        department=req.department)
-    if key is None:
-        return JSONResponse(
-            {"error": "创建失败：用户名已存在、为保留名（shared）、超长（>64 字）或角色非法"},
-            status_code=400)
-    _audit(request.state.user["username"], "创建用户", req.username.strip(),
-           role=request.state.user["role"])
-    return {"key": key}
-
-
-@app.post("/api/admin/users/{username}/rotate")
-async def admin_rotate_key(request: Request, username: str,
-                           req: AdminUserOption):
-    """轮换 Key（AC4）：旧 Key 立即失效。已吊销用户拒绝轮换——rotate 会清
-    吊销位，须封死「借轮换复活」的口子（吊销不可恢复，spec 澄清 4）。"""
-    if err := _admin_guard(request):
-        return err
-    # 评审问题1：路径参数先归一化（auth 层 set_role 等会 strip），否则带空格
-    # 变体（如 %20admin）可绕过「不能操作自己」的自保护比较
-    username = (username or "").strip()
-    if auth.user_by_name(username) is None:
-        return JSONResponse({"error": "用户不存在或已吊销"}, status_code=404)
-    key = auth.rotate_user(username, days=req.days)
-    if key is None:
-        return JSONResponse({"error": "用户不存在"}, status_code=404)
-    _audit(request.state.user["username"], "轮换 Key", username,
-           role=request.state.user["role"])
-    return {"key": key}
-
-
-@app.post("/api/admin/users/{username}/password")
-async def admin_reset_password(request: Request, username: str,
-                               req: AdminPasswordSet):
-    """重置密码（AC5）：长度服务端强校验，明文不落日志。"""
-    if err := _admin_guard(request):
-        return err
-    username = (username or "").strip()
-    if auth.user_by_name(username) is None:
-        return JSONResponse({"error": "用户不存在或已吊销"}, status_code=404)
-    if len(req.password or "") < auth.MIN_PASSWORD_LEN:
-        return JSONResponse(
-            {"error": f"密码至少 {auth.MIN_PASSWORD_LEN} 位"}, status_code=400)
-    if not auth.set_password(username, req.password):
-        return JSONResponse({"error": "密码设置失败"}, status_code=400)
-    _audit(request.state.user["username"], "重置密码", username,
-           role=request.state.user["role"])
-    return {"ok": True}
-
-
-@app.post("/api/admin/users/{username}/role")
-async def admin_set_role(request: Request, username: str, req: AdminRoleSet):
-    """设角色（AC6）：立即生效；admin 不能把自己的角色改为非 admin
-    （防最后一个管理员自锁，端点层判定——CLI 保持原行为）。"""
-    if err := _admin_guard(request):
-        return err
-    username = (username or "").strip()
-    if req.role not in auth.ROLES:
-        return JSONResponse({"error": "非法角色"}, status_code=400)
-    operator = request.state.user["username"]
-    if operator == username and req.role != "admin":
-        return JSONResponse(
-            {"error": "不能把自己的角色改为非 admin"}, status_code=400)
-    if not auth.set_role(username, req.role):
-        return JSONResponse({"error": "用户不存在或已吊销"}, status_code=404)
-    _audit(operator, "设角色", f"{username} → {req.role}",
-           role=request.state.user["role"])
-    return {"ok": True}
-
-
-@app.post("/api/admin/users/{username}/department")
-async def admin_set_department(request: Request, username: str,
-                               req: AdminDepartmentSet):
-    """设部门（AC7）：空串清除；调岗即时生效（报表/知识库分库权限按新部门）。"""
-    if err := _admin_guard(request):
-        return err
-    username = (username or "").strip()
-    if not auth.set_department(username, req.department):
-        return JSONResponse({"error": "用户不存在或已吊销"}, status_code=404)
-    _audit(request.state.user["username"], "设部门",
-           f"{username} → {req.department.strip() or '（清空）'}",
-           role=request.state.user["role"])
-    return {"ok": True}
-
-
-@app.post("/api/admin/users/{username}/revoke")
-async def admin_revoke_user(request: Request, username: str):
-    """吊销账号（AC8）：pak- Key 与 pat- 令牌立即失效，不可恢复（无解禁）。"""
-    if err := _admin_guard(request):
-        return err
-    username = (username or "").strip()
-    operator = request.state.user["username"]
-    if operator == username:
-        return JSONResponse({"error": "不能吊销自己"}, status_code=400)
-    if not auth.revoke_user(username):
-        return JSONResponse({"error": "用户不存在或已吊销"}, status_code=404)
-    _audit(operator, "吊销账号", username, role=request.state.user["role"])
-    return {"ok": True}
-
-
-@app.get("/api/audit")
-async def audit_query(request: Request, actor: str = "", action: str = "",
-                      since: int = 0, limit: int = 200):
-    """审计流水查询（PLAN 6.3，AC5）：admin 专属。过滤：操作人/动作/起始时间
-    （毫秒）；limit 收敛 [1,1000]（防全表拉取）。拒绝路径复用 _admin_guard。"""
-    if err := _admin_guard(request):
-        return err
-    return {"records": audit.query(actor=actor, action=action,
-                                   since_ms=since, limit=limit)}
-
-
-@app.get("/api/audit/export")
-async def audit_export(request: Request, actor: str = "", action: str = "",
-                       since: int = 0):
-    """审计流水导出 CSV（AC5）：admin 专属；含 UTF-8 BOM 保证 Excel 中文不乱码。"""
-    import csv
-    import io as _io
-    if err := _admin_guard(request):
-        return err
-    rows = audit.query(actor=actor, action=action, since_ms=since,
-                       limit=1000)
-    buf = _io.StringIO()
-    buf.write("\ufeff")  # UTF-8 BOM：Excel 打开 CSV 中文防乱码
-    w = csv.writer(buf)
-    w.writerow(["时间", "操作人", "角色", "动作", "目标", "详情"])
-    for r in rows:
-        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"] / 1000))
-        w.writerow([ts, r["actor"], r["role"], r["action"],
-                    r["target"], r["detail"]])
-    # 直接返回 writer 输出（默认行尾已是 \r\n，且 \ufeff BOM 在首）：不做
-    # splitlines 再拼接——str.splitlines 按 \u2028/\x85 等 Unicode 行边界切分，
-    # 会把 csv 未引用该类字符的记录裂成多条残行（评审 C2，可被含特殊字符的
-    # 用户名污染导出完整性）
-    return Response(
-        buf.getvalue(),
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition":
-                 'attachment; filename="audit_log.csv"'})
-
-
-# ---- PLAN 3.2 包与审批面板：包管理端点（admin 专属，packs.py 函数收口到页面）----
-
-def _pack_toggle_result(result: tuple[str, str]):
-    """启停结构化结果 → HTTP 响应（评审①：按状态分流，不靠文案子串猜测）。"""
-    status, msg = result
-    if status == "ok":
-        return {"ok": True, "message": msg}
-    return JSONResponse(
-        {"error": msg},
-        status_code={"not_found": 404, "refused": 400, "error": 500}[status])
-
-
-@app.get("/api/admin/packs")
-async def admin_list_packs(request: Request):
-    """包全量清单（AC1）：口径与 packs.list_packs 管理视图一致，含平台包。"""
-    if err := _admin_guard(request):
-        return err
-    return {"packs": packs.list_packs()}
-
-
-@app.post("/api/admin/packs/{name}/disable")
-async def admin_disable_pack(request: Request, name: str):
-    """停用领域包（AC2/AC3）：立即生效并持久化（STATE_DB disabled_packs 表）。
-    平台包拒停（400，前端按钮隐藏只是体验层，服务端是防线）。"""
-    if err := _admin_guard(request):
-        return err
-    result = packs._toggle_pack(name.strip(), enable=False)
-    if result[0] == "ok":  # 仅成功动作记审计（AC4）
-        _audit(request.state.user["username"], "停用包", name.strip(),
-               role=request.state.user["role"])
-    return _pack_toggle_result(result)
-
-
-@app.post("/api/admin/packs/{name}/enable")
-async def admin_enable_pack(request: Request, name: str):
-    """启用领域包（AC2/AC3）：status≠ok 拒启（400，不把故障包引进运行时）。"""
-    if err := _admin_guard(request):
-        return err
-    result = packs._toggle_pack(name.strip(), enable=True)
-    if result[0] == "ok":  # 仅成功动作记审计（AC4）
-        _audit(request.state.user["username"], "启用包", name.strip(),
-               role=request.state.user["role"])
-    return _pack_toggle_result(result)
-
-
-class ChatRequest(BaseModel):
-    message: str
-    session_id: str | None = None
-    user_id: str = "anonymous"   # 用户标识（token 计量维度；API 认证落地后由网关/中间件注入）
-
-
 @app.get("/")
 async def index():
     return FileResponse(config.PROJECT_ROOT / "web" / "index.html")
@@ -527,6 +230,211 @@ async def health(request: Request):
         info["identity"] = request.state.user  # 前端徽章显示服务端确认的身份
     return info
 
+
+# ---------------------------------------------------------------- 文档上传（v0.17.7）
+# _docx_to_text 与其上限常量留在本文件：测试以 server.main._DOCX_XML_MAX_CHARS
+# 为 monkeypatch 锚点（tests/test_deny_paths.py），路由侧经延迟 import 访问。
+# docx 解包上限：word/document.xml 解压后字符数（防解压炸弹，10MB 压缩体
+# 理论可膨胀出 GB 级 XML）
+_DOCX_XML_MAX_CHARS = 20_000_000
+
+
+def _docx_to_text(data: bytes) -> str:
+    """从 .docx（zip 包）提取 word/document.xml 正文文本，去标签保留段落换行。
+    解压前校验条目声明大小（防解压炸弹）；非 zip/缺条目抛 ValueError（→400）。"""
+    import html as _html
+    import io
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            info = z.getinfo("word/document.xml")
+            if info.file_size > _DOCX_XML_MAX_CHARS:
+                raise ValueError("docx 正文过大，超出解析上限")
+            xml = z.read(info).decode("utf-8", errors="replace")[:_DOCX_XML_MAX_CHARS]
+    except (zipfile.BadZipFile, KeyError):
+        raise ValueError("不是有效的 docx 文件（缺少 word/document.xml）")
+    xml = re.sub(r"</w:p>", "\n", xml)          # 段落 → 换行
+    xml = re.sub(r"<[^>]+>", "", xml)           # 去其余标签
+    return _html.unescape(xml).strip()
+
+
+def _migrate_legacy_file_dirs() -> None:
+    """旧版单目录文件迁入 shared/ 域（多用户隔离上线时一次性执行）。
+    重试 3 次：Windows 上「删除后立即重建同名路径」或杀软扫描新文件会出现
+    瞬时 sharing violation——静默跳过会导致旧文件失联，必须重试并告警。"""
+    import time
+    for base in (config.UPLOADS_DIR, config.OUTPUTS_DIR):
+        if not base.is_dir():
+            continue
+        for p in list(base.iterdir()):
+            if not p.is_file():
+                continue
+            dest = base / "shared" / p.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            for attempt in range(3):
+                try:
+                    p.rename(dest)
+                    break
+                except OSError as e:
+                    if attempt == 2:
+                        logger.warning(f"[startup] WARNING: 存量文件迁移失败（旧版文件将"
+                                       f"无法按新分域寻址，请手动移动）: {p.name}: {e}")
+                    else:
+                        time.sleep(0.05)
+
+
+def _migrate_scope_dirs() -> None:
+    """老域名目录 → user_scope 哈希域名目录（SEC-2，v0.17.32）：文件域改用
+    哈希后缀后，存量用户目录须改名寻址才不断档。认领口径：目录名与某在册
+    用户（含已吊销——其文件可能仍需本人接续）的 scope_clean 相同。规则：
+    唯一认领 → rename（重试 3 次）；多用户碰撞 → 不动 + WARNING（无法判定
+    归属，人工分拣）；新名已存在 → 跳过 + WARNING（人工核对）；无人认领 →
+    不动（留待管理员核查，绝不盲目归并）；shared 域排除。幂等：迁移后老名
+    消失，新哈希名不被认领规则命中，重复启动为空操作。"""
+    import time
+    try:
+        users = auth.list_users()
+    except Exception as e:
+        logger.warning(f"[startup] WARNING: 用户表读取失败，跳过文件域目录迁移: {e}")
+        return
+    claims: dict[str, list[str]] = {}
+    for u in users:
+        claims.setdefault(config.scope_clean(u["username"]), []).append(u["username"])
+    for base in (config.UPLOADS_DIR, config.OUTPUTS_DIR,
+                 config.PERSONAL_SKILLS_DIR, config.PERSONAL_CUSTOM_TOOLS_DIR):
+        if not base.is_dir():
+            continue
+        for d in list(base.iterdir()):
+            if not d.is_dir() or d.name == "shared":
+                continue
+            owners = claims.get(d.name, [])
+            if len(owners) > 1:
+                logger.warning(f"[startup] WARNING: 老域名「{d.name}」有 {len(owners)} 位"
+                               f"认领用户（清洗碰撞），目录未迁移、请人工分拣: {d}")
+                continue
+            if not owners:
+                continue        # 无人认领（含已是新哈希名）：不动
+            new = config.user_scope(owners[0])
+            if new == d.name:
+                continue
+            target = base / new
+            if target.exists():
+                logger.warning(f"[startup] WARNING: 新域名「{new}」已存在，跳过迁移"
+                               f"（请人工核对两目录内容）: {target}")
+                continue
+            moved = False
+            for attempt in range(3):
+                try:
+                    d.rename(target)
+                    moved = True
+                    break
+                except OSError:
+                    if attempt < 2:
+                        time.sleep(0.05)
+            if moved:
+                logger.info(f"[startup] 文件域目录已迁移（SEC-2 哈希防碰撞）: "
+                            f"{base.name}/{d.name} → {new}")
+            else:
+                logger.warning(f"[startup] WARNING: 目录迁移失败（3 次重试），老域名文件"
+                               f"将无法按新域寻址，请手动改名: {base.name}/{d.name} → {new}")
+
+
+# ---------------------------------------------------------------- 知识库定位（v0.17.25，PLAN 2.2）
+
+@app.get("/vendor/{name}")
+def vendor_file(name: str):
+    """本地 vendor 静态资源（离线前端约束：mammoth 等第三方库 vendor 到
+    web/vendor/，内网断网可用，不引 CDN）。仅纯文件名，防穿越。"""
+    if not name or name != Path(name).name or ".." in name \
+            or "/" in name or "\\" in name:
+        return JSONResponse({"error": "非法资源名"}, status_code=404)
+    p = config.PROJECT_ROOT / "web" / "vendor" / name
+    if not p.is_file():
+        return JSONResponse({"error": "资源不存在"}, status_code=404)
+    media = "application/javascript" if name.endswith(".js") else \
+        "text/css" if name.endswith(".css") else "application/octet-stream"
+    return FileResponse(str(p), media_type=media)
+
+
+# 以下三个知识库辅助函数留在本文件：测试以 server.main 属性为 monkeypatch 锚点
+# （tests/test_kb_citation.py 等 patch _kb_home/_declared_kb_packs），
+# routes/kb.py 经函数内延迟 import 访问本命名空间。
+def _kb_home() -> Path:
+    """知识库根目录（kb/<库名>/<文档名>）。独立函数便于测试替身注入。"""
+    return Path(__file__).resolve().parents[1] / "kb"
+
+
+def _declared_kb_packs() -> list[dict]:
+    """启用包中声明了 knowledge_bases 的清单（kb 名 → 包归属 + 包级 RBAC）。
+    独立函数便于测试替身注入。"""
+    return [p for p in packs.enabled_packs() if p.get("knowledge_bases")]
+
+
+def kb_allowed(kb: str, role: str | None, department: str | None = None,
+               packs_list: list[dict] | None = None) -> bool:
+    """定位端点权限（fail-closed，PLAN 2.4 多包 OR 合并）：kb 名必须被启用包
+    knowledge_bases 声明，且**任一声明包**按「角色 + 部门」双重校验通过即放行
+    （跨领域通用库形态：同一库挂多个领域包，各包自治授权，任一授权链成立即可见；
+    任一维度未配置 = 该维度放行，与工具层/提示层同口径；role=None 视为开放模式
+    放行；admin 全局视图跨部门放行；未分配部门不命中白名单）。堵住「包 RBAC 挡了
+    检索工具、定位端点仍可枚举翻库」的旁路（PLAN 2.2 澄清 4）。
+    全部声明包拒绝或库未声明 → False（不区分「不存在」与「无权」）。"""
+    for p in (packs_list if packs_list is not None else _declared_kb_packs()):
+        if kb in (p.get("knowledge_bases") or []):
+            if role is None:
+                return True  # 开放模式（认证关闭）
+            # 角色+部门判定复用 pack_scope_denied（与提示层/执行层同一实现，防口径漂移）；
+            # department=None 归一为 "" 保持本函数纯函数语义（不回落上下文，fail-closed）
+            if custom_tools.pack_scope_denied(
+                    p.get("name", kb), p.get("allowed_roles") or [],
+                    p.get("allowed_departments") or [],
+                    role=role, department=department or "") is None:
+                return True
+    return False
+
+
+# ---- 待迁出域：auth（批 4 拆分进行中，后续 commit 引出至 routes/）----
+
+@app.post("/api/auth/login")
+async def login_endpoint(req: LoginRequest, request: Request):
+    """账号密码登录（v0.15.0）：签发 pat- 短期令牌。
+    成功失败都走同一路径，不区分「用户不存在」与「密码错误」（防枚举）。
+    PLAN 6.3：登录成败均落审计（who/when/what + 来源 IP）。"""
+    if not auth.enabled():
+        return JSONResponse({"error": "当前为开放模式，无需登录"}, status_code=400)
+    ip = request.client.host if request.client else ""
+    # PBKDF2 200k 迭代是 CPU 密集同步调用（实测 300ms+），挪线程池避免阻塞
+    # 事件循环（全项目评审问题4；同 resolve_identity 的 to_thread 先例）
+    result = await asyncio.to_thread(auth.login, req.username, req.password)
+    if result is None:
+        audit.log(req.username.strip()[:64], "", "登录失败", detail=ip)
+        return JSONResponse({"error": "用户名或密码错误"}, status_code=401)
+    audit.log(req.username.strip()[:64], "", "登录成功", detail=ip)
+    # v0.17.37 P0-2（spec 4.5）：登录态迁 HttpOnly Cookie——JS 不可读
+    # （XSS 窃取面消除），SameSite=Lax 挡跨站附带；AUTH_COOKIE_SECURE=true
+    # （HTTPS 部署）追加 Secure；响应体 token 字段保留（程序化 curl 兼容）。
+    resp = JSONResponse(result)
+    resp.set_cookie(
+        "pap_token", result["token"], httponly=True, samesite="lax",
+        max_age=int(config.AUTH_TOKEN_TTL_HOURS * 3600), path="/",
+        secure=config.AUTH_COOKIE_SECURE)
+    return resp
+
+
+@app.post("/api/auth/logout")
+async def logout_endpoint(request: Request):
+    """注销：使当前 pat- 登录令牌立即失效（pak- Key 请用吊销/轮换）。
+    v0.17.37 P0-2：按 Bearer 或 pap_token Cookie 注销（cookie 登录态同样
+    可登出），并以 Max-Age=0 清除浏览器侧 Cookie。logout 豁免 CSRF 校验
+    （登出本身无破坏性，且 cookie 过期后登出不应被拦）。"""
+    token = _bearer_token(request) or request.cookies.get("pap_token", "")
+    await asyncio.to_thread(auth.logout, token)
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("pap_token", path="/")
+    return resp
+
+
+# ---- 待迁出域：chat（批 4 拆分进行中，后续 commit 引出至 routes/）----
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, request: Request):
@@ -655,44 +563,6 @@ async def chat(req: ChatRequest, request: Request):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-def _acl_identity(request: Request) -> dict | None:
-    """资源级 ACL（v0.14.1）：返回当前身份 {username, role}；
-    开放模式返回 None（不过滤，行为同旧版）。
-    使用规则：role == 'user'/'approver' 只能访问自己的资源（v0.17.29 会话
-    隐私收紧，approver 由全局视图改为仅本人）；admin 全局视图。"""
-    if not auth.enabled():
-        return None
-    return request.state.user
-
-
-def _can_access_session(identity: dict, session_id: str) -> bool:
-    """user/approver 角色只能访问归属自己的会话；admin 保留全局视图（管理职责）。
-    v0.17.29（PLAN 3.1）：approver 由全局视图收紧为仅本人（会话内容属用户隐私，
-    审批所需信息经审批单流转，无需读取会话原文）。
-    v0.17.37（P0-1）：归属判定升级 session_meta 口径（所有权表 + anonymous
-    宽恕），不再依赖消息记录推断——admin 接入他人会话不再漂移所有权
-    （报告建议 5）；meta 无记录的存量会话经 resolve_owner 回填（最早 user
-    消息属主）后判定，与 chat 端点同口径。"""
-    if identity["role"] == "admin":
-        return True
-    meta = sessions.get_meta(session_id)
-    if meta is not None:
-        return meta["owner_id"] in (identity["username"], "anonymous")
-    owner = sessions.resolve_owner(session_id)
-    return owner is not None and owner in (identity["username"], "anonymous")
-
-
-def _session_tombstoned(identity: dict | None, session_id: str) -> bool:
-    """tombstone 会话对非 admin 按不存在处理（404，spec 3.2.3）：删除即终局，
-    非 admin 不可再读/删（消息已清，404 防探测会话曾存在）；admin 全局视图
-    保留治理语义（审计可见「该会话曾被删除」）。开放模式无身份 → 不启用
-    该语义（行为同旧版）。"""
-    if not identity or identity.get("role") == "admin":
-        return False
-    meta = sessions.get_meta(session_id)
-    return meta is not None and meta["deleted"] is not None
-
-
 def _chat_session_denied(identity: dict, session_id: str) -> bool:
     """chat 锁外快查（SEC-1 快路径，v0.17.37 升级 meta 口径）：tombstone 或
     既有归属冲突 → 403 快速返回，避免开流后才拒；空会话（新会话首轮）放行
@@ -737,6 +607,36 @@ def _chat_session_verdict(identity: dict, session_id: str) -> bool:
         return sessions.register_session(
             session_id, identity["username"]) == "ok"
     return owner in (identity["username"], "anonymous")
+
+
+# ---- 待迁出域：sessions（批 4 拆分进行中，后续 commit 引出至 routes/）----
+
+def _can_access_session(identity: dict, session_id: str) -> bool:
+    """user/approver 角色只能访问归属自己的会话；admin 保留全局视图（管理职责）。
+    v0.17.29（PLAN 3.1）：approver 由全局视图收紧为仅本人（会话内容属用户隐私，
+    审批所需信息经审批单流转，无需读取会话原文）。
+    v0.17.37（P0-1）：归属判定升级 session_meta 口径（所有权表 + anonymous
+    宽恕），不再依赖消息记录推断——admin 接入他人会话不再漂移所有权
+    （报告建议 5）；meta 无记录的存量会话经 resolve_owner 回填（最早 user
+    消息属主）后判定，与 chat 端点同口径。"""
+    if identity["role"] == "admin":
+        return True
+    meta = sessions.get_meta(session_id)
+    if meta is not None:
+        return meta["owner_id"] in (identity["username"], "anonymous")
+    owner = sessions.resolve_owner(session_id)
+    return owner is not None and owner in (identity["username"], "anonymous")
+
+
+def _session_tombstoned(identity: dict | None, session_id: str) -> bool:
+    """tombstone 会话对非 admin 按不存在处理（404，spec 3.2.3）：删除即终局，
+    非 admin 不可再读/删（消息已清，404 防探测会话曾存在）；admin 全局视图
+    保留治理语义（审计可见「该会话曾被删除」）。开放模式无身份 → 不启用
+    该语义（行为同旧版）。"""
+    if not identity or identity.get("role") == "admin":
+        return False
+    meta = sessions.get_meta(session_id)
+    return meta is not None and meta["deleted"] is not None
 
 
 async def _purge_session(session_id: str) -> int:
@@ -809,41 +709,20 @@ async def session_delete(request: Request, session_id: str):
     return {"deleted": await _purge_session(session_id)}
 
 
-# ---------------------------------------------------------------- 文档上传（v0.17.7）
+# ---- 待迁出域：files（批 4 拆分进行中，后续 commit 引出至 routes/）----
 
-# 纯文本格式：字节原样落盘（白名单收敛至 config.FILE_TEXT_EXTS，与模型输出
-# save_output_file 共用）；.docx：标准库解包提取正文文本（零第三方依赖）。
-# PDF 无可靠零依赖提取方案 → 明确拒绝并引导转换（fail-closed，不假装能读）。
 _UPLOAD_DOC_EXTS = {".docx"}
+
+
 _UPLOAD_ALL_EXTS = config.FILE_TEXT_EXTS | _UPLOAD_DOC_EXTS
-# Windows 非法文件名字符（含控制字符）与保留设备名——防 write_text 抛错后
-# 异常文本携带服务器绝对路径外泄，同时避免保留名在 Windows 部署引发歧义
+
+
 _WIN_BAD_NAME = re.compile(r'[<>:"|?*\x00-\x1f]')
+
+
 _WIN_RESERVED = {"con", "prn", "aux", "nul",
                  *(f"com{i}" for i in range(1, 10)),
                  *(f"lpt{i}" for i in range(1, 10))}
-# docx 解包上限：word/document.xml 解压后字符数（防解压炸弹，10MB 压缩体
-# 理论可膨胀出 GB 级 XML）
-_DOCX_XML_MAX_CHARS = 20_000_000
-
-
-def _docx_to_text(data: bytes) -> str:
-    """从 .docx（zip 包）提取 word/document.xml 正文文本，去标签保留段落换行。
-    解压前校验条目声明大小（防解压炸弹）；非 zip/缺条目抛 ValueError（→400）。"""
-    import html as _html
-    import io
-    import zipfile
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as z:
-            info = z.getinfo("word/document.xml")
-            if info.file_size > _DOCX_XML_MAX_CHARS:
-                raise ValueError("docx 正文过大，超出解析上限")
-            xml = z.read(info).decode("utf-8", errors="replace")[:_DOCX_XML_MAX_CHARS]
-    except (zipfile.BadZipFile, KeyError):
-        raise ValueError("不是有效的 docx 文件（缺少 word/document.xml）")
-    xml = re.sub(r"</w:p>", "\n", xml)          # 段落 → 换行
-    xml = re.sub(r"<[^>]+>", "", xml)           # 去其余标签
-    return _html.unescape(xml).strip()
 
 
 def _upload_safe_name(name: str) -> str:
@@ -924,87 +803,6 @@ def _scope_files(base: Path, scope: str | None) -> list[Path]:
             if d.is_dir():
                 out += [p for p in sorted(d.iterdir()) if p.is_file()]
     return out
-
-
-def _migrate_legacy_file_dirs() -> None:
-    """旧版单目录文件迁入 shared/ 域（多用户隔离上线时一次性执行）。
-    重试 3 次：Windows 上「删除后立即重建同名路径」或杀软扫描新文件会出现
-    瞬时 sharing violation——静默跳过会导致旧文件失联，必须重试并告警。"""
-    import time
-    for base in (config.UPLOADS_DIR, config.OUTPUTS_DIR):
-        if not base.is_dir():
-            continue
-        for p in list(base.iterdir()):
-            if not p.is_file():
-                continue
-            dest = base / "shared" / p.name
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            for attempt in range(3):
-                try:
-                    p.rename(dest)
-                    break
-                except OSError as e:
-                    if attempt == 2:
-                        logger.warning(f"[startup] WARNING: 存量文件迁移失败（旧版文件将"
-                                       f"无法按新分域寻址，请手动移动）: {p.name}: {e}")
-                    else:
-                        time.sleep(0.05)
-
-
-def _migrate_scope_dirs() -> None:
-    """老域名目录 → user_scope 哈希域名目录（SEC-2，v0.17.32）：文件域改用
-    哈希后缀后，存量用户目录须改名寻址才不断档。认领口径：目录名与某在册
-    用户（含已吊销——其文件可能仍需本人接续）的 scope_clean 相同。规则：
-    唯一认领 → rename（重试 3 次）；多用户碰撞 → 不动 + WARNING（无法判定
-    归属，人工分拣）；新名已存在 → 跳过 + WARNING（人工核对）；无人认领 →
-    不动（留待管理员核查，绝不盲目归并）；shared 域排除。幂等：迁移后老名
-    消失，新哈希名不被认领规则命中，重复启动为空操作。"""
-    import time
-    try:
-        users = auth.list_users()
-    except Exception as e:
-        logger.warning(f"[startup] WARNING: 用户表读取失败，跳过文件域目录迁移: {e}")
-        return
-    claims: dict[str, list[str]] = {}
-    for u in users:
-        claims.setdefault(config.scope_clean(u["username"]), []).append(u["username"])
-    for base in (config.UPLOADS_DIR, config.OUTPUTS_DIR,
-                 config.PERSONAL_SKILLS_DIR, config.PERSONAL_CUSTOM_TOOLS_DIR):
-        if not base.is_dir():
-            continue
-        for d in list(base.iterdir()):
-            if not d.is_dir() or d.name == "shared":
-                continue
-            owners = claims.get(d.name, [])
-            if len(owners) > 1:
-                logger.warning(f"[startup] WARNING: 老域名「{d.name}」有 {len(owners)} 位"
-                               f"认领用户（清洗碰撞），目录未迁移、请人工分拣: {d}")
-                continue
-            if not owners:
-                continue        # 无人认领（含已是新哈希名）：不动
-            new = config.user_scope(owners[0])
-            if new == d.name:
-                continue
-            target = base / new
-            if target.exists():
-                logger.warning(f"[startup] WARNING: 新域名「{new}」已存在，跳过迁移"
-                               f"（请人工核对两目录内容）: {target}")
-                continue
-            moved = False
-            for attempt in range(3):
-                try:
-                    d.rename(target)
-                    moved = True
-                    break
-                except OSError:
-                    if attempt < 2:
-                        time.sleep(0.05)
-            if moved:
-                logger.info(f"[startup] 文件域目录已迁移（SEC-2 哈希防碰撞）: "
-                            f"{base.name}/{d.name} → {new}")
-            else:
-                logger.warning(f"[startup] WARNING: 目录迁移失败（3 次重试），老域名文件"
-                               f"将无法按新域寻址，请手动改名: {base.name}/{d.name} → {new}")
 
 
 @app.post("/api/uploads")
@@ -1172,62 +970,9 @@ async def upload_delete(request: Request, name: str):
     return {"deleted": rel}
 
 
-# ---------------------------------------------------------------- 知识库定位（v0.17.25，PLAN 2.2）
-
-@app.get("/vendor/{name}")
-def vendor_file(name: str):
-    """本地 vendor 静态资源（离线前端约束：mammoth 等第三方库 vendor 到
-    web/vendor/，内网断网可用，不引 CDN）。仅纯文件名，防穿越。"""
-    if not name or name != Path(name).name or ".." in name \
-            or "/" in name or "\\" in name:
-        return JSONResponse({"error": "非法资源名"}, status_code=404)
-    p = config.PROJECT_ROOT / "web" / "vendor" / name
-    if not p.is_file():
-        return JSONResponse({"error": "资源不存在"}, status_code=404)
-    media = "application/javascript" if name.endswith(".js") else \
-        "text/css" if name.endswith(".css") else "application/octet-stream"
-    return FileResponse(str(p), media_type=media)
-
-
-def _kb_home() -> Path:
-    """知识库根目录（kb/<库名>/<文档名>）。独立函数便于测试替身注入。"""
-    return Path(__file__).resolve().parents[1] / "kb"
-
-
-def _declared_kb_packs() -> list[dict]:
-    """启用包中声明了 knowledge_bases 的清单（kb 名 → 包归属 + 包级 RBAC）。
-    独立函数便于测试替身注入。"""
-    return [p for p in packs.enabled_packs() if p.get("knowledge_bases")]
-
-
-def kb_allowed(kb: str, role: str | None, department: str | None = None,
-               packs_list: list[dict] | None = None) -> bool:
-    """定位端点权限（fail-closed，PLAN 2.4 多包 OR 合并）：kb 名必须被启用包
-    knowledge_bases 声明，且**任一声明包**按「角色 + 部门」双重校验通过即放行
-    （跨领域通用库形态：同一库挂多个领域包，各包自治授权，任一授权链成立即可见；
-    任一维度未配置 = 该维度放行，与工具层/提示层同口径；role=None 视为开放模式
-    放行；admin 全局视图跨部门放行；未分配部门不命中白名单）。堵住「包 RBAC 挡了
-    检索工具、定位端点仍可枚举翻库」的旁路（PLAN 2.2 澄清 4）。
-    全部声明包拒绝或库未声明 → False（不区分「不存在」与「无权」）。"""
-    for p in (packs_list if packs_list is not None else _declared_kb_packs()):
-        if kb in (p.get("knowledge_bases") or []):
-            if role is None:
-                return True  # 开放模式（认证关闭）
-            # 角色+部门判定复用 pack_scope_denied（与提示层/执行层同一实现，防口径漂移）；
-            # department=None 归一为 "" 保持本函数纯函数语义（不回落上下文，fail-closed）
-            if custom_tools.pack_scope_denied(
-                    p.get("name", kb), p.get("allowed_roles") or [],
-                    p.get("allowed_departments") or [],
-                    role=role, department=department or "") is None:
-                return True
-    return False
-
+# ---- 待迁出域：kb（批 4 拆分进行中，后续 commit 引出至 routes/）----
 
 _KB_DOC_MAX = 200  # 文档名长度上限（防超长名资源浪费；正常文档名远小于此）
-
-
-class KbSanitizeRequest(BaseModel):
-    html: str
 
 
 _KB_SANITIZE_MAX = 2 * 1024 * 1024  # Mammoth 输出消毒上限（超限 413，防无界处理）
@@ -1457,16 +1202,46 @@ def _esc(s: str) -> str:
             .replace("'", "&#39;"))
 
 
-@app.get("/api/approvals")
-async def approval_list(request: Request, limit: int = 50):
-    """最近审批记录（审计）：工具、参数摘要、状态（pending/approved/rejected/
-    expired/abandoned，abandoned = 已批准但执行丢失，见 approval.mark_abandoned）。
-    user 角色只看自己创建的；approver/admin 看全部。"""
-    ident = _acl_identity(request)
-    uid = ident["username"] if ident and ident["role"] == "user" else ""
-    # limit<=0 回退默认（全项目评审问题3：SQLite LIMIT 负数 = 全量返回，防绕过 200 条上限）
-    return {"approvals": approval.list_recent(
-        limit=min(limit if limit > 0 else 50, 200), user_id=uid)}
+# ---- 待迁出域：usage（批 4 拆分进行中，后续 commit 引出至 routes/）----
+
+@app.get("/api/audit")
+async def audit_query(request: Request, actor: str = "", action: str = "",
+                      since: int = 0, limit: int = 200):
+    """审计流水查询（PLAN 6.3，AC5）：admin 专属。过滤：操作人/动作/起始时间
+    （毫秒）；limit 收敛 [1,1000]（防全表拉取）。拒绝路径复用 _admin_guard。"""
+    if err := _admin_guard(request):
+        return err
+    return {"records": audit.query(actor=actor, action=action,
+                                   since_ms=since, limit=limit)}
+
+
+@app.get("/api/audit/export")
+async def audit_export(request: Request, actor: str = "", action: str = "",
+                       since: int = 0):
+    """审计流水导出 CSV（AC5）：admin 专属；含 UTF-8 BOM 保证 Excel 中文不乱码。"""
+    import csv
+    import io as _io
+    if err := _admin_guard(request):
+        return err
+    rows = audit.query(actor=actor, action=action, since_ms=since,
+                       limit=1000)
+    buf = _io.StringIO()
+    buf.write("\ufeff")  # UTF-8 BOM：Excel 打开 CSV 中文防乱码
+    w = csv.writer(buf)
+    w.writerow(["时间", "操作人", "角色", "动作", "目标", "详情"])
+    for r in rows:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"] / 1000))
+        w.writerow([ts, r["actor"], r["role"], r["action"],
+                    r["target"], r["detail"]])
+    # 直接返回 writer 输出（默认行尾已是 \r\n，且 \ufeff BOM 在首）：不做
+    # splitlines 再拼接——str.splitlines 按 \u2028/\x85 等 Unicode 行边界切分，
+    # 会把 csv 未引用该类字符的记录裂成多条残行（评审 C2，可被含特殊字符的
+    # 用户名污染导出完整性）
+    return Response(
+        buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 'attachment; filename="audit_log.csv"'})
 
 
 @app.get("/api/usage")
@@ -1509,9 +1284,18 @@ async def usage_departments_csv(request: Request, days: int = 0):
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
-class ApproveRequest(BaseModel):
-    approval_id: str
-    approve: bool
+# ---- 待迁出域：approvals（批 4 拆分进行中，后续 commit 引出至 routes/）----
+
+@app.get("/api/approvals")
+async def approval_list(request: Request, limit: int = 50):
+    """最近审批记录（审计）：工具、参数摘要、状态（pending/approved/rejected/
+    expired/abandoned，abandoned = 已批准但执行丢失，见 approval.mark_abandoned）。
+    user 角色只看自己创建的；approver/admin 看全部。"""
+    ident = _acl_identity(request)
+    uid = ident["username"] if ident and ident["role"] == "user" else ""
+    # limit<=0 回退默认（全项目评审问题3：SQLite LIMIT 负数 = 全量返回，防绕过 200 条上限）
+    return {"approvals": approval.list_recent(
+        limit=min(limit if limit > 0 else 50, 200), user_id=uid)}
 
 
 @app.post("/api/approve")
@@ -1531,6 +1315,13 @@ async def approve(req: ApproveRequest, request: Request):
     if result == "forbidden":
         return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
     return {"ok": False, "error": "not_found_or_decided"}
+
+
+# ---- 路由注册（编码规范批 4：按资源域拆出 server/routes/，端点实现原样搬迁）----
+# /api/chat 现位于 server/routes/chat.py；tests 中锚定实现文件的静态守卫已随迁。
+from server.routes import register  # noqa: E402
+
+register(app)
 
 
 def _parse_host_port():
