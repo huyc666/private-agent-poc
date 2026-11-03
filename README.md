@@ -1,10 +1,12 @@
 # Private Agent POC — 私有化 Agent 开发运行框架
 
-**版本：v0.17.42**（2026-11-03）
+**版本：v0.17.43**（2026-11-03）
 
 最小可运行的私有化 Agent 框架：**vLLM（Qwen 27B）+ LangGraph（Agent 循环 + 多 Agent 编排）+ MCP（工具协议）+ Skills（技能系统）+ 对话式自定义工具 + 人工审批流 + 代码沙箱 + 知识库问答（RAG，五类文档入库 + 混合检索 + 出处标注与点击定位 + 部门专属库隔离与跨领域知识库共享）+ API 认证与多用户（部门/角色/专属域 + 管理控制台）+ 用量计量（token / 金额 / 健康度 / 部门报表）+ Langfuse 观测 + FastAPI（SSE 流式接口）+ 离线聊天前端**。
 
 ## 版本记录
+
+- **v0.17.43**：工程度量一期补齐（S2/S3/S5）——①S3 端点拒绝映射落地并补缺口：按 `server/main.py` 与 `server/routes/*.py` 实际注册的 35 个端点建 `docs/reviews/endpoint-deny-mapping.md`，31 个有真实拒绝用例覆盖、4 个公开端点、0 纯缺口；新增 `tests/test_endpoint_deny_gaps.py` 32 条用例，补齐管理端五个写端点专属 401/403/开放模式 400（并断言被拒无副作用）、`/vendor/{name}` 穿越 404（`%2E%2E` / 反斜杠真实构造）、approvals/uploads/usage 未认证 401、logout 未认证 401、audit/export 401 与 approver 403。②S2 覆盖率三文件达标：skills 85%→99%、custom_tools 82%→100%、sandbox/server 81%→100%，整体 89%→92%，新增 53 条用例聚焦角色/域守卫、越权、非法输入、异常兜底与清理失败，不堆正向用例。③S5 依赖收敛：pypdf→6.21.4、langgraph-checkpoint-postgres→3.2.0，pip-audit OSV 复扫直接依赖命中 3→1（总命中 119/10 包→107/8 包）；fastmcp 1 条仍存（GHSA-7xgj-8392-5q4r），因 4.x 需先验证与 mcp 1.x 锁定行兼容，requirements.txt 与 ENGINEERING-METRICS 均留明确注记，不隐藏。TRAE-code-review 各批执行：A 批修复 2 项弱断言（改密被拒改查库断言散列为空、401 场景补目标用户未被改动），B/C 批无阻断问题。全量 784 个用例通过（18 skipped 语义不变）。
 
 - **v0.17.42**：Cookie 生产化——后续轮次待办 #4（v0.17.37 rereview P2）整改，用户裁决五项全按建议：①改密即全端登出——`set_password` 清空该用户全部 pat- 登录令牌（与 `revoke_user` 同口径），防改密/重置后旧浏览器会话续存至过期，admin 重置密码端点与 CLI `passwd` 同路径生效（CLI 提示同步新语义）；②Secure 全链路收口——`AUTH_ENABLED=true` 且 `AUTH_COOKIE_SECURE=false` 时启动 WARNING 告警生产 HTTPS 须开 Secure（不阻断本地 HTTP 开发，与 SSO 白名单告警同一惯例），`.env.example` 补 `AUTH_COOKIE_SECURE` 条目，PRODUCTION.md 补 HTTPS/反向代理前置要求（反向代理可终止 TLS、Agent 继续监听 HTTP——Secure 仅浏览器侧语义），SECURITY.md 新增 7.7 部署红线检查项；③会话策略经裁决固化并写入部署文档——固定 TTL（默认 12h）到期强制重登录不滑动续签、同一账号多端并发登录无上限（登出只注销当前端，吊销/改密全端失效）、登录响应体 token 字段维持保留（v0.17.37 既有裁决，程序化 curl 兼容）。TRAE-code-review 双子代理评审 4 候选：修复 2 项（AC15 补 auth_tokens 行数硬断言 / CLI passwd 提示同步全端登出语义）、有意保留 2 项（跨进程改密竞态窗口与 revoke_user 同口径既有存在非本次引入 / 测试默认配置下告警日志噪音）。新增 6 个用例（AC15 改密全端登出 ×3 + AC16 启动告警 ×3），全量 694 个用例通过（18 skipped 语义不变）。
 

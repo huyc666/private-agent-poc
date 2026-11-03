@@ -92,21 +92,21 @@
 
 **S1 · 全量回归不破**
 指标：安全防线的最小保障是全量测试全绿。
-基线：694 passed / 18 skipped / 0 failed（18 个 skipped 为真实模型/Docker 门控与本机符号链接权限降级，语义固定）。
+基线：784 passed / 18 skipped / 0 failed（18 个 skipped 为真实模型/Docker 门控与本机符号链接权限降级，语义固定；较上版 694 增 90 = S4(b) 5 + S3 缺口 32 + 三模块拒绝/边界分支 53）。
 阈值：**failed = 0；passed 单调不减**（用例被替代时须在 spec 说明）；skipped 集合语义不变。
 测法：`.venv\Scripts\python.exe -m pytest -q`。
 失败动作：**阻断提交**。
 
 **S2 · 安全关键模块覆盖率**
 指标：12 个安全敏感文件的行覆盖率（auth、approval、session_lock、sessions、packsign、packs、skills、custom_tools、tools_builtin、html_sanitize、usage、sandbox/server）与整体覆盖率。
-基线：approval 100%、session_lock 100%、auth 99%、packsign 96%、usage 96%、sessions 95%、packs 92%、html_sanitize 91%、tools_builtin 91% 已达标；**skills 84%、custom_tools 82%、sandbox/server 81% 未达标**；整体 89%。
+基线（2026-11-03 一期补齐后实测）：approval 100%、session_lock 100%、sandbox/server **100%**、custom_tools **100%**、auth 99%、skills **99%**、packsign 96%、usage 96%、sessions 95%、packs 92%、html_sanitize 91%、tools_builtin 91%；12 个文件全部 ≥90%，整体（server/+sandbox/）**92%**（4691 语句 / 362 未覆盖）。skills 余 1 行（zip 落点 resolve 兜底，属不可构造分支）。
 阈值（2026-11-03 用户裁决，统一 90% 不设折中档）：单文件 **≥ 90%**；整体（server/+sandbox/）**≥ 90%**——三个不达标模块补齐后整体自然过线，两档同目标。
 测法：`.venv\Scripts\python.exe -m pytest -q --cov=server --cov=sandbox`，再 `coverage report --include=<清单>`。pytest-cov 已在环境中，零新增依赖。
-失败动作：整体或任一已达标文件跌破 90% **阻断提交**；skills/custom_tools/sandbox 三个文件记**一期补齐**：skills 补错误哨兵与快照缺失分支、custom_tools 补 guard 拦截与执行异常分支、sandbox/server 补 token 校验与超时分支，每文件约 5-10 个用例。
+失败动作：整体或任一已达标文件跌破 90% **阻断提交**；一期补齐（2026-11-03 已完成）：skills 补错误哨兵与快照缺失分支、custom_tools 补守卫拦截与执行异常分支、sandbox/server 补超时与清理失败分支，共新增 53 条拒绝/边界用例，不堆正向用例。
 
 **S3 · 拒绝路径逐入口覆盖**
 指标：每个外部入口（35 个 HTTP 端点、文件上传、包导入、工具执行、登录、审批）至少 1 条拒绝/越权用例。
-基线：test_deny_paths.py 33 个用例 + 各模块内 73 处 40x 断言，但**端点到用例的映射未建立**，无法断言 35 个端点逐一有拒绝用例。
+基线：`docs/reviews/endpoint-deny-mapping.md` 已建（2026-11-03），35 个端点逐行登记：4 个公开端点（不计缺口）、31 个有真实拒绝用例覆盖（其中 #12、#20 仍为部分场景覆盖）、**0 个纯缺口**；原 9 缺口 + 2 半覆盖由 `tests/test_endpoint_deny_gaps.py` 32 条用例补齐。test_deny_paths.py 33 个用例 + 各模块内 40x 断言继续作为补充。
 阈值：映射表内每个涉权限端点 ≥ 1 条拒绝用例，覆盖率 100%；免鉴权端点（如 health）在表中标注「无权限维度」占位，不算缺口。
 测法：建立 `docs/reviews/endpoint-deny-mapping.md`（一次性人工核对 35 端点逐行登记，约半天），之后新增端点同步登记；抽查用 grep 验证。
 失败动作：映射表建立前，新增端点无拒绝用例即**阻断**（现有规则已有此要求）；存量映射补建列为**一期补齐**。通过判定：映射表 35 行齐全（每行标「用例文件::用例名」或「无权限维度」）+ 表内引用用例在测试中真实存在 + 全量回归绿。
@@ -117,15 +117,15 @@
 基线：(a) **0 违规**（2 处豁免均有注释与理由）；(b) **5 处对外通道命中**：server/custom_tools.py:195（语法错误回显）、server/packs.py:112 与 :385（包错误信息）、server/skills.py:506（错误哨兵）、server/weather.py:133（错误聚合）；本机日志通道约 18 处按裁决放行；(c) **0**。
 阈值：(a) 0，(b) 0，(c) 0；本机日志通道不设限。
 测法：(a) `grep -n "^\s*print(" server/ sandbox/`（豁免逐条核对注释）；(b) `grep -n "{e}" server/`，逐处判定落点通道（函数返回值去向：HTTP 响应/工具返回/审计 → 对外；logger 调用 → 放行）；(c) `grep -rn "TODO|FIXME|XXX|HACK" --include=*.py .`。
-失败动作：(a)(b)(c) 新增即**阻断提交**；存量 5 处对外通道 `{e}` 列**一期补齐**（逐一改为类型名+泛化文案，参照 tools_builtin.py:248 先例）。通过判定：对外三通道 grep 命中清零 + 每处改造配「错误文本不含绝对路径/异常原文」的断言用例 + 全量回归绿。
+失败动作：(a)(b)(c) 新增即**阻断提交**；存量 5 处对外通道 `{e}` 已于一期补齐（改为固定/归类文案，参照 tools_builtin.py:248 先例）。通过判定：对外三通道 grep 命中清零 + 每处改造配「错误文本不含绝对路径/异常原文」的断言用例 + 全量回归绿。
 
 **S5 · 依赖供应链**
 指标：直接依赖数量受控、已知漏洞扫描（pip-audit）。
-基线：21 个直接依赖；pip-audit 2.10.1 已入 requirements-dev.txt，2026-11-03 首次真实扫描（OSV 后端）命中 **119 条 / 10 个包**（同一漏洞经多依赖路径重复计数）。按包归并：pypdf 6.21.0（11 条，修 ≥6.21.4）、fastmcp 3.4.8 + fastmcp-slim 3.4.8（同 1 条 GHSA-7xgj-8392-5q4r，修 ≥4.1.2）、langgraph-checkpoint-postgres 3.1.2（1 条，修 ≥3.1.3）、authlib 1.8.0（8 条，修 1.9.x）、certifi 2026.7.22（1 条，修 2026.10.18）、filelock 4.2.0（18 条，修 4.2.1）、joserfc 1.7.5（1 条，修 1.7.6）、pillow 12.3.0（41 条，修 13.0.0）、pip 25.0.1（12 条，修 25.3+，工具链自身）。其中**直接依赖命中 3 个**：pypdf、fastmcp、langgraph-checkpoint-postgres。完整报告存档于执行机 Temp 目录（pip-audit-2026-11-03.txt）。
+基线：21 个直接依赖；pip-audit 2.10.1 已入 requirements-dev.txt，固定 OSV 后端。2026-11-03 首次扫描命中 **119 条 / 10 个包**（直接依赖 3 个：pypdf 11 条、fastmcp 1 条、langgraph-checkpoint-postgres 1 条）；同日升级后复扫 **107 条 / 8 个包**，直接依赖命中 **3 → 1**：pypdf（6.21.4）与 langgraph-checkpoint-postgres（3.2.0）清零，**fastmcp 1 条（GHSA-7xgj-8392-5q4r）仍存在**——4.x 需先验证与 mcp 1.x 锁定行兼容，本轮不动，不隐藏（requirements.txt 已留注记）。
 环境说明：本机访问 pip-audit 默认的 PyPI JSON 服务超时，固定改用 OSV 批量接口；OSV 输出无 CVSS 分级，故不按「高危=0」判定而按「直接依赖命中=0」判定。
 阈值：**直接依赖命中 = 0**（阻断线）；传递依赖命中数只减不增；直接依赖数量（21）只减不增（新增需 spec 说明理由）。
 测法：`.venv\Scripts\pip-audit.exe --vulnerability-service osv --timeout 60`（依赖变更必跑 + 每月定期 1 次）。离线替代路径：在有网环境定期跑扫描、把升级清单带回内网执行；不可用扫描结果造假充数。
-失败动作：直接依赖命中 > 0 时**阻断依赖变更类提交**，并登记升级清单（当前：pypdf→≥6.21.4、langgraph-checkpoint-postgres→≥3.1.3、fastmcp→≥4.1.2——fastmcp 升级需先验证与 mcp 1.x 锁定行的兼容性，见 requirements.txt 注释）；非依赖类提交不受存量阻断，但升级清单列入**一期补齐**。
+失败动作：直接依赖命中 > 0 时**阻断依赖变更类提交**，并登记升级清单（当前剩：fastmcp→≥4.1.2——需先验证与 mcp 1.x 锁定行的兼容性，见 requirements.txt 注释；该条为已知例外，不隐藏）；非依赖类提交不受存量阻断，但升级清单列入**一期补齐**。
 
 **S6 · fail-closed 与鉴权一致性（流程判定）**
 指标：新增安全防线默认拒绝、权限判定三处（提示层/执行层/端点层）同口径。
@@ -177,13 +177,13 @@
 
 ## 六、缺口清单（当前未达标项，分档）
 
-**立刻阻断级**（已达标，维持即零成本，破线即停）：S1 全量回归 694/18/0；S4(a) print 违规 0；S4(c) TODO 0；G1/G2 spec 前置；P1-P5 流程关卡。
+**立刻阻断级**（已达标，维持即零成本，破线即停）：S1 全量回归 784/18/0；S4(a) print 违规 0；S4(c) TODO 0；G1/G2 spec 前置；P1-P5 流程关卡。
 
-**一期补齐级**（2026-11-03 裁决后核定，共 4 项）：
-1. **S2 覆盖率**：skills.py 84% → 90%、custom_tools.py 82% → 90%、sandbox/server.py 81% → 90%（整体随之 ≥90%）。补齐方向：skills 补错误哨兵与快照缺失分支、custom_tools 补 guard 拦截与执行异常分支、sandbox/server 补 token 校验与超时分支，每文件约 5-10 个用例。通过判定：coverage report 三个文件均 ≥90% 且整体 ≥90%。
-2. **S3 映射表**：建 `docs/reviews/endpoint-deny-mapping.md`，35 个端点逐行登记，免鉴权端点标「无权限维度」。通过判定：35 行齐全 + 表内引用用例真实存在 + 全量回归绿。
-3. **S4(b) 5 处对外通道 `{e}`**：server/custom_tools.py:195、server/packs.py:112、server/packs.py:385、server/skills.py:506、server/weather.py:133，逐一改为类型名+泛化文案（参照 tools_builtin.py:248 先例）。通过判定：对外三通道 grep 命中清零 + 每处配「错误文本不含绝对路径/异常原文」断言用例 + 全量回归绿。
-4. **S5 漏洞升级清单**：pypdf→≥6.21.4、langgraph-checkpoint-postgres→≥3.1.3、fastmcp→≥4.1.2（需先验证与 mcp 1.x 锁定兼容）；传递依赖（authlib/certifi/filelock/joserfc/pillow）随直接依赖升级收敛。通过判定：pip-audit OSV 复扫直接依赖命中 = 0。
+**一期补齐级**（2026-11-03 裁决后核定，共 4 项；1-3 已完成）：
+1. ✅ **S2 覆盖率**（已完成）：skills 84%→99%、custom_tools 82%→100%、sandbox/server 81%→100%，整体 89%→92%；12 个文件全部 ≥90%。
+2. ✅ **S3 映射表**（已完成）：`docs/reviews/endpoint-deny-mapping.md` 35 行齐全，4 公开 / 31 覆盖 / 0 缺口；引用用例均真实存在且全绿。
+3. ✅ **S4(b) 5 处对外通道 `{e}`**（已完成，commit 303352a）：改为固定/归类文案，异常细节落本机日志；每处配「不含绝对路径/异常原文」断言。
+4. ⏳ **S5 漏洞升级清单**（部分完成）：pypdf→6.21.4、langgraph-checkpoint-postgres→3.2.0 已升，直接依赖命中 3→1；**fastmcp 1 条仍存**（跨大版本兼容待验证，见 requirements.txt 注记），不达成「直接依赖命中 = 0」暂不结项。
 
 **长期跟踪级**（量但不当门禁）：模型首 token 时延；回归墙钟（基线 143s，逼近 300s 时启动拆分）；E2E 自动化可行性（与 PLAN #5 裁决联动）；直接依赖数量趋势（当前 21）；pip 自身升级（25.0.1→25.3+）与传递依赖收敛进度。
 
