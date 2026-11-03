@@ -28,8 +28,7 @@ from fastapi.responses import (FileResponse, JSONResponse, StreamingResponse)
 
 from server import (agent, approval, audit, auth, config, custom_tools, packs,
                     session_lock, sessions, telemetry, usage)
-from server.webdeps import (_bearer_token, _acl_identity, LoginRequest,
-                            ChatRequest, ApproveRequest)
+from server.webdeps import (_bearer_token, LoginRequest, ChatRequest)
 
 logger = logging.getLogger(__name__)
 
@@ -600,39 +599,6 @@ def _chat_session_verdict(identity: dict, session_id: str) -> bool:
         return sessions.register_session(
             session_id, identity["username"]) == "ok"
     return owner in (identity["username"], "anonymous")
-
-
-# ---- 待迁出域：approvals（批 4 拆分进行中，后续 commit 引出至 routes/）----
-
-@app.get("/api/approvals")
-async def approval_list(request: Request, limit: int = 50):
-    """最近审批记录（审计）：工具、参数摘要、状态（pending/approved/rejected/
-    expired/abandoned，abandoned = 已批准但执行丢失，见 approval.mark_abandoned）。
-    user 角色只看自己创建的；approver/admin 看全部。"""
-    ident = _acl_identity(request)
-    uid = ident["username"] if ident and ident["role"] == "user" else ""
-    # limit<=0 回退默认（全项目评审问题3：SQLite LIMIT 负数 = 全量返回，防绕过 200 条上限）
-    return {"approvals": approval.list_recent(
-        limit=min(limit if limit > 0 else 50, 200), user_id=uid)}
-
-
-@app.post("/api/approve")
-async def approve(req: ApproveRequest, request: Request):
-    """前端提交危险操作审批决定。
-    决议权限（v0.17.9 收紧）：仅 admin/approver 可决议任何 pending——此前
-    「user 可决议自己创建的」存在自审自批漏洞（发起者自己批准即可放行
-    危险操作）；user 角色发起的审批等待 approver/admin 决议。
-    ok=false 时 error 区分 forbidden（无权限）与 not_found（不存在/已决议）。"""
-    u = request.state.user or {"username": "", "role": "admin"}  # 开放模式：任何人可决议（旧行为）
-    result = approval.resolve(req.approval_id, req.approve, u["username"], u["role"])
-    if result == "ok":
-        audit.log(u["username"], u["role"],
-                  "审批通过" if req.approve else "审批驳回",
-                  target=req.approval_id)
-        return {"ok": True}
-    if result == "forbidden":
-        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-    return {"ok": False, "error": "not_found_or_decided"}
 
 
 # ---- 路由注册（编码规范批 4：按资源域拆出 server/routes/，端点实现原样搬迁）----
