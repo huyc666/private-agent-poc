@@ -136,3 +136,17 @@ def test_run_tool_missing_in_tools_dir(client):
                     json={"name": "no_such_tool_xyz", "args": {}},
                     headers={"X-Sandbox-Token": "shared-secret"})
     assert "不存在" in r.json()["error"]
+
+
+# ---------------------------------------------------------------- 错误详情外泄收敛
+
+def test_run_isolated_internal_error_no_exception_leak(monkeypatch):
+    """编码规范批 3：沙箱内部意外异常的原文（可能含服务器绝对路径）不得随
+    error 字段回传调用方（会一路透传给模型/用户），只回固定归类文案。"""
+    def _boom(*a, **kw):
+        raise RuntimeError(r"E:\deploy\private-agent-poc\sandbox boom")
+    monkeypatch.setattr(sbx.subprocess, "run", _boom)
+    res = sbx._run_isolated({"code": "print(1)"})
+    assert res["error"] == "沙箱内部错误（已终止，详情见服务端日志）"
+    assert "boom" not in res["error"]
+    assert "E:\\" not in res["error"]

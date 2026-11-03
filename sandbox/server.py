@@ -10,6 +10,7 @@
 """
 import hmac
 import json
+import logging
 import os
 import re
 import shutil
@@ -19,6 +20,8 @@ import tempfile
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="poc-sandbox")
 
@@ -112,7 +115,10 @@ def _run_isolated(argv: list[str], extra_env: dict | None = None) -> dict:
     except subprocess.TimeoutExpired:
         return {"error": f"执行超时（>{RUN_TIMEOUT}s），已终止"}
     except Exception as e:
-        return {"error": f"沙箱内部错误: {e}"}
+        # 异常原文可能携带服务器绝对路径，只落服务端日志，不回传调用方
+        # （该字段会经 tools_builtin 透传给模型/用户）
+        logger.error("[sandbox] _run_isolated 内部错误: %s", e)
+        return {"error": "沙箱内部错误（已终止，详情见服务端日志）"}
     finally:
         if path:
             try:
