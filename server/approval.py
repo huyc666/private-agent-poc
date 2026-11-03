@@ -206,10 +206,19 @@ def resolve(aid: str, approve: bool, username: str = "", role: str = "admin") ->
     user 角色发起的审批等待 approver/admin 决议；开放模式调用方传 role="admin"。
     仅 pending → 决议 算成功（原子 UPDATE，并发重复提交安全）。
     """
-    rec = _query_one("SELECT status FROM approvals WHERE aid = ?", (aid,))
+    rec = _query_one("SELECT status, user_id FROM approvals WHERE aid = ?", (aid,))
     if rec is None or rec["status"] != "pending":
         return "not_found"
     if role not in ("admin", "approver"):
+        return "forbidden"
+    # 职责分离（v0.17.41，spec 4.2）：发起者身份可判定（非 NULL、非 anonymous）
+    # 且等于决议人 → 拒绝自审自批（发起者本人若为 admin/approver，此前可批准
+    # 自己发起的审批，审批门形同虚设）。豁免面：开放模式（双方 anonymous）、
+    # 存量 NULL user_id 记录、决议人身份为空——单决议人部署下该账号发起的
+    # 审批将无人能批（fail-closed 方向），部署须保证至少两名决议角色（SECURITY.md）。
+    initiator = rec["user_id"] or ""
+    if (initiator and initiator != "anonymous" and username
+            and username == initiator):
         return "forbidden"
     status = "approved" if approve else "rejected"
     n = _execute(

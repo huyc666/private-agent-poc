@@ -4,25 +4,29 @@
 （token / tool / approval_required / done），由 stream_reply 在 Mock 模式下调用。
 演示剧本变更不会触碰生产文件（v0.13.0 起从 agent.py 拆出）。
 
-覆盖的演示场景：领域包创建（审批）、技能制作/加载/列表、多 Agent 编排、
+覆盖的演示场景：领域包创建（审批）、技能制作（审批）/加载/列表、多 Agent 编排、
 自定义工具创建（审批）、天气查询（真实接口，内置/MCP 两路）、删除文件（审批）、
 平台包时间工具、默认引导语。
 """
 import asyncio
 from typing import AsyncIterator
 
-from . import approval, custom_tools, packs, skills, telemetry
+from . import approval, custom_tools, packs, sessions, skills, telemetry
 from .state import STATE
 from .tools_builtin import do_delete
 
 
-async def mock_stream(user_text: str) -> AsyncIterator[dict]:
+async def mock_stream(user_text: str, session_id: str = "",
+                      generation: int | None = None) -> AsyncIterator[dict]:
     """Mock 模式：演示流式输出与工具调用链路（天气为真实接口调用）。
-    包一层 Langfuse trace，Mock 模式下也能在观测台里看到完整调用链。"""
+    包一层 Langfuse trace，Mock 模式下也能在观测台里看到完整调用链。
+    session_id/generation：会话态代际（v0.17.41 栅栏收口）——演示内审批创建
+    走 create_approval_fenced，会话已删/代际过期时不创建 pending 并中止演示；
+    非会话态直调（测试等，generation=None）退化为无栅栏创建。"""
     with telemetry.trace_span("mock-chat", input=user_text):
         telemetry.set_trace_io(input=user_text)
         tokens: list[str] = []
-        async for ev in _mock_stream_inner(user_text):
+        async for ev in _mock_stream_inner(user_text, session_id, generation):
             if ev["type"] == "token":
                 tokens.append(ev["content"])
             yield ev
@@ -48,7 +52,19 @@ async def _query_weather_any(city: str, prefer_mcp: bool = False) -> tuple[str, 
     return "", "天气查询失败：当前没有任何天气能力（weather-ops 领域包未启用且 MCP 不可用）"
 
 
-async def _mock_stream_inner(user_text: str) -> AsyncIterator[dict]:
+async def _mock_stream_inner(user_text: str, session_id: str = "",
+                             generation: int | None = None) -> AsyncIterator[dict]:
+    def _create_approval(tool: str, args: dict) -> str | None:
+        """会话态（generation 非 None）走代际栅栏创建；非会话态直调走普通创建。"""
+        if generation is None:
+            return approval.create_approval(tool, args)
+        return approval.create_approval_fenced(session_id, generation, tool, args)
+
+    def _fenced_off() -> bool:
+        """决议落库后的终局再校验（与真实路径 agent.py spec 3.4.3 同口径）：
+        批准与删除竞争时绝不执行危险操作。非会话态直调（generation=None）不校验。"""
+        return generation is not None and not sessions.fence_ok(session_id, generation)
+
     if ("领域包" in user_text or "pack" in user_text.lower()) and \
             any(k in user_text for k in ("创建", "制作", "新建", "写一个")):
         # 演示：对话式创建领域包（写入可执行代码 + 配置，属危险操作，先审批后落盘）
@@ -58,15 +74,23 @@ async def _mock_stream_inner(user_text: str) -> AsyncIterator[dict]:
             '    m = min(12, max(1, int(month)))\n'
             '    return f"{m} 月属于 Q{(m - 1) // 3 + 1}"\n')
         yield {"type": "tool", "status": "start", "name": "create_pack"}
-        aid = approval.create_approval(
+        aid = _create_approval(
             "create_pack", {"name": "office-ops",
                             "description": "办公领域包：季度换算等办公小工具",
                             "with_tool": True, "code_preview": demo_code[:120]})
+        if aid is None:
+            # 栅栏拒绝：会话已删/代际过期，不创建 pending、中止演示（fail-closed）
+            yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+            return
         yield {"type": "approval_required", "approval_id": aid,
                "tool": "create_pack",
                "args": {"name": "office-ops", "with_tool": True,
                         "code_preview": demo_code[:120]}}
         decision = await approval.wait_decision(aid)
+        if _fenced_off():
+            # 决议落库后再校验：批准与删除竞争时绝不执行（spec 3.4.3 同口径）
+            yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+            return
         if decision is True:
             result = await asyncio.to_thread(
                 packs.create_pack, "office-ops",
@@ -92,18 +116,45 @@ async def _mock_stream_inner(user_text: str) -> AsyncIterator[dict]:
                       "领域包创建已自动取消，未写入任何文件。")
     elif "技能" in user_text or "skill" in user_text.lower():
         if any(k in user_text for k in ("创建", "制作", "新建", "写一个")):
-            # 演示：通过工具在聊天中制作技能
-            yield {"type": "tool", "status": "start", "name": "create_skill"}
-            result = await asyncio.to_thread(
-                skills.create_skill, "daily-brief",
-                "生成每日工作简报（汇总今日完成、明日计划、阻塞问题）",
+            # 演示：通过工具在聊天中制作技能——共享技能全员可见，v0.17.41 起
+            # 与领域包/自定义工具同口径「先审批后落盘」
+            demo_desc = "生成每日工作简报（汇总今日完成、明日计划、阻塞问题）"
+            demo_instructions = (
                 "# 每日工作简报\n\n1. 汇总今日完成事项（逐条列出）\n"
                 "2. 列出明日计划\n3. 标注阻塞问题与需要的支持\n"
                 "4. 输出为简洁的分点 Markdown 格式")
-            yield {"type": "tool", "status": "end", "name": "create_skill", "result": result}
-            answer = (f"已通过 `create_skill` 工具制作技能：\n\n**{result}**\n\n"
-                      "技能以 SKILL.md 文件保存在 `skills/` 目录。真实模式下，模型看到任务匹配"
-                      "技能描述时会自动调用 `load_skill` 获取完整指令后执行——即「制作即可用」。")
+            demo_args = {"name": "daily-brief", "description": demo_desc,
+                         "overwrite": False,
+                         "instructions_preview": demo_instructions[:300]}
+            yield {"type": "tool", "status": "start", "name": "create_skill"}
+            aid = _create_approval("create_skill", demo_args)
+            if aid is None:
+                # 栅栏拒绝：会话已删/代际过期，不创建 pending、中止演示（fail-closed）
+                yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+                return
+            yield {"type": "approval_required", "approval_id": aid,
+                   "tool": "create_skill", "args": demo_args}
+            decision = await approval.wait_decision(aid)
+            if _fenced_off():
+                # 决议落库后再校验：批准与删除竞争时绝不执行（spec 3.4.3 同口径）
+                yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+                return
+            if decision is True:
+                result = await asyncio.to_thread(
+                    skills.create_skill, "daily-brief", demo_desc, demo_instructions)
+                yield {"type": "tool", "status": "end",
+                       "name": "create_skill", "result": result}
+                answer = (f"✅ 审批已通过，`create_skill` 执行结果：\n\n**{result}**\n\n"
+                          "技能以 SKILL.md 文件保存在 `skills/` 目录。真实模式下，模型看到任务匹配"
+                          "技能描述时会自动调用 `load_skill` 获取完整指令后执行——即「制作即可用」。")
+            elif decision is False:
+                yield {"type": "tool", "status": "end",
+                       "name": "create_skill", "result": "用户拒绝，未执行"}
+                answer = ("❌ 你已**拒绝**创建该技能，未写入任何文件。\n\n"
+                          "（共享技能全员可见，fail-closed：拒绝/超时一律不落盘。）")
+            else:
+                answer = (f"⏱ 审批超时（{approval.APPROVAL_TIMEOUT} 秒未响应），"
+                          "技能创建已自动取消，未写入任何文件。")
         elif any(k in user_text for k in ("加载", "使用", "内容", "看看", "查看")):
             yield {"type": "tool", "status": "start", "name": "load_skill"}
             content = await asyncio.to_thread(skills.load_skill, "weather-report")
@@ -152,12 +203,20 @@ async def _mock_stream_inner(user_text: str) -> AsyncIterator[dict]:
             '    n = max(2, int(sides))\n'
             '    return f"🎲 {n} 面骰子掷出了：{random.randint(1, n)}"\n')
         yield {"type": "tool", "status": "start", "name": "create_custom_tool"}
-        aid = approval.create_approval(
+        aid = _create_approval(
             "create_custom_tool", {"name": "dice_roll", "code_preview": demo_code[:120]})
+        if aid is None:
+            # 栅栏拒绝：会话已删/代际过期，不创建 pending、中止演示（fail-closed）
+            yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+            return
         yield {"type": "approval_required", "approval_id": aid,
                "tool": "create_custom_tool",
                "args": {"name": "dice_roll", "code_preview": demo_code[:120]}}
         decision = await approval.wait_decision(aid)
+        if _fenced_off():
+            # 决议落库后再校验：批准与删除竞争时绝不执行（spec 3.4.3 同口径）
+            yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+            return
         if decision is True:
             result = await asyncio.to_thread(
                 custom_tools.write_custom_tool, "dice_roll", demo_code)
@@ -212,10 +271,18 @@ async def _mock_stream_inner(user_text: str) -> AsyncIterator[dict]:
     elif any(k in user_text for k in ("删除", "删掉", "delete", "remove")):
         # 危险操作演示：发起审批 → 等待前端决定 → 批准才执行（超时/拒绝一律不执行）
         filename = _extract_filename(user_text)
-        aid = approval.create_approval("delete_workspace_file", {"path": filename})
+        aid = _create_approval("delete_workspace_file", {"path": filename})
+        if aid is None:
+            # 栅栏拒绝：会话已删/代际过期，不创建 pending、中止演示（fail-closed）
+            yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+            return
         yield {"type": "approval_required", "approval_id": aid,
                "tool": "delete_workspace_file", "args": {"path": filename}}
         decision = await approval.wait_decision(aid)
+        if _fenced_off():
+            # 决议落库后再校验：批准与删除竞争时绝不执行（spec 3.4.3 同口径）
+            yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+            return
         if decision is True:
             with telemetry.trace_span("tool:delete_workspace_file", as_type="tool",
                                       input={"path": filename}) as tspan:

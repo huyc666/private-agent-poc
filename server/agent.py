@@ -565,7 +565,10 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
             yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
             return
         from . import mock
-        async for ev in mock.mock_stream(messages[-1]["content"] if messages else ""):
+        # v0.17.41 栅栏收口：演示内审批创建同样走代际栅栏（会话态两值在作用域内）
+        async for ev in mock.mock_stream(messages[-1]["content"] if messages else "",
+                                         session_id=session_id,
+                                         generation=generation):
             yield ev
         return
 

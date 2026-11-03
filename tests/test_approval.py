@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from server import approval, config
+from server import approval, config, usage
 
 
 def _create(tool="delete_workspace_file", args=None):
@@ -59,6 +59,39 @@ def test_list_recent_acl_filters_creator():
     approval.create_approval("t2", {})      # 同 anonymous 上下文
     rows = approval.list_recent(user_id="alice")
     assert rows == []
+
+
+# ---------------------------------------------------------------- 职责分离（v0.17.41 spec 4.2）
+
+def test_resolve_self_approval_forbidden():
+    """AC4：发起者本人（可判定身份）不可决议自己的审批——自审自批拒绝；
+    另一决议角色决议正常通过。"""
+    usage.current_user.set("alice")          # admin「alice」发起
+    aid = _create()
+    assert approval.resolve(aid, True, username="alice", role="admin") == "forbidden"
+    rec = [r for r in approval.list_recent() if r["aid"] == aid][0]
+    assert rec["status"] == "pending"        # 记录未被改动
+    assert approval.resolve(aid, True, username="bob", role="approver") == "ok"
+
+
+def test_resolve_separation_exemptions():
+    """AC5：分离豁免面——开放模式（发起/决议同 anonymous）不死锁；
+    存量 NULL user_id 记录决议不受影响；user 发起的审批由 admin 决议通过。"""
+    aid = _create()                          # anonymous 发起（开放模式口径）
+    assert approval.resolve(aid, True, username="", role="admin") == "ok"
+    aid2 = _create()
+    assert approval.resolve(aid2, False, username="anonymous", role="admin") == "ok"
+    # 存量记录：user_id 为 NULL（v0.14.0 之前落库）→ 不套用分离
+    aid3 = _create()
+    conn = sqlite3.connect(config.STATE_DB)
+    conn.execute("UPDATE approvals SET user_id = NULL WHERE aid = ?", (aid3,))
+    conn.commit()
+    conn.close()
+    assert approval.resolve(aid3, True, username="alice", role="admin") == "ok"
+    # user 角色发起（carol）→ admin（dave）决议：发起者≠决议者，正常通过
+    usage.current_user.set("carol")
+    aid4 = _create()
+    assert approval.resolve(aid4, True, username="dave", role="admin") == "ok"
 
 
 # ---------------------------------------------------------------- 等待与超时

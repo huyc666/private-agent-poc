@@ -32,6 +32,7 @@
 | 2.5 | 决议原子性 | 同一审批并发重复决议 | 只有一次成功（原子 UPDATE pending→决议） | 📜 代码核查 |
 | 2.6 | 审计链 | `GET /api/approvals` | 创建人 user_id / 决议人 decided_by / 时间齐全 | ✅ |
 | 2.7 | abandoned 宽限期 | 批准后长任务执行中跨扫描周期 | 刚决议（宽限 = 审批超时+扫描间隔内）的「已批准未执行」记录不被误标 abandoned，执行完成后正常 mark_executed；超宽限仍未执行的才转 abandoned | 📜 v0.17.5（脚本验证） |
+| 2.8 | 发起/批准职责分离 | admin 决议自己发起的审批（v0.17.41） | 403 forbidden，状态仍 pending；仅当发起者身份可判定（非 NULL/非 anonymous）且等于决议人时拦截，全部审批类型统一分离；另一 approver/admin 决议正常 | 📜 v0.17.41（脚本验证） |
 
 ## 三、执行与文件边界
 
@@ -107,6 +108,8 @@
 | 8.1 | ~~前端把 Bearer 凭据存 localStorage~~（v0.17.37 P0-2 已修复） | 原风险面：pat- 令牌落 localStorage 可被同源脚本窃取；KB 原文页 docx 渲染未消毒可形成存储型 XSS。现防线：pat- 登录态迁 HttpOnly Cookie（SameSite=Lax + 非 GET 请求 X-Requested-With CSRF 纵深），pak- Key 仅 JS 内存；原文页服务端拼接全转义 + Mammoth 输出经 /api/kb/sanitize 白名单消毒 + CSP（nonce）/X-Frame-Options | 残余接受：pak- Key 在页面内存中存续至刷新/关闭；生产化可接企业 SSO 统一身份（报告 §5） |
 | 8.2 | 上下文压缩摘要由 LLM 生成 | 摘要调用的 token 消耗计入当前用户/会话用量（不单列类型）；摘要质量依赖模型能力 | usage 增加 kind 字段区分主调用/摘要调用；必要时换廉价模型承担摘要 |
 | 8.3 | 旧版单段下载链接的历史会话 | user 角色访问旧链接（文件已迁入 shared/）返回 404（不跨域回退，保持隔离）；approver/admin 自动回退 shared/ 命中 | 如需按用户归属旧文件，迁移时可按会话归属改写域目录 |
+| 8.4 | 审批职责分离边界（v0.17.41） | 开放模式（发起/决议同为 anonymous）无职责分离——硬分离必然死锁，定位单机自用故豁免；存量 NULL user_id 记录不套用分离 | AUTH 开启的部署须配置**至少两名** admin/approver 决议角色：单决议人部署下该账号发起的审批无人能批（fail-closed 方向的可用性代价，不设配置开关退出分离） |
+| 8.5 | `POST /api/skillpacks` 通用导入不走审批门（v0.17.41 记录） | 同步 HTTP 端点不适用 interrupt 审批模型；通用层导入仅 approver/admin（或开放模式）可用，zip 安全校验见 3.12 | 如需收口需「上传暂存 + 异步审批后生效」机制，另行评估（spec v0.17.41 记「不做」） |
 
 ## 附：fail-closed 原则总表（设计语义一览）
 
@@ -133,5 +136,6 @@
 | SSO 部门头为空（已配置 `AUTH_IDENTITY_DEPARTMENT_HEADER`） | 部门以空生效、不回退本地表——IdP 为部门权威，空部门不命中任何部门白名单（v0.17.39；opt-in 行为变更：配置该头即声明 IdP 权威，IdP 暂不发部门头的部署请勿配置） |
 | Mammoth 消毒器重复同名属性 | 校验与输出同取首次出现（浏览器 first-wins），同名属性只发首个——「危险在前、掩护在后」形态按危险值判定（v0.17.40 外部复验 N1） |
 | 存量会话存在非 anonymous 发言（meta 缺失回填） | owner 归最早非 anonymous 发言者，不归 anonymous——anonymous 宽恕不适用于混合会话，第三方读写 403（v0.17.40 外部复验 N4 用户裁决收紧；纯 anonymous 遗留会话宽恕保留） |
+| 审批发起者本人决议（含发起者同为 admin/approver） | forbidden 拒绝、状态仍 pending——职责分离（v0.17.41）；豁免面与部署要求见 8.4 |
 
 原则一句话：**任何拿不准的情况都朝「拒绝」方向倒**，审计上保留可区分的痕迹。

@@ -97,10 +97,12 @@
 | # | 事项 | 问题要点 | 来源与证据 |
 |---|---|---|---|
 | ~~1~~ | ~~SSO 身份一致性~~ ✅ **已交付 v0.17.39**（2026-11-02） | SSO 部门仍由 `server/auth.py`（resolve_identity 链路）从本地表重建，未与 HTTP 请求身份统一 → 请求级不可变身份快照贯通，执行层禁查表 | 复核报告 §2 P1（旧架构未闭环） |
-| 2 | 共享技能审批收口 | 共享技能仍经 `server/tools_admin.py` 的写入路径直接生效、未统一审批；高风险审批缺发起/批准职责分离。v0.17.38 保留的无栅栏 `create_approval`（共享技能路径专用）随之收口 | 复核报告 §2 P1 + v0.17.38 spec「不做」注 |
+| ~~2~~ | ~~共享技能审批收口~~ ✅ **已交付 v0.17.41**（2026-11-03） | 共享技能仍经 `server/tools_admin.py` 的写入路径直接生效、未统一审批；高风险审批缺发起/批准职责分离。v0.17.38 保留的无栅栏 `create_approval`（共享技能路径专用）随之收口 → 共享技能统一审批门 + resolve 自批校验 + mock 演示流代际栅栏 | 复核报告 §2 P1 + v0.17.38 spec「不做」注 |
 | ~~3~~ | ~~存量混合归属收紧~~ ✅ **已交付 v0.17.40**（2026-11-02，外部复验 N4 用户裁决选项 A） | 按最早 user 消息定 owner 的规则（`sessions.resolve_owner`）会把混合/匿名作者的历史会话永久授予最早作者，且未验证混合归属的历史 checkpoint 可安全续用——需收紧认领/隔离策略 → 混合会话归最早非 anonymous 发言者，纯 anonymous 宽恕保留 | 复核报告 §2 P1 |
 | 4 | Cookie 生产化 | pap_token 登录 Cookie 的生产化收尾（Secure 全链路、过期续签、多端并发策略等） | v0.17.37 rereview 遗留记录 |
 | 5 | 真实浏览器 E2E | XSS/Cookie/审批链路的真实浏览器端到端验证（AC11，部署期人工验收项，测试框架无法替代） | v0.17.37 spec + 复核报告 §3 |
+
+- **v0.17.41**（2026-11-03）：共享技能审批收口 + 审批职责分离——后续轮次待办 #2 整改（spec：docs/specs/security-hardening-v0.17.41.md，用户裁决四个取舍点全按建议：4.1 共享技能审批门采纳 / 4.2 统一分离不维护豁免清单 + 开放模式豁免 + 硬分离要求至少两名决议角色 / 4.3 mock 演示流栅栏采纳 / POST /api/skillpacks 通用导入本轮不做）。①`tools_admin.create_skill` 非专属域分支（approver/admin/开放模式写通用 `skills/`）包 `approval.require_approval` 审批门，批准后才落盘；user 专属域自助免审批不变，`skills.create_skill` 存储函数保持纯写盘（审批门在工具入口层）。②`approval.resolve` 自批校验：发起者可判定（非 NULL/非 anonymous）且等于决议人 → forbidden，全部审批类型统一分离；豁免开放模式（双方 anonymous）与存量 NULL 记录。③mock 演示流三处审批点改 `create_approval_fenced`（mock_stream 透传 session_id/generation），mock 技能演示改「审批后落盘」；无栅栏 `create_approval` 仅剩 agent.py 防御分支（生产不可达）与测试。红测试先行（AC1/AC3/AC4/AC6 红态确认对准）；TRAE-code-review 双子代理评审 4 候选：修复 2 项（C1 mock 决议后执行前缺代际终局再校验，与真实路径 spec 3.4.3 不一致——四处审批点补终局校验 + 批准/删除竞争防线用例 / C2 create_skill 先规范化再进审批，对齐 create_pack）、有意保留 1 项（C3 两侧分流判定务实重复）、证伪排除 1 项（C4 认证模式空 username 不可达）。新增 9 用例、修订 1 用例（mock 技能演示），全量回归 686 passed / 18 skipped / 0 failed（基线 677 passed / 18 skipped）。
 
 - **v0.17.40**（2026-11-02）：v0.17.39 外部复验整改（处理记录：docs/reviews/2026-11-02-v0.17.39-8bba994-review-response.md）——3 真缺陷修复（Mammoth 消毒器重复属性 first-wins 校验与输出同源 / FencedCheckpointer aput/put 返回值透传 / alist 生成器直传修复历史回溯 TypeError）+ 待办 #3 交付（N4 用户裁决收紧：存量混合会话回填归最早非 anonymous 发言者，纯 anonymous 宽恕保留，fail-closed 方向对外行为变更）+ O1 修复（MOCK_LLM 分支补代际 fencing）。新增 8 用例，全量回归 677 passed / 18 skipped / 0 failed（基线 669 passed / 18 skipped）。
 

@@ -99,6 +99,82 @@ def test_mock_delete_rejected_not_executed():
     assert "拒绝" in answer
 
 
+# ------------------------------------------------- mock 演示流代际栅栏（v0.17.41 AC6）
+
+def test_mock_fenced_stale_generation_aborts():
+    """AC6：mock 演示流绑定会话代际——会话已删（代际过期）时审批不创建、
+    演示以「会话已被删除」中止（与真实模型路径同口径 fail-closed）。"""
+    from server import sessions
+    sid = "mock-fence-stale"
+    sessions.mark_deleted(sid)
+    before = approval.pending_count()
+    events = _collect(mock.mock_stream("删除文件 stale.txt",
+                                       session_id=sid, generation=0))
+    assert any(e["type"] == "error" and "会话已被删除" in e["content"]
+               for e in events)
+    assert not any(e["type"] == "approval_required" for e in events)
+    assert approval.pending_count() == before              # 未新增 pending
+
+
+def test_mock_fenced_active_generation_creates_pending():
+    """AC6：代际匹配（活跃会话）→ 正常登记 pending 并走完审批演示。"""
+    sid = "mock-fence-live"
+
+    async def scenario():
+        events = []
+        t = asyncio.create_task(_approve_when_pending("delete_workspace_file", False))
+        try:
+            async for ev in mock.mock_stream("删除文件 live.txt",
+                                             session_id=sid, generation=0):
+                events.append(ev)
+        finally:
+            await t
+        return events
+
+    events = asyncio.run(scenario())
+    assert any(e["type"] == "approval_required" for e in events)
+    answer = "".join(e["content"] for e in events if e["type"] == "token")
+    assert "拒绝" in answer
+
+
+def test_mock_fenced_post_decision_no_execution():
+    """评审 C1 防线：批准决议与删除竞争——决议落库后终局再校验命中代际过期，
+    即使决议为批准也绝不执行（与真实路径 spec 3.4.3 同口径）。"""
+    from server import sessions
+    sid = "mock-fence-race"
+    target = config.TOOL_WORKSPACE / "race.txt"
+    target.write_text("不可删", encoding="utf-8")
+
+    async def _delete_then_approve():
+        for _ in range(300):
+            pend = [r for r in approval.list_recent(limit=10)
+                    if r["tool"] == "delete_workspace_file"
+                    and r["status"] == "pending"]
+            if pend:
+                sessions.mark_deleted(sid)                 # 删除先于决议落库
+                approval.resolve(pend[0]["aid"], True, "boss", "approver")
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError("审批记录未出现")
+
+    async def scenario():
+        events = []
+        t = asyncio.create_task(_delete_then_approve())
+        try:
+            async for ev in mock.mock_stream("删除文件 race.txt",
+                                             session_id=sid, generation=0):
+                events.append(ev)
+        finally:
+            await t
+        return events
+
+    events = asyncio.run(scenario())
+    assert any(e["type"] == "approval_required" for e in events)
+    assert any(e["type"] == "error" and "会话已被删除" in e["content"]
+               for e in events)
+    assert target.exists()                                 # 批准了也绝不执行
+
+
 # ---------------------------------------------------------------- weather：Open-Meteo
 
 _GEO = {"results": [{"name": "北京", "latitude": 39.9, "longitude": 116.4,
@@ -202,15 +278,46 @@ def test_query_weather_itboy_disabled(monkeypatch):
 # ---------------------------------------------------------------- mock 其余场景分支
 
 def test_mock_skill_create_branch():
-    """技能制作场景：create_skill 工具落盘（无审批），答复说明「制作即可用」。"""
+    """技能制作场景：v0.17.41 起共享技能与领域包同口径——先审批后落盘。"""
     from server import skills
-    events = _collect(mock.mock_stream("帮我创建一个技能"))
+
+    async def scenario():
+        events = []
+        t = asyncio.create_task(_approve_when_pending("create_skill", True))
+        try:
+            async for ev in mock.mock_stream("帮我创建一个技能"):
+                events.append(ev)
+        finally:
+            await t
+        return events
+
+    events = asyncio.run(scenario())
+    assert any(e["type"] == "approval_required" and e["tool"] == "create_skill"
+               for e in events)
     ends = [e for e in events if e["type"] == "tool" and e["status"] == "end"]
     assert ends[0]["name"] == "create_skill"
     answer = "".join(e["content"] for e in events if e["type"] == "token")
-    assert "daily-brief" in answer
+    assert "daily-brief" in answer and "审批已通过" in answer
     assert (config.SKILLS_DIR / "daily-brief" / "SKILL.md").is_file()
     assert any(s["name"] == "daily-brief" for s in skills.list_skills())
+
+
+def test_mock_skill_create_rejected_not_written():
+    """技能制作场景拒绝 → 不落盘（fail-closed 口径与真实行为一致）。"""
+    async def scenario():
+        events = []
+        t = asyncio.create_task(_approve_when_pending("create_skill", False))
+        try:
+            async for ev in mock.mock_stream("帮我创建一个技能"):
+                events.append(ev)
+        finally:
+            await t
+        return events
+
+    events = asyncio.run(scenario())
+    answer = "".join(e["content"] for e in events if e["type"] == "token")
+    assert "拒绝" in answer
+    assert not (config.SKILLS_DIR / "daily-brief").exists()
 
 
 def test_mock_skill_list_branch():

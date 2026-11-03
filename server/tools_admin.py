@@ -46,8 +46,24 @@ def create_skill(name: str, description: str, instructions: str,
     """创建一个新技能，或在技能已存在时（overwrite=true）整体替换其指令内容。
     name 为小写字母/数字/连字符（如 weekly-report）；description 一句话说明何时使用；
     instructions 为完整 Markdown 指令。技能已存在且未显式传 overwrite=true 时会拒绝
-    （防止误覆盖）；更新场景请把 overwrite 设为 true 并在回复中说明将替换原内容。"""
-    return skills.create_skill(name, description, instructions, overwrite=overwrite)
+    （防止误覆盖）；更新场景请把 overwrite 设为 true 并在回复中说明将替换原内容。
+    存储分流（v0.17.41 起共享层收口审批门）：user 角色创建的技能落本人专属域
+    skills_personal/<域>/（仅本人可见，自助落盘免审批）；approver/admin/开放模式
+    创建的是全员可见的共享技能（skills/），属危险操作，执行前需用户批准。"""
+    from . import auth
+    name = name.strip().lower()  # 统一规范化：审批展示与实际落盘同名（对齐 create_pack）
+    if auth.current_role() == "user" and skills.current_scope() is not None:
+        # 专属域写入：影响面限于本人会话，自助落盘免审批（与自定义工具同原则）
+        return skills.create_skill(name, description, instructions,
+                                   overwrite=overwrite)
+    # 共享技能 = 全员可见能力资产：与 create_custom_tool/create_pack 同口径走审批门
+    return approval.require_approval(
+        "create_skill",
+        {"name": name, "description": description, "overwrite": overwrite,
+         "instructions_preview": instructions[:300]},
+        "技能创建",
+        lambda: skills.create_skill(name, description, instructions,
+                                    overwrite=overwrite))
 
 
 # ---------------------------------------------------------------- 自定义工具（对话式创建，免重启）

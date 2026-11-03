@@ -69,6 +69,53 @@ def test_load_skill_roundtrip_and_missing(login_as):
     assert "不存在" in out
 
 
+# ------------------------------------------------- 共享技能审批门（v0.17.41 spec 3）
+
+def test_create_skill_shared_fail_closed(login_as):
+    """AC1：admin 上下文创建共享技能（全员可见资产）必须过审批门——
+    非图上下文（审批流不可用）fail-closed 拒绝，skills/ 不落盘。"""
+    login_as("boss", role="admin")
+    out = tools_admin.create_skill("shared-gate", "演示", "# 指令")
+    assert "fail-closed" in out
+    assert not (config.SKILLS_DIR / "shared-gate").exists()
+
+
+def test_create_skill_personal_no_approval(login_as, monkeypatch):
+    """AC2：user 角色创建技能仍自助落本人专属域（影响面限于本人，免审批）。"""
+    login_as("alice")                                # user 角色
+    import langgraph.types as lt
+    fired = []
+    monkeypatch.setattr(lt, "interrupt",
+                        lambda p: fired.append(p) or {"approve": True})
+    out = tools_admin.create_skill("al-own", "演示", "# 指令")
+    alice = config.user_scope("alice")
+    assert f"skills_personal/{alice}/al-own/SKILL.md" in out
+    assert (config.PERSONAL_SKILLS_DIR / alice / "al-own" / "SKILL.md").is_file()
+    assert fired == []                               # 未发起审批
+
+
+def test_create_skill_shared_approval_roundtrip(login_as, monkeypatch):
+    """AC3：admin 上下文共享技能——批准才落盘（审批卡片带名称/描述/overwrite
+    与指令预览），拒绝不落盘。"""
+    login_as("boss", role="admin")
+    import langgraph.types as lt
+    seen = []
+    monkeypatch.setattr(lt, "interrupt",
+                        lambda p: seen.append(p) or {"approve": True})
+    out = tools_admin.create_skill("shared-ok", "演示描述", "# 指令正文",
+                                   overwrite=True)
+    assert (config.SKILLS_DIR / "shared-ok" / "SKILL.md").is_file()
+    assert "shared-ok" in out
+    assert seen and seen[0]["tool"] == "create_skill"
+    args = seen[0]["args"]
+    assert args["name"] == "shared-ok" and args["overwrite"] is True
+    assert "演示描述" in args["description"] and "指令正文" in args["instructions_preview"]
+    monkeypatch.setattr(lt, "interrupt", lambda p: {"approve": False})
+    out = tools_admin.create_skill("shared-no", "演示", "# 指令")
+    assert "拒绝" in out
+    assert not (config.SKILLS_DIR / "shared-no").exists()
+
+
 # ---------------------------------------------------------------- 自定义工具视图
 
 def test_list_custom_tools_personal_view(login_as):
