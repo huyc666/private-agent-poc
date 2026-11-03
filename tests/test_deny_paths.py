@@ -48,7 +48,7 @@ def test_upload_oversize_rejected(client, monkeypatch):
 def test_upload_docx_oversize_xml_rejected(client, monkeypatch):
     """docx 解压炸弹防线：word/document.xml 解压后超上限 → 400。"""
     monkeypatch.setattr(config, "UPLOAD_MAX_MB", 10)
-    monkeypatch.setattr("server.main._DOCX_XML_MAX_CHARS", 5)
+    monkeypatch.setattr("server.routes.files._DOCX_XML_MAX_CHARS", 5)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("word/document.xml", "<w:p>abcdefgh</w:p>")

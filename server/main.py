@@ -222,30 +222,7 @@ async def health(request: Request) -> dict:
 
 
 # ---------------------------------------------------------------- 文档上传（v0.17.7）
-# _docx_to_text 与其上限常量留在本文件：测试以 server.main._DOCX_XML_MAX_CHARS
-# 为 monkeypatch 锚点（tests/test_deny_paths.py），路由侧经延迟 import 访问。
-# docx 解包上限：word/document.xml 解压后字符数（防解压炸弹，10MB 压缩体
-# 理论可膨胀出 GB 级 XML）
-_DOCX_XML_MAX_CHARS = 20_000_000
-
-
-def _docx_to_text(data: bytes) -> str:
-    """从 .docx（zip 包）提取 word/document.xml 正文文本，去标签保留段落换行。
-    解压前校验条目声明大小（防解压炸弹）；非 zip/缺条目抛 ValueError（→400）。"""
-    import html as _html
-    import io
-    import zipfile
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as z:
-            info = z.getinfo("word/document.xml")
-            if info.file_size > _DOCX_XML_MAX_CHARS:
-                raise ValueError("docx 正文过大，超出解析上限")
-            xml = z.read(info).decode("utf-8", errors="replace")[:_DOCX_XML_MAX_CHARS]
-    except (zipfile.BadZipFile, KeyError):
-        raise ValueError("不是有效的 docx 文件（缺少 word/document.xml）")
-    xml = re.sub(r"</w:p>", "\n", xml)          # 段落 → 换行
-    xml = re.sub(r"<[^>]+>", "", xml)           # 去其余标签
-    return _html.unescape(xml).strip()
+# _docx_to_text 已迁往 server/routes/files.py（批 4 收尾，仅上传端点使用）
 
 
 def _migrate_legacy_file_dirs() -> None:
@@ -346,45 +323,11 @@ def vendor_file(name: str) -> Any:
     return FileResponse(str(p), media_type=media)
 
 
-# 以下三个知识库辅助函数留在本文件：测试以 server.main 属性为 monkeypatch 锚点
-# （tests/test_kb_citation.py 等 patch _kb_home/_declared_kb_packs），
-# routes/kb.py 经函数内延迟 import 访问本命名空间。
-def _kb_home() -> Path:
-    """知识库根目录（kb/<库名>/<文档名>）。独立函数便于测试替身注入。"""
-    return Path(__file__).resolve().parents[1] / "kb"
-
-
-def _declared_kb_packs() -> list[dict]:
-    """启用包中声明了 knowledge_bases 的清单（kb 名 → 包归属 + 包级 RBAC）。
-    独立函数便于测试替身注入。"""
-    return [p for p in packs.enabled_packs() if p.get("knowledge_bases")]
-
-
-def kb_allowed(kb: str, role: str | None, department: str | None = None,
-               packs_list: list[dict] | None = None) -> bool:
-    """定位端点权限（fail-closed，PLAN 2.4 多包 OR 合并）：kb 名必须被启用包
-    knowledge_bases 声明，且**任一声明包**按「角色 + 部门」双重校验通过即放行
-    （跨领域通用库形态：同一库挂多个领域包，各包自治授权，任一授权链成立即可见；
-    任一维度未配置 = 该维度放行，与工具层/提示层同口径；role=None 视为开放模式
-    放行；admin 全局视图跨部门放行；未分配部门不命中白名单）。堵住「包 RBAC 挡了
-    检索工具、定位端点仍可枚举翻库」的旁路（PLAN 2.2 澄清 4）。
-    全部声明包拒绝或库未声明 → False（不区分「不存在」与「无权」）。"""
-    for p in (packs_list if packs_list is not None else _declared_kb_packs()):
-        if kb in (p.get("knowledge_bases") or []):
-            if role is None:
-                return True  # 开放模式（认证关闭）
-            # 角色+部门判定复用 pack_scope_denied（与提示层/执行层同一实现，防口径漂移）；
-            # department=None 归一为 "" 保持本函数纯函数语义（不回落上下文，fail-closed）
-            if custom_tools.pack_scope_denied(
-                    p.get("name", kb), p.get("allowed_roles") or [],
-                    p.get("allowed_departments") or [],
-                    role=role, department=department or "") is None:
-                return True
-    return False
+# 知识库权限判定与库根目录定位已迁往 server/kb_access.py（批 4 收尾，
+# 纠正 routes → main 反向依赖；测试 monkeypatch 锚点随迁该模块）。
 
 
 # ---- 路由注册（编码规范批 4：按资源域拆出 server/routes/，端点实现原样搬迁）----
-# /api/chat 现位于 server/routes/chat.py；tests 中锚定实现文件的静态守卫已随迁。
 from server.routes import register  # noqa: E402
 
 register(app)

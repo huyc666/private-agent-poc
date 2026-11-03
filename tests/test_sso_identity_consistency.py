@@ -162,7 +162,7 @@ def test_ac2_revocation_immediate_without_local_sync(monkeypatch):
                               department="finance", auth_source="sso")
 
     def probe():
-        from server.main import kb_allowed   # 原文端点同一判定函数
+        from server.kb_access import kb_allowed   # 原文端点同一判定函数
         dept = auth.current_department()
         return (kb_allowed("kb-hr", "user", dept, _KB_PACKS),
                 kb_allowed("kb-fin", "user", dept, _KB_PACKS))
@@ -196,7 +196,7 @@ def test_ac3_empty_sso_department_failclosed(monkeypatch):
                               department="", auth_source="sso")
 
     def probe():
-        from server.main import kb_allowed
+        from server.kb_access import kb_allowed
         dept = auth.current_department()
         return dept, kb_allowed("kb-hr", "user", dept, _KB_PACKS)
 

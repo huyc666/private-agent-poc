@@ -1,8 +1,6 @@
 """知识库定位端点（v0.17.25，PLAN 2.2）：Mammoth 输出消毒通道 + 原文定位视图。
-自 server/main.py 原样搬迁。
-
-_kb_home / _declared_kb_packs / kb_allowed 保留在 server.main（测试以
-server.main 属性为 monkeypatch 锚点），本模块经函数内延迟 import 访问。
+自 server/main.py 原样搬迁；权限判定与库根目录定位走 server/kb_access.py
+（叶子模块，测试 monkeypatch 锚点），模块属性调用保证补丁可注入。
 """
 import asyncio
 import logging
@@ -16,7 +14,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from server import auth, html_sanitize
+from server import auth, html_sanitize, kb_access
 from server.webdeps import KbSanitizeRequest, _acl_identity
 from tools import kb_parsers  # 定位端点按锚点重解析文档（服务器侧，不进包）
 
@@ -95,9 +93,8 @@ async def kb_source(request: Request, kb: str, doc: str, kind: str = "line",
     （两维 AND，PLAN 2.3；部门取请求身份——SSO 部门头优先，与请求级 ACL 同口径）；
     kb 未声明/文档名非法/文件不存在一律 404（不区分「不存在」与「无权」，
     不暴露库清单）。逻辑路径 kb/<库名>/<文档名>，错误信息不含服务器绝对路径。"""
-    # 延迟 import：kb_allowed / _kb_home 是测试补丁锚点（monkeypatch 定点
-    # server.main 命名空间），须走 main 模块属性
-    from server import main as _main
+    # kb_allowed / _kb_home 经 kb_access 模块属性调用（测试 monkeypatch 锚点
+    # 即该模块），保证补丁注入生效
     if auth.enabled():
         ident = _acl_identity(request)
         if not ident:
@@ -107,7 +104,7 @@ async def kb_source(request: Request, kb: str, doc: str, kind: str = "line",
     else:
         role = None  # 开放模式：与现有开放部署行为一致
         department = None
-    if not _main.kb_allowed(kb, role, department):
+    if not kb_access.kb_allowed(kb, role, department):
         return JSONResponse({"error": "知识库不存在"}, status_code=404)
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", kb or ""):
         return JSONResponse({"error": "知识库不存在"}, status_code=404)
@@ -117,7 +114,7 @@ async def kb_source(request: Request, kb: str, doc: str, kind: str = "line",
             or "/" in doc or "\\" in doc or ".." in doc
             or any(ord(c) < 32 for c in doc)):
         return JSONResponse({"error": "文档不存在"}, status_code=404)
-    path = _main._kb_home() / kb / doc
+    path = kb_access._kb_home() / kb / doc
     if not path.is_file():
         return JSONResponse({"error": "文档不存在"}, status_code=404)
 

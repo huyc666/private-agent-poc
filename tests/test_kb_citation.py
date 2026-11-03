@@ -275,9 +275,9 @@ def test_ac4_chat_loop_collects_citations():
 
 @pytest.fixture()
 def client(tmp_path, client_factory, make_user, monkeypatch):
-    from server import main as server_main
-    monkeypatch.setattr(server_main, "_kb_home", lambda: tmp_path)
-    monkeypatch.setattr(server_main, "_declared_kb_packs",
+    from server import kb_access
+    monkeypatch.setattr(kb_access, "_kb_home", lambda: tmp_path)
+    monkeypatch.setattr(kb_access, "_declared_kb_packs",
                         lambda: [{"name": "t", "knowledge_bases": ["kb"],
                                   "allowed_roles": []}])
     key = make_user("cite_admin", role="admin")
@@ -288,10 +288,10 @@ def client(tmp_path, client_factory, make_user, monkeypatch):
 
 def test_ac6_unauthorized_401(tmp_path, client_factory, monkeypatch):
     """认证开启且未登录 → 401。"""
-    from server import main as server_main
+    from server import kb_access
     _seed_line_kb(tmp_path)
-    monkeypatch.setattr(server_main, "_kb_home", lambda: tmp_path)
-    monkeypatch.setattr(server_main, "_declared_kb_packs",
+    monkeypatch.setattr(kb_access, "_kb_home", lambda: tmp_path)
+    monkeypatch.setattr(kb_access, "_declared_kb_packs",
                         lambda: [{"name": "t", "knowledge_bases": ["kb"],
                                   "allowed_roles": []}])
     r = client_factory().get("/api/kb/source", params={
@@ -381,9 +381,9 @@ def test_ac6_traversal_rejected(client, tmp_path):
 
 def test_ac6_kb_not_declared(client, tmp_path, monkeypatch):
     """kb 未被启用包 knowledge_bases 声明 → 404（fail-closed，不暴露库清单）。"""
-    from server import main as server_main
+    from server import kb_access
     _seed_line_kb(tmp_path)
-    monkeypatch.setattr(server_main, "_declared_kb_packs",
+    monkeypatch.setattr(kb_access, "_declared_kb_packs",
                         lambda: [{"name": "p", "knowledge_bases": ["other"],
                                   "allowed_roles": []}])
     r = client.get("/api/kb/source", params={
@@ -395,7 +395,7 @@ def test_ac6_rbac_follow(monkeypatch):
     """kb_allowed 纯函数：包 allowed_roles 跟随（user 被拒、approver 放行、
     未配置默认放行、kb 未声明拒绝）。v0.17.26 起签名增 department 参数，
     调用侧一律用关键字传参（packs_list=）。"""
-    from server.main import kb_allowed
+    from server.kb_access import kb_allowed
     packs = [{"name": "p1", "knowledge_bases": ["hr"], "allowed_roles": ["approver"]},
              {"name": "p2", "knowledge_bases": ["common"], "allowed_roles": []}]
     assert kb_allowed("hr", "approver", packs_list=packs) is True
@@ -550,14 +550,14 @@ def _24_packs():
 
 def test_24_ac1_multi_pack_or_merge():
     """AC1：库被两包声明，各部门身份经各自包放行（首包生效缺口修复）。"""
-    from server.main import kb_allowed
+    from server.kb_access import kb_allowed
     assert kb_allowed("policy", "user", "hr", packs_list=_24_packs()) is True
     assert kb_allowed("policy", "user", "finance", packs_list=_24_packs()) is True
 
 
 def test_24_ac2_single_pack_deny_regression():
     """AC2：库仅单包声明时跨部门/未分配部门仍拒（2.3 行为回归）。"""
-    from server.main import kb_allowed
+    from server.kb_access import kb_allowed
     packs = [{"name": "hr-pack", "knowledge_bases": ["hr"], "allowed_roles": [],
               "allowed_departments": ["hr"]}]
     assert kb_allowed("hr", "user", "finance", packs_list=packs) is False
@@ -567,7 +567,7 @@ def test_24_ac2_single_pack_deny_regression():
 def test_24_ac3_mixed_authorization():
     """AC3：包 A（roles+depts 双限）+ 包 B 不限——user/hr 经 B 放行，
     approver/hr 经 A 或 B 放行，user/finance 经 B 放行。"""
-    from server.main import kb_allowed
+    from server.kb_access import kb_allowed
     packs = [{"name": "pa", "knowledge_bases": ["policy"],
               "allowed_roles": ["approver"], "allowed_departments": ["hr"]},
              {"name": "pb", "knowledge_bases": ["policy"], "allowed_roles": [],
@@ -579,18 +579,18 @@ def test_24_ac3_mixed_authorization():
 
 def test_24_ac4_all_deny_fail_closed_admin_global():
     """AC4：全部声明包拒绝（未分配部门）→ False；admin 经任一声明包放行。"""
-    from server.main import kb_allowed
+    from server.kb_access import kb_allowed
     assert kb_allowed("policy", "user", "", packs_list=_24_packs()) is False
     assert kb_allowed("policy", "admin", "", packs_list=_24_packs()) is True
 
 
 def test_24_ac5_undeclared_kb_still_false():
     """AC5：未被任何包声明的库 → False（回归）。"""
-    from server.main import kb_allowed
+    from server.kb_access import kb_allowed
     assert kb_allowed("nope", "admin", "", packs_list=_24_packs()) is False
 
 
 def test_24_ac6_open_mode_multi_pack():
     """AC6：开放模式（role=None）多包声明库放行（回归）。"""
-    from server.main import kb_allowed
+    from server.kb_access import kb_allowed
     assert kb_allowed("policy", None, None, packs_list=_24_packs()) is True

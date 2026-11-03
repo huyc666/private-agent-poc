@@ -5,10 +5,8 @@ Pydantic 请求模型集中于此，避免 routes ↔ main 循环导入（本模
 server.main 或 server.routes）。
 
 收纳规则：只放被 ≥2 个模块使用的项；单域 helper 随域走（_audit →
-routes/admin_users.py，_safe_rel 等 → routes/files.py）。
-测试补丁锚点例外：_docx_to_text / _DOCX_XML_MAX_CHARS / _kb_home /
-_declared_kb_packs / kb_allowed 被测试以 server.main 属性做 monkeypatch，
-保留在 server/main.py，routes 端点经函数内延迟 import 访问。
+routes/admin_users.py，_safe_rel/_docx_to_text 等 → routes/files.py，
+知识库权限判定 → server/kb_access.py）。
 """
 from fastapi import Request
 from fastapi.responses import JSONResponse

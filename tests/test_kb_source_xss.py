@@ -25,9 +25,9 @@ def _mk_evil_docx(path):
 
 @pytest.fixture()
 def client(tmp_path, client_factory, make_user, monkeypatch):
-    from server import main as server_main
-    monkeypatch.setattr(server_main, "_kb_home", lambda: tmp_path)
-    monkeypatch.setattr(server_main, "_declared_kb_packs",
+    from server import kb_access
+    monkeypatch.setattr(kb_access, "_kb_home", lambda: tmp_path)
+    monkeypatch.setattr(kb_access, "_declared_kb_packs",
                         lambda: [{"name": "t", "knowledge_bases": ["kb"],
                                   "allowed_roles": []}])
     key = make_user("xss_admin", role="admin")

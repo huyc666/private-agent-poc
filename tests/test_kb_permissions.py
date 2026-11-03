@@ -252,9 +252,9 @@ def kb_root(tmp_path):
 @pytest.fixture()
 def kb_client(tmp_path, kb_root, client_factory, monkeypatch):
     """按 (角色, 部门) 建用户并返回带鉴权头的 TestClient。"""
-    from server import main as server_main
-    monkeypatch.setattr(server_main, "_kb_home", lambda: kb_root)
-    monkeypatch.setattr(server_main, "_declared_kb_packs", lambda: [
+    from server import kb_access
+    monkeypatch.setattr(kb_access, "_kb_home", lambda: kb_root)
+    monkeypatch.setattr(kb_access, "_declared_kb_packs", lambda: [
         {"name": "kb-demo", "knowledge_bases": ["hr"],
          "allowed_roles": [], "allowed_departments": ["hr"]},
         {"name": "kb-finance-demo", "knowledge_bases": ["finance"],
@@ -404,12 +404,12 @@ def test_24_ac7_shared_kb_prompt_tool_per_pack_isolation(packs_dir):
 def test_24_ac8_shared_kb_endpoint_both_departments(tmp_path, kb_root,
                                                     client_factory, monkeypatch):
     """AC8：定位端点两包同声明库——hr/finance 身份均 200，未分配部门 404。"""
-    from server import main as server_main
+    from server import kb_access
     (kb_root / "policy").mkdir(exist_ok=True)
     (kb_root / "policy" / "差旅制度.md").write_text("# 差旅\n\n标准 800 元。",
                                                    encoding="utf-8")
-    monkeypatch.setattr(server_main, "_kb_home", lambda: kb_root)
-    monkeypatch.setattr(server_main, "_declared_kb_packs", lambda: [
+    monkeypatch.setattr(kb_access, "_kb_home", lambda: kb_root)
+    monkeypatch.setattr(kb_access, "_declared_kb_packs", lambda: [
         {"name": "hr-pack", "knowledge_bases": ["policy"], "allowed_roles": [],
          "allowed_departments": ["hr"]},
         {"name": "fin-pack", "knowledge_bases": ["policy"], "allowed_roles": [],

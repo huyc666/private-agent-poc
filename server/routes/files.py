@@ -29,6 +29,31 @@ _WIN_RESERVED = {"con", "prn", "aux", "nul",
                  *(f"com{i}" for i in range(1, 10)),
                  *(f"lpt{i}" for i in range(1, 10))}
 
+# docx 解包上限：word/document.xml 解压后字符数（防解压炸弹，10MB 压缩体
+# 理论可膨胀出 GB 级 XML）。测试 monkeypatch 锚点即本模块
+# （tests/test_deny_paths.py）
+_DOCX_XML_MAX_CHARS = 20_000_000
+
+
+def _docx_to_text(data: bytes) -> str:
+    """从 .docx（zip 包）提取 word/document.xml 正文文本，去标签保留段落换行。
+    解压前校验条目声明大小（防解压炸弹）；非 zip/缺条目抛 ValueError（→400）。
+    批 4 收尾自 server/main.py 迁回本域（仅上传端点使用）。"""
+    import html as _html
+    import io
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            info = z.getinfo("word/document.xml")
+            if info.file_size > _DOCX_XML_MAX_CHARS:
+                raise ValueError("docx 正文过大，超出解析上限")
+            xml = z.read(info).decode("utf-8", errors="replace")[:_DOCX_XML_MAX_CHARS]
+    except (zipfile.BadZipFile, KeyError):
+        raise ValueError("不是有效的 docx 文件（缺少 word/document.xml）")
+    xml = re.sub(r"</w:p>", "\n", xml)          # 段落 → 换行
+    xml = re.sub(r"<[^>]+>", "", xml)           # 去其余标签
+    return _html.unescape(xml).strip()
+
 
 def _upload_safe_name(name: str) -> str:
     """文件名清洗：只取 basename、限长、白名单后缀、拒绝 Windows 非法字符与
@@ -131,11 +156,8 @@ async def upload_doc(request: Request, name: str = "") -> Any:
                             status_code=413)
     try:
         if Path(safe).suffix.lower() in _UPLOAD_DOC_EXTS:
-            # 延迟 import：_docx_to_text 是测试补丁锚点（_DOCX_XML_MAX_CHARS
-            # 经 server.main 命名空间 monkeypatch），须走 main 模块属性
-            from server import main as _main
             try:
-                text = _main._docx_to_text(data)
+                text = _docx_to_text(data)
             except ValueError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
             if not text:
