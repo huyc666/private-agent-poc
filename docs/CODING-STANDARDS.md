@@ -139,7 +139,7 @@
 |---|---|---|
 | must | 路由前缀统一 `/api/*`；资源路径 kebab/小写，路径参数做归一化校验（防空格变体绕过 ACL） | [main.py](file:///e:/codebase/GitHub/private-agent-poc/server/main.py#L760-L797) 会话 REST 路由 |
 | must | 认证、SSO/Bearer/Cookie 解析、CSRF 校验集中在 `@app.middleware("http")` 单点处理，端点内不重复解析凭据 | [main.py](file:///e:/codebase/GitHub/private-agent-poc/server/main.py#L106-L173) |
-| 现状/待收敛 | 全部路由挂在 main.py 单一 app 上、未用 APIRouter 分模块。**拆分触发条件（达成其一即在该次改动中引出 Router）**：① main.py 超过 1200 行；② 新增成组端点（同一资源 ≥3 个新路由）。拆分按资源域逐个引出（如 `server/routes/kb.py`），不一次性大重构；存量路由不强制回迁 | [main.py](file:///e:/codebase/GitHub/private-agent-poc/server/main.py#L27-L30) |
+| 现状/待收敛 | ~~main.py 单体路由~~ 已于批 4 拆分落地：端点按资源域迁至 `server/routes/`（admin_users / files / sessions / usage / kb / approvals / auth / chat），跨域共享辅助在 `server/webdeps.py`，main.py 仅保留 lifespan、认证/CSRF 中间件、静态页/health、启动迁移与 `register(app)`。**后续触发条件（仍有效）**：单路由文件超 1200 行或新增成组端点（同资源 ≥3 个新路由）时继续按域引出，不回流 main.py | [main.py](file:///e:/codebase/GitHub/private-agent-poc/server/main.py)、server/routes/ |
 
 ### 3.2 SSE 事件格式
 
