@@ -8,11 +8,14 @@
 - STATE_DB 单机多进程共享；Postgres 化随 6.4 演进
 - config.STATE_DB 运行时读取（测试 monkeypatch 隔离依赖此约定）
 """
+import logging
 import sqlite3
 import threading
 import time
 
 from server import config
+
+logger = logging.getLogger(__name__)
 
 CAPACITY = 100_000   # 容量上限；超限触发裁剪
 TRIM_RATIO = 0.9     # 裁剪后保留比例（裁最旧 10%）
@@ -81,7 +84,7 @@ def log(actor: str, role: str, action: str, target: str = "",
                 conn.close()
     except Exception as e:
         # 不回显原始异常文本（防绝对路径泄露），仅类型告警
-        print(f"[audit] 写入失败，不阻塞主链路（{type(e).__name__}）")
+        logger.warning(f"[audit] 写入失败，不阻塞主链路（{type(e).__name__}）")
 
 
 def query(actor: str = "", action: str = "", since_ms: int = 0,
@@ -127,4 +130,4 @@ def init() -> None:
             finally:
                 conn.close()
     except Exception as e:
-        print(f"[audit] 初始化失败（{type(e).__name__}）——首条写入时会重试建表")
+        logger.warning(f"[audit] 初始化失败（{type(e).__name__}）——首条写入时会重试建表")

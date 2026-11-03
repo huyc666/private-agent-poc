@@ -141,7 +141,7 @@ def test_ac3_explicit_config_overrides_default(monkeypatch):
         assert custom_tools.exec_mode() == expect[explicit]
 
 
-def test_ac3_auto_fallback_local_warns_rate_limited(monkeypatch, capsys):
+def test_ac3_auto_fallback_local_warns_rate_limited(monkeypatch, caplog):
     """auto 回退 local 不再静默：显著 WARNING + 60s 限频防刷屏。"""
     monkeypatch.setattr(config, "CUSTOM_TOOLS_EXEC", "")
     monkeypatch.setattr(config, "MOCK_LLM", True)
@@ -149,10 +149,11 @@ def test_ac3_auto_fallback_local_warns_rate_limited(monkeypatch, capsys):
     custom_tools._up_cache["t"] = 0.0
     custom_tools._auto_warn_cache["t"] = 0.0    # 前序用例已告警过，重置限频
     assert custom_tools.exec_mode() == "local"
-    assert "主进程" in capsys.readouterr().out
+    assert "主进程" in caplog.text
     custom_tools._up_cache["t"] = 0.0          # 限频窗口内重复回退不再告警
+    caplog.clear()
     custom_tools.exec_mode()
-    assert "主进程" not in capsys.readouterr().out
+    assert "主进程" not in caplog.text
 
 
 # ---------------------------------------------------------------- 专属工具归属校验

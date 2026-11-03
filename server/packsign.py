@@ -20,10 +20,13 @@ canonical 形式：逐文件 "相对路径\\0内容sha256hex\\n" 拼接后做 HM
 """
 import hashlib
 import hmac
+import logging
 import re
 from pathlib import Path
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 SIG_PREFIX = "hmac-sha256:"
 _SIG_LINE = re.compile(r"^\s*signature\s*:", re.MULTILINE)
@@ -95,8 +98,8 @@ def verify(pack_dir: Path, signature: str, key: bytes | None = None) -> bool:
     try:
         expected = compute(pack_dir, key)
     except (OSError, UnicodeEncodeError, RuntimeError) as e:
-        print(f"[packsign] 包「{pack_dir.name}」签名载荷读取失败，按 invalid 处理"
-              f"（{type(e).__name__}）——请检查文件占用/权限")
+        logger.warning(f"[packsign] 包「{pack_dir.name}」签名载荷读取失败，按 invalid 处理"
+                       f"（{type(e).__name__}）——请检查文件占用/权限")
         return False
     if expected is None:
         return False

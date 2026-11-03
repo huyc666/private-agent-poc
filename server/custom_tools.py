@@ -24,12 +24,15 @@ import hashlib
 import importlib.util
 import inspect
 import json
+import logging
 import os
 import re
 import urllib.request
 from pathlib import Path
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 NAME_PATTERN = re.compile(r"^[a-z_][a-z0-9_]{0,49}$")
 MAX_CODE_BYTES = 20_000
@@ -103,8 +106,8 @@ def list_personal_tools(scope: str) -> list[dict]:
         if not NAME_PATTERN.match(p.stem):
             continue
         if p.stem in shadowed:
-            print(f"[custom-tools] 专属工具「{p.stem}」与通用工具同名被遮蔽，"
-                  f"跳过（域：{scope}）")
+            logger.warning(f"[custom-tools] 专属工具「{p.stem}」与通用工具同名被遮蔽，"
+                           f"跳过（域：{scope}）")
             continue
         doc = _extract_doc(p)
         result.append({
@@ -322,9 +325,9 @@ def exec_mode() -> str:
         now = time.time()
         if now - _auto_warn_cache["t"] >= 60:
             _auto_warn_cache["t"] = now
-            print(f"[custom-tools] WARNING: CUSTOM_TOOLS_EXEC={mode!r} 不是"
-                  "合法值（auto/local/sandbox），已按 sandbox 处理（fail-closed）："
-                  "沙箱不可达时工具拒绝执行，请修正配置。")
+            logger.warning(f"[custom-tools] WARNING: CUSTOM_TOOLS_EXEC={mode!r} 不是"
+                           "合法值（auto/local/sandbox），已按 sandbox 处理（fail-closed）："
+                           "沙箱不可达时工具拒绝执行，请修正配置。")
         mode = "sandbox"
     up = _sandbox_up()
     if mode == "local":
@@ -336,10 +339,10 @@ def exec_mode() -> str:
         now = time.time()
         if now - _auto_warn_cache["t"] >= 60:
             _auto_warn_cache["t"] = now
-            print("[custom-tools] WARNING: CUSTOM_TOOLS_EXEC=auto 且沙箱不可达，"
-                  "工具代码将在主进程执行（exec_module，拥有服务全部权限）——"
-                  "仅限受控开发环境；生产请配置 SANDBOX_URL，或显式设置"
-                  "CUSTOM_TOOLS_EXEC=sandbox 以 fail-closed。")
+            logger.warning("[custom-tools] WARNING: CUSTOM_TOOLS_EXEC=auto 且沙箱不可达，"
+                           "工具代码将在主进程执行（exec_module，拥有服务全部权限）——"
+                           "仅限受控开发环境；生产请配置 SANDBOX_URL，或显式设置"
+                           "CUSTOM_TOOLS_EXEC=sandbox 以 fail-closed。")
         return "local"
     return "sandbox"
 
@@ -363,7 +366,7 @@ def _sandbox_run_tool(name: str, args: dict, pack: str = "", env: dict | None = 
             data = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
         # 不向模型/用户回显原始异常文本（P1-3 约定），细节仅进服务端日志
-        print(f"[custom-tools] 沙箱调用失败: {e}")
+        logger.error(f"[custom-tools] 沙箱调用失败: {e}")
         return f"沙箱调用失败（{type(e).__name__}），请检查沙箱服务状态"
     if data.get("ok"):
         return str(data.get("result", ""))
@@ -409,7 +412,7 @@ def make_local_tool(path: Path):
         return StructuredTool.from_function(
             func=fn, name=name, description=fn.__doc__ or name)
     except Exception as e:
-        print(f"[custom-tools] 加载 {name} 失败（跳过，不影响其他工具）: {e}")
+        logger.warning(f"[custom-tools] 加载 {name} 失败（跳过，不影响其他工具）: {e}")
         return None
 
 
@@ -512,7 +515,7 @@ def build_tool(path: Path, pack: str = "", env: dict | None = None,
     if mode == "sandbox":
         meta = _extract_signature(path)
         if meta is None:
-            print(f"[custom-tools] {path.name} 签名提取失败，跳过")
+            logger.warning(f"[custom-tools] {path.name} 签名提取失败，跳过")
             return None
         return _guard_pack_tool(_make_sandbox_tool(meta, pack, env),
                                 pack, allowed_roles, allowed_departments)
@@ -528,23 +531,23 @@ def load_langchain_tools() -> list:
 
     mode = exec_mode()
     if mode == "sandbox-down":
-        print("[custom-tools] CUSTOM_TOOLS_EXEC=sandbox 但沙箱不可达，"
-              "fail-closed：本轮不加载任何自定义工具")
+        logger.warning("[custom-tools] CUSTOM_TOOLS_EXEC=sandbox 但沙箱不可达，"
+                       "fail-closed：本轮不加载任何自定义工具")
         return []
 
     tools = []
     for path in sorted(_dir().glob("*.py")):
         name = path.stem
         if not NAME_PATTERN.match(name):
-            print(f"[custom-tools] 跳过非法工具名: {path.name}")
+            logger.warning(f"[custom-tools] 跳过非法工具名: {path.name}")
             continue
         tool = build_tool(path)
         if tool is not None:
             tools.append(tool)
         elif mode != "sandbox-down":
-            print(f"[custom-tools] {name}.py 加载失败，跳过")
+            logger.warning(f"[custom-tools] {name}.py 加载失败，跳过")
     if tools:
-        print(f"[custom-tools] 已加载 {len(tools)} 个自定义工具（执行模式: {mode}）")
+        logger.info(f"[custom-tools] 已加载 {len(tools)} 个自定义工具（执行模式: {mode}）")
     return tools
 
 
@@ -628,7 +631,7 @@ async def run_personal_tool(name: str, args: dict) -> str:
     except Exception as e:
         # 审查问题4修复：不向模型/用户回显原始异常文本（P1-3 约定：
         # 异常可能携带服务器绝对路径），异常细节仅进服务端日志
-        print(f"[custom-tools] 专属工具「{name}」执行失败: {e}")
+        logger.error(f"[custom-tools] 专属工具「{name}」执行失败: {e}")
         return f"工具「{name}」执行失败（内部错误）"
 
 

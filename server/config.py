@@ -1,5 +1,6 @@
 """配置：全部通过环境变量驱动，私有化部署友好。"""
 import hashlib
+import logging
 import os
 import re
 from pathlib import Path
@@ -9,6 +10,8 @@ try:
     load_dotenv()
 except ImportError:
     pass
+
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -136,7 +139,7 @@ _DATA_DIR = PROJECT_ROOT / "data"
 try:
     _DATA_DIR.mkdir(exist_ok=True)
 except OSError as e:
-    print(f"[config] 运行时数据目录创建失败: {type(e).__name__}")
+    logger.error(f"[config] 运行时数据目录创建失败: {type(e).__name__}")
 
 
 def _migrate_legacy_db(name: str) -> None:
@@ -153,12 +156,12 @@ def _migrate_legacy_db(name: str) -> None:
         try:
             _DATA_DIR.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            print(f"[config] WARNING: data/ 目录创建失败: {type(e).__name__}")
+            logger.warning(f"[config] WARNING: data/ 目录创建失败: {type(e).__name__}")
             return
         target = _DATA_DIR / (name + suffix)
         if target.exists():
-            print(f"[config] WARNING: data/{name + suffix} 已存在，根目录遗留"
-                  f"{name + suffix} 未迁移（保留 data/ 现役库，请人工核对）")
+            logger.warning(f"[config] WARNING: data/{name + suffix} 已存在，根目录遗留"
+                           f"{name + suffix} 未迁移（保留 data/ 现役库，请人工核对）")
             continue
         moved = False
         for attempt in range(3):
@@ -169,10 +172,10 @@ def _migrate_legacy_db(name: str) -> None:
             except OSError:
                 time.sleep(0.2 * (attempt + 1))
         if moved:
-            print(f"[config] 已迁移运行时库: {name + suffix} → data/")
+            logger.info(f"[config] 已迁移运行时库: {name + suffix} → data/")
         else:
-            print(f"[config] WARNING: 根目录 {name + suffix} 迁移失败（3 次重试），"
-                  "请手动移动到 data/ 后重启")
+            logger.warning(f"[config] WARNING: 根目录 {name + suffix} 迁移失败（3 次重试），"
+                           "请手动移动到 data/ 后重启")
 
 
 # ---- Token 计量（按用户/任务/会话，SQLite 零依赖存储）----

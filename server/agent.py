@@ -13,6 +13,7 @@ Mock 模式：MOCK_LLM=true 时不依赖任何 GPU/模型，用于验证全链�
 """
 import asyncio
 import json
+import logging
 import re
 import sys
 import threading
@@ -24,6 +25,8 @@ from .state import STATE
 # FencedCheckpointer 继承基类以满足 langgraph 图编译期的 isinstance 校验
 # （ensure_valid_checkpointer）；langgraph 为服务端硬依赖（requirements 固定）
 from langgraph.checkpoint.base import BaseCheckpointSaver
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------- 出处块解析
@@ -66,7 +69,7 @@ async def load_mcp_tools() -> list:
         })
         return await client.get_tools()
     except Exception as e:
-        print(f"[agent] MCP 工具加载失败（忽略，仅用内置工具继续）: {e}")
+        logger.error(f"[agent] MCP 工具加载失败（忽略，仅用内置工具继续）: {e}")
         return []
 
 
@@ -91,8 +94,8 @@ def _rebuild_graph():
     deduped: list = []
     for t in tools:
         if t.name in seen:
-            print(f"[agent] 工具名冲突：跳过后挂载的「{t.name}」"
-                  "（保留先挂载版本；挂载顺序：内置 > MCP > 自定义 > 领域包）")
+            logger.warning(f"[agent] 工具名冲突：跳过后挂载的「{t.name}」"
+                           "（保留先挂载版本；挂载顺序：内置 > MCP > 自定义 > 领域包）")
             continue
         seen.add(t.name)
         deduped.append(t)
@@ -159,10 +162,10 @@ async def build_agent():
     """在应用启动时调用一次。Mock 模式下只登记工具名。"""
     # 启动即打印压缩配置（评审 P3：阈值配错/忘配时在日志一眼可见，不必等触发）
     if config.CONTEXT_COMPACT_ENABLED:
-        print(f"[agent] 上下文压缩：触发线 "
-              f"{int(config.CONTEXT_MAX_TOKENS * config.CONTEXT_COMPACT_RATIO):,} tokens"
-              f"（窗口 {config.CONTEXT_MAX_TOKENS:,} × {config.CONTEXT_COMPACT_RATIO:g}），"
-              f"近窗 {config.CONTEXT_RECENT_TOKENS:,}")
+        logger.info(f"[agent] 上下文压缩：触发线 "
+                    f"{int(config.CONTEXT_MAX_TOKENS * config.CONTEXT_COMPACT_RATIO):,} tokens"
+                    f"（窗口 {config.CONTEXT_MAX_TOKENS:,} × {config.CONTEXT_COMPACT_RATIO:g}），"
+                    f"近窗 {config.CONTEXT_RECENT_TOKENS:,}")
     STATE.mcp_tool_list = []
     if config.MCP_ENABLED:
         STATE.mcp_tool_list = await load_mcp_tools()
@@ -170,7 +173,7 @@ async def build_agent():
 
     if config.MOCK_LLM:
         _rebuild_graph()
-        print("[agent] MOCK_LLM=true，使用 Mock 模式（不连接模型）")
+        logger.info("[agent] MOCK_LLM=true，使用 Mock 模式（不连接模型）")
         return
 
     from langchain_core.messages import AIMessageChunk
@@ -208,7 +211,7 @@ async def build_agent():
     )
     await _make_checkpointer()
     _rebuild_graph()
-    print(f"[agent] 已连接模型 {config.MODEL_NAME} @ {config.LLM_BASE_URL}，工具: {STATE.tool_names}")
+    logger.info(f"[agent] 已连接模型 {config.MODEL_NAME} @ {config.LLM_BASE_URL}，工具: {STATE.tool_names}")
 
 
 async def _make_checkpointer():
@@ -233,12 +236,12 @@ async def _make_checkpointer():
                 "docker compose -f docker/docker-compose.postgres.yml up -d，"
                 "或将 .env 改回 CHECKPOINTER=memory") from e
         STATE.checkpointer_cm = cm
-        print(f"[agent] checkpointer: PostgresSaver @ {config.DATABASE_URL.split('@')[-1]}")
+        logger.info(f"[agent] checkpointer: PostgresSaver @ {config.DATABASE_URL.split('@')[-1]}")
     else:
         from langgraph.checkpoint.memory import MemorySaver
 
         STATE.checkpointer = MemorySaver()
-        print("[agent] checkpointer: MemorySaver（进程内存，重启即丢；生产请改 CHECKPOINTER=postgres）")
+        logger.info("[agent] checkpointer: MemorySaver（进程内存，重启即丢；生产请改 CHECKPOINTER=postgres）")
     # v0.17.38 P0（spec 3.6）：统一包一层写提交终局校验——tombstoned 会话的
     # 一切 checkpoint 写入 fail-closed，在途图执行在下一个写点终止。
     # 纯委托代理；图编译期 ensure_valid_checkpointer 的 isinstance 校验经
@@ -352,7 +355,7 @@ def maybe_reload_custom_tools():
     with _reload_lock:
         if (custom_tools.signature(), custom_tools._sandbox_up(),
                 packs.packs_signature(), skills.signature()) != STATE.custom_sig:
-            print("[agent] 检测到自定义工具/领域包/沙箱/技能变化，重新绑定工具")
+            logger.info("[agent] 检测到自定义工具/领域包/沙箱/技能变化，重新绑定工具")
             _rebuild_graph()
 
 
@@ -483,10 +486,10 @@ async def prepare_compaction(session_id: str) -> None:
                 for k in list(_compact_cache)[:_COMPACT_CACHE_MAX // 2]:
                     _compact_cache.pop(k, None)
             _compact_cache[session_id] = {"summary": text, "count": cut}
-            print(f"[agent] 会话 {session_id} 上下文压缩：估算 {total} tokens 超阈值 "
-                  f"{trigger}，已摘要前 {cut} 条消息（原始历史仍完整保留）", flush=True)
+            logger.info(f"[agent] 会话 {session_id} 上下文压缩：估算 {total} tokens 超阈值 "
+                        f"{trigger}，已摘要前 {cut} 条消息（原始历史仍完整保留）")
     except Exception as e:
-        print(f"[agent] 上下文压缩失败（本轮回退纯窗口模式）: {e}", flush=True)
+        logger.warning(f"[agent] 上下文压缩失败（本轮回退纯窗口模式）: {e}")
 
 
 async def _pre_model_hook(state: dict, config=None):   # 参数名须为 config（RunnableCallable 按名注入）
@@ -638,7 +641,7 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
             # （审计可见，绝不让失败被误报为已执行）
             # 全项目评审问题1：SSE 直达用户，不回显原始异常文本（P1-3 约定：
             # 可能携带绝对路径/DATABASE_URL 等部署细节），细节仅进服务端日志
-            print(f"[agent] 模型调用失败: {e}", flush=True)
+            logger.error(f"[agent] 模型调用失败: {e}")
             yield {"type": "error",
                    "content": f"模型调用失败（{type(e).__name__}），请稍后重试或联系管理员"}
             return

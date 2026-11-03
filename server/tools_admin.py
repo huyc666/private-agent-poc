@@ -11,10 +11,14 @@
 注意：enable/disable/create/delete_pack 改变能力边界后需重建 Agent 图，
 通过 _reload_graph() 懒导入 agent 模块实现（避免与 agent.py 的循环依赖）。
 """
+import logging
+
 from . import approval, custom_tools, packs, skills
 from .state import STATE
 from .tools_builtin import (delete_workspace_file, list_uploaded_docs,
                             read_text_file, run_python_code, save_output_file)
+
+logger = logging.getLogger(__name__)
 
 
 def _reload_graph():
@@ -333,7 +337,7 @@ async def orchestrate_subtasks(task: str) -> str:
         return await multi_agent.run_orchestration(task, STATE.llm, _worker_tools())
     except Exception as e:
         # 不回显原始异常文本（P1-3 约定），细节仅进服务端日志
-        print(f"[tools] 多 Agent 编排执行失败: {e}")
+        logger.error(f"[tools] 多 Agent 编排执行失败: {e}")
         return f"多 Agent 编排执行失败（{type(e).__name__}），请稍后重试"
 
 

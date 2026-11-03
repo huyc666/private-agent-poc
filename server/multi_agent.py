@@ -18,6 +18,7 @@
 - worker 上限 4 个、单 worker 最多 4 轮工具调用，控制 token 与耗时
 """
 import json
+import logging
 import operator
 import re
 from functools import partial
@@ -25,6 +26,8 @@ from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
+
+logger = logging.getLogger(__name__)
 
 MAX_WORKERS = 4
 WORKER_MAX_TOOL_ROUNDS = 4
@@ -93,7 +96,7 @@ async def _plan(state: MAState, *, llm) -> dict:
         ("user", f"总任务：{state['task']}"),
     ])
     subtasks = _parse_subtasks(resp.content, state["task"])
-    print(f"[multi-agent] 拆分为 {len(subtasks)} 个子任务: {subtasks}")
+    logger.info(f"[multi-agent] 拆分为 {len(subtasks)} 个子任务: {subtasks}")
     return {"subtasks": subtasks}
 
 
@@ -119,7 +122,7 @@ async def _worker(state: WorkerState, *, llm, tools) -> dict:
     answer = result["messages"][-1].content
     if not isinstance(answer, str):
         answer = str(answer)
-    print(f"[multi-agent] worker 完成: {state['subtask'][:30]}... -> {len(answer)} 字")
+    logger.info(f"[multi-agent] worker 完成: {state['subtask'][:30]}... -> {len(answer)} 字")
     return {"findings": [{"subtask": state["subtask"], "result": answer}]}
 
 

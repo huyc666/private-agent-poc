@@ -46,17 +46,17 @@ def test_ac2_migrate_idempotent(make_user):
     assert dirs == [config.user_scope("zhang_san")]
 
 
-def test_ac2_migrate_collision_dir_skipped_with_warning(make_user, capsys):
+def test_ac2_migrate_collision_dir_skipped_with_warning(make_user, caplog):
     """存量碰撞目录（老域名映射多用户）无法自动归属：不动 + WARNING 人工整改。"""
     make_user("a@b")
     make_user("a_b")           # 两用户的老域名清洗后同为 a_b
     _seed(config.UPLOADS_DIR, "a_b", "contested.md")
     _migrate_scope_dirs()
     assert (config.UPLOADS_DIR / "a_b" / "contested.md").is_file()   # 不动
-    assert "碰撞" in capsys.readouterr().out
+    assert "碰撞" in caplog.text
 
 
-def test_ac2_migrate_existing_new_scope_skips(make_user, capsys):
+def test_ac2_migrate_existing_new_scope_skips(make_user, caplog):
     """新域名目录已存在（人工先迁移过/残留）：跳过 rename，两侧保留并告警。"""
     make_user("zhang_san")
     _seed(config.UPLOADS_DIR, "zhang_san", "a.md")
@@ -64,7 +64,7 @@ def test_ac2_migrate_existing_new_scope_skips(make_user, capsys):
     _migrate_scope_dirs()
     assert (config.UPLOADS_DIR / "zhang_san" / "a.md").is_file()
     assert (config.UPLOADS_DIR / config.user_scope("zhang_san") / "b.md").is_file()
-    assert "跳过" in capsys.readouterr().out
+    assert "跳过" in caplog.text
 
 
 def test_ac2_migrate_unclaimed_dir_untouched():

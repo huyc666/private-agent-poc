@@ -5,6 +5,7 @@
 - 开启后若 Langfuse 服务器不可达/认证失败，自动停用，绝不影响聊天主链路
 - 真实模式走 LangChain CallbackHandler 自动埋点；Mock 模式手动埋点演示
 """
+import logging
 import os
 import threading
 import time
@@ -15,6 +16,8 @@ try:
     load_dotenv()
 except ImportError:
     pass
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_HOST = "http://localhost:3000"
 RETRY_COOLDOWN = 60.0  # 秒：连接失败后的重试冷却（架构评审 P3：失败可恢复）
@@ -57,12 +60,12 @@ def get_client():
             )
             if client.auth_check():
                 _client = client
-                print(f"[telemetry] Langfuse 已连接: {os.environ.get('LANGFUSE_HOST', DEFAULT_HOST)}")
+                logger.info(f"[telemetry] Langfuse 已连接: {os.environ.get('LANGFUSE_HOST', DEFAULT_HOST)}")
             else:
-                print(f"[telemetry] Langfuse 认证失败，{RETRY_COOLDOWN:.0f}s 后重试（不影响主链路）")
+                logger.warning(f"[telemetry] Langfuse 认证失败，{RETRY_COOLDOWN:.0f}s 后重试（不影响主链路）")
         except Exception as e:
-            print(f"[telemetry] Langfuse 不可用（{type(e).__name__}: {e}），"
-                  f"{RETRY_COOLDOWN:.0f}s 后重试（不影响主链路）")
+            logger.warning(f"[telemetry] Langfuse 不可用（{type(e).__name__}: {e}），"
+                           f"{RETRY_COOLDOWN:.0f}s 后重试（不影响主链路）")
         return _client
 
 
@@ -75,7 +78,7 @@ def langchain_callbacks() -> list:
 
         return [CallbackHandler()]
     except Exception as e:
-        print(f"[telemetry] LangChain 回调创建失败（{e}），按无观测运行")
+        logger.warning(f"[telemetry] LangChain 回调创建失败（{e}），按无观测运行")
         return []
 
 
@@ -90,7 +93,7 @@ def trace_span(name: str, as_type: str = "span", input=None):
         with client.start_as_current_observation(name=name, as_type=as_type, input=input) as obs:
             yield obs
     except Exception as e:
-        print(f"[telemetry] 埋点异常（{type(e).__name__}），已忽略")
+        logger.warning(f"[telemetry] 埋点异常（{type(e).__name__}），已忽略")
         yield None
 
 

@@ -16,6 +16,7 @@
 - 工具名不做命名空间（LangChain 工具名不允许点号），重名冲突 → 跳过并告警
 """
 import hashlib
+import logging
 import os
 import re
 import sqlite3
@@ -24,6 +25,8 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 from . import config, custom_tools, packsign, skills
+
+logger = logging.getLogger(__name__)
 
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,49}$")
 KB_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")  # 知识库库名（pack.yaml 声明）
@@ -255,12 +258,12 @@ def _parse_pack(pack_dir: Path) -> dict:
         p = _resolve_in_pack(pack_dir, rel, "工具", name)
         if p is not None and p.is_file() and p.suffix == ".py":
             if p.stem in tool_stems:
-                print(f"[packs] {name}: 工具名重复，跳过: {rel}")
+                logger.warning(f"[packs] {name}: 工具名重复，跳过: {rel}")
                 continue
             tool_stems.add(p.stem)
             info["tools"].append(p)
         else:
-            print(f"[packs] {name}: 工具文件不存在，跳过: {rel}")
+            logger.warning(f"[packs] {name}: 工具文件不存在，跳过: {rel}")
     skill_dirs: set[str] = set()                    # 已挂载技能目录（评审 E1 去重）
     for rel in data.get("skills") or []:
         p = _resolve_in_pack(pack_dir, rel, "技能", name)
@@ -268,16 +271,16 @@ def _parse_pack(pack_dir: Path) -> dict:
             continue
         leaf = (p / "SKILL.md").resolve()
         if not leaf.is_file():
-            print(f"[packs] {name}: 技能目录缺少 SKILL.md，跳过: {rel}")
+            logger.warning(f"[packs] {name}: 技能目录缺少 SKILL.md，跳过: {rel}")
         elif pack_dir.resolve() not in leaf.parents:
             # v0.17.34 AC4（复验 R3）：目录包含校验通过，但叶子自身可以是
             # 指向包外的符号链接——is_file 会跟随链接，须对 resolve 后的
             # 真实路径再校验一次包含关系
-            print(f"[packs] {name}: SKILL.md 指向包目录之外，跳过: {rel}")
+            logger.warning(f"[packs] {name}: SKILL.md 指向包目录之外，跳过: {rel}")
         elif str(p) in skill_dirs:
             # 评审修复 E1：清单重复声明同一技能目录 → 去重（与工具分支的
             # tool_stems 去重对称，v0.17.27）；重复条目会重复进入签名载荷
-            print(f"[packs] {name}: 技能目录重复声明，跳过: {rel}")
+            logger.warning(f"[packs] {name}: 技能目录重复声明，跳过: {rel}")
         else:
             skill_dirs.add(str(p))
             info["skills"].append(p)
@@ -294,7 +297,7 @@ def _parse_pack(pack_dir: Path) -> dict:
         if p is not None and p.is_file():
             info["prompt"] = str(p)
         else:
-            print(f"[packs] {name}: 提示词文件不存在，跳过: {prompt_rel}")
+            logger.warning(f"[packs] {name}: 提示词文件不存在，跳过: {prompt_rel}")
     return info
 
 
@@ -319,7 +322,7 @@ def _resolve_in_pack(pack_dir: Path, rel, kind: str, name: str) -> Path | None:
     # （实测仅审计错位、无未签名执行，仍须封堵以保平铺意图）。
     # manifest 路径的规范形态不含反斜杠，显式拒绝并单独告警。
     if "\\" in raw:
-        print(f"[packs] {name}: {kind}路径非规范（不得包含反斜杠），跳过: {rel}")
+        logger.warning(f"[packs] {name}: {kind}路径非规范（不得包含反斜杠），跳过: {rel}")
         return None
     parts = PurePosixPath(raw).parts
     if kind == "工具":
@@ -331,13 +334,13 @@ def _resolve_in_pack(pack_dir: Path, rel, kind: str, name: str) -> Path | None:
     else:
         canonical = raw == "prompt.md"
     if not canonical:
-        print(f"[packs] {name}: {kind}路径非规范"
-              f"（工具须为 tools/<文件名>.py 平铺 / 技能须为 skills/<一级目录>"
-              f" / 提示词须为 prompt.md），跳过: {rel}")
+        logger.warning(f"[packs] {name}: {kind}路径非规范"
+                       f"（工具须为 tools/<文件名>.py 平铺 / 技能须为 skills/<一级目录>"
+                       f" / 提示词须为 prompt.md），跳过: {rel}")
         return None
     p = (pack_dir / raw).resolve()
     if pack_dir.resolve() not in p.parents:
-        print(f"[packs] {name}: {kind}路径越界（不在包目录内），跳过: {rel}")
+        logger.warning(f"[packs] {name}: {kind}路径越界（不在包目录内），跳过: {rel}")
         return None
     if kind == "技能" and (pack_dir / "skills").resolve() not in p.parents:
         # v0.17.36 R7（复验报告）：目录链接指向包内其他位置（hidden/、
@@ -347,8 +350,8 @@ def _resolve_in_pack(pack_dir: Path, rel, kind: str, name: str) -> Path | None:
         # 方案（报告修复要求 1+3）：技能目录解析后必须仍位于解析后的
         # <pack>/skills/ 树内，包内其他目录的链接一律拒收（junction 与
         # symlink 同形拒绝）；签名/热检测/索引/加载四集合由此保持同一。
-        print(f"[packs] {name}: 技能目录解析后不在 skills 树内"
-              f"（包内目录链接），跳过: {rel}")
+        logger.warning(f"[packs] {name}: 技能目录解析后不在 skills 树内"
+                       f"（包内目录链接），跳过: {rel}")
         return None
     return p
 
@@ -380,7 +383,7 @@ def scan_packs() -> list[dict]:
                     info = _new_pack_info(sub)
                     info["status"] = "error"
                     info["error"] = f"包扫描异常（链接循环/IO？）: {type(e).__name__}: {e}"
-                    print(f"[packs] {sub.name}: {info['error']}")
+                    logger.warning(f"[packs] {sub.name}: {info['error']}")
                     result.append(info)
         _mark_shared_kb_tool_conflicts(result)
         _scan_cache = result
@@ -457,7 +460,7 @@ def load_disabled_packs() -> None:
         _disabled.clear()
         _disabled.update(r[0] for r in rows)
     except Exception as e:
-        print(f"[packs] 禁用名单加载失败，按空名单继续（{type(e).__name__}）")
+        logger.warning(f"[packs] 禁用名单加载失败，按空名单继续（{type(e).__name__}）")
 
 
 def _persist_disabled(name: str, disabled: bool) -> bool:
@@ -483,7 +486,7 @@ def _persist_disabled(name: str, disabled: bool) -> bool:
             conn.close()
         return True
     except Exception as e:
-        print(f"[packs] 禁用名单写库失败（{type(e).__name__}），操作将回滚")
+        logger.warning(f"[packs] 禁用名单写库失败（{type(e).__name__}），操作将回滚")
         return False
 
 
@@ -607,10 +610,10 @@ def load_pack_tools() -> list:
                     hint = "当前进程 env 已由外部显式设置，两包默认值均被覆盖"
                 else:
                     hint = f"先加载的「{prev[0]}」生效，「{pack['name']}」的注入被忽略"
-                print(f"[packs] WARNING: env 键「{k}」跨包冲突——包「{prev[0]}」（值 "
-                      f"{prev[1]}）与「{pack['name']}」（值 {v}）均声明默认值；"
-                      f"进程 env 只有一份，{hint}（setdefault 先到先得，热重载不重算）。"
-                      "如两包需要不同值请改用不同变量名")
+                logger.warning(f"[packs] WARNING: env 键「{k}」跨包冲突——包「{prev[0]}」（值 "
+                               f"{prev[1]}）与「{pack['name']}」（值 {v}）均声明默认值；"
+                               f"进程 env 只有一份，{hint}（setdefault 先到先得，热重载不重算）。"
+                               "如两包需要不同值请改用不同变量名")
             else:
                 env_owners[k] = (pack["name"], v)
         eff_env = effective_env(pack)
@@ -620,23 +623,23 @@ def load_pack_tools() -> list:
         for path in pack["tools"]:
             name = path.stem
             if name in seen:
-                print(f"[packs] 工具名冲突「{name}」（包 {pack['name']}），跳过")
+                logger.warning(f"[packs] 工具名冲突「{name}」（包 {pack['name']}），跳过")
                 continue
             if not custom_tools.NAME_PATTERN.match(name):
-                print(f"[packs] 非法工具名「{name}」（包 {pack['name']}），跳过")
+                logger.warning(f"[packs] 非法工具名「{name}」（包 {pack['name']}），跳过")
                 continue
             tool = custom_tools.build_tool(path, pack=pack["name"], env=eff_env,
                                            allowed_roles=pack.get("allowed_roles"),
                                            allowed_departments=pack.get("allowed_departments"))
             if tool is None:
-                print(f"[packs] {pack['name']}/{name} 构建失败，跳过")
+                logger.warning(f"[packs] {pack['name']}/{name} 构建失败，跳过")
                 continue
             seen.add(name)
             tools.append(tool)
             loaded += 1
         if loaded:
-            print(f"[packs] 包「{pack['name']}」已挂载 {loaded} 个工具"
-                  + (f"（注入 env: {', '.join(eff_env)}）" if eff_env else ""))
+            logger.info(f"[packs] 包「{pack['name']}」已挂载 {loaded} 个工具"
+                        + (f"（注入 env: {', '.join(eff_env)}）" if eff_env else ""))
     return tools
 
 
@@ -666,7 +669,7 @@ def prompt_fragments(role: str | None = None,
                 if text:
                     parts.append(text)
             except Exception as e:
-                print(f"[packs] {pack['name']} 提示词读取失败: {e}")
+                logger.error(f"[packs] {pack['name']} 提示词读取失败: {e}")
     return "\n\n".join(parts)
 
 
@@ -859,8 +862,8 @@ def create_pack(name: str, description: str, prompt: str = "",
         try:
             sig = packsign.sign_pack_files(pack_dir)
         except (OSError, UnicodeEncodeError) as e:
-            print(f"[packs] {name}: 自动签名失败——包资源读取异常"
-                  f"（{type(e).__name__}），未写入签名")
+            logger.warning(f"[packs] {name}: 自动签名失败——包资源读取异常"
+                           f"（{type(e).__name__}），未写入签名")
             sig = ""
         signed_note = ("\n已自动签名（可信路径：内容经审批后落盘）。" if sig else
                        "\n⚠️ 自动签名失败：包资源读取异常（文件被占用/权限"
@@ -887,8 +890,8 @@ def sign_pack(name: str) -> str:
         # UnicodeEncodeError：Linux surrogateescape 文件名）→ 明确报错且
         # 不写入任何签名（sign_pack_files 只在 compute 成功后才写
         # manifest，天然无残缺签名）
-        print(f"[packs] 「{name}」签名生成失败：包资源读取异常"
-              f"（{type(e).__name__}），未写入签名")
+        logger.warning(f"[packs] 「{name}」签名生成失败：包资源读取异常"
+                       f"（{type(e).__name__}），未写入签名")
         return ("签名失败：包资源读取异常（文件被占用/权限不足？），"
                 "请排查后重试；未写入任何签名。")
     if not sig:

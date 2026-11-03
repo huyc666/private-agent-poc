@@ -97,7 +97,7 @@ def test_signature_covers_subdirs(key, pack_dir):
     assert not packsign.verify(pack_dir, sig)
 
 
-def test_ac3_verify_read_failure_fail_closed(key, pack_dir, monkeypatch, capsys):
+def test_ac3_verify_read_failure_fail_closed(key, pack_dir, monkeypatch, caplog):
     """AC3/R5：验签路径资源读取 OSError → 不上抛、判 False（fail-closed）
     且告警可定位；trust_status 相应为 invalid；签名生成路径 compute 保持
     严格上抛（不得静默跳过不可读文件签出覆盖不完整的签名）。"""
@@ -111,13 +111,13 @@ def test_ac3_verify_read_failure_fail_closed(key, pack_dir, monkeypatch, capsys)
     sig = packsign.compute(pack_dir)
     monkeypatch.setattr(Path, "read_bytes", _boom)
     assert not packsign.verify(pack_dir, sig)              # 不抛异常，判无效
-    assert "读取失败" in capsys.readouterr().out            # 服务端告警可定位
+    assert "读取失败" in caplog.text                        # 服务端告警可定位
     assert packsign.trust_status(pack_dir, sig) == "invalid"
     with pytest.raises(OSError):                            # 生成路径：明确报错
         packsign.compute(pack_dir)
 
 
-def test_review_verify_survives_encode_error(key, pack_dir, monkeypatch, capsys):
+def test_review_verify_survives_encode_error(key, pack_dir, monkeypatch, caplog):
     """评审 C6：Linux surrogateescape 文件名（lone surrogate）使 _payload
     的 rel.encode("utf-8") 抛 UnicodeEncodeError——verify 与 OSError 同
     口径 fail-closed 判 False（不上抛炸掉 scan_packs），告警可定位。"""
@@ -129,11 +129,11 @@ def test_review_verify_survives_encode_error(key, pack_dir, monkeypatch, capsys)
 
     monkeypatch.setattr(packsign, "_payload", _boom)
     assert not packsign.verify(pack_dir, sig)              # 不抛异常，判无效
-    assert "读取失败" in capsys.readouterr().out            # 异常类型入告警可定位
+    assert "读取失败" in caplog.text                        # 异常类型入告警可定位
     assert packsign.trust_status(pack_dir, sig) == "invalid"
 
 
-def test_ac4_verify_survives_runtimeerror(key, pack_dir, monkeypatch, capsys):
+def test_ac4_verify_survives_runtimeerror(key, pack_dir, monkeypatch, caplog):
     """AC4/R9：验签载荷遍历 RuntimeError（链接循环的 rglob 形态，
     RecursionError 亦为其子类）与 OSError/UnicodeEncodeError 同口径
     fail-closed——verify 判 False 不上抛、告警可定位、trust=invalid；
@@ -145,8 +145,7 @@ def test_ac4_verify_survives_runtimeerror(key, pack_dir, monkeypatch, capsys):
 
     monkeypatch.setattr(packsign, "_payload", _boom)
     assert packsign.verify(pack_dir, sig) is False        # 不抛异常，判无效
-    out = capsys.readouterr().out
-    assert "读取失败" in out and "RuntimeError" in out     # 异常类型入告警
+    assert "读取失败" in caplog.text and "RuntimeError" in caplog.text  # 异常类型入告警
     assert packsign.trust_status(pack_dir, sig) == "invalid"
     with pytest.raises(RuntimeError):                      # 生成路径：明确报错
         packsign.compute(pack_dir)

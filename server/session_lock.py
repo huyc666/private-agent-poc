@@ -13,6 +13,7 @@
 会话/审批/用量协作是同一前提）。MemorySaver 模式本就不支持多副本共享上下文。
 """
 import asyncio
+import logging
 import os
 import sqlite3
 import threading
@@ -20,6 +21,8 @@ import time
 from pathlib import Path
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 LEASE_TTL = 60.0          # 秒：无心跳即视为持有者崩溃，租约到期可被接管
 HEARTBEAT_INTERVAL = 15.0  # 心跳间隔（远小于 TTL，健康持有者租约不会过期）
@@ -148,7 +151,7 @@ class SessionLease:
                     # 推进同一会话——正是本模块要防的 checkpointer 写冲突场景，
                     # 只记日志继续跑等于互斥失效（架构评审 P2 修复）。
                     self.lost = True
-                    print(f"[session_lock] 租约已被接管，中止本轮对话: {self.session_id}")
+                    logger.warning(f"[session_lock] 租约已被接管，中止本轮对话: {self.session_id}")
                     break
         except asyncio.CancelledError:
             pass

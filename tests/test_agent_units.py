@@ -139,7 +139,7 @@ class _FakeTool:
         self.name = name
 
 
-def test_rebuild_graph_tool_dedup(monkeypatch, capsys):
+def test_rebuild_graph_tool_dedup(monkeypatch, caplog):
     """同名工具先挂载者优先（内置 > MCP > 自定义 > 领域包），后挂载者跳过并告警；
     被冲突跳过的 pack 工具不进 pack_tools 登记表。"""
     monkeypatch.setattr(tools_admin, "builtin_langchain_tools", lambda: [])
@@ -153,8 +153,7 @@ def test_rebuild_graph_tool_dedup(monkeypatch, capsys):
     assert "pack_only" in STATE.tool_names
     assert "clash" not in STATE.pack_tools                   # pack 版 clash 被跳过
     assert "pack_only" in STATE.pack_tools
-    out = capsys.readouterr().out
-    assert "工具名冲突" in out and "clash" in out
+    assert "工具名冲突" in caplog.text and "clash" in caplog.text
     assert STATE.custom_sig is not None
 
 

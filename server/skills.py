@@ -17,6 +17,7 @@
 """
 import hashlib
 import io
+import logging
 import os
 import re
 import shutil
@@ -24,6 +25,8 @@ import zipfile
 from pathlib import Path
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,49}$")
 
@@ -86,8 +89,8 @@ def register_extra_dir(path, source: str = "", allowed=None, root=None,
         p = Path(path).resolve()
         root_p = Path(root).resolve() if root is not None else None
     except (OSError, RuntimeError) as e:
-        print(f"[skills] 额外技能目录注册失败（路径解析异常"
-              f"{type(e).__name__}），跳过: {path}")
+        logger.warning(f"[skills] 额外技能目录注册失败（路径解析异常"
+                       f"{type(e).__name__}），跳过: {path}")
         return
     for i, (d, _s, a, _r, _t) in enumerate(_extra_dirs):
         if d == p:
@@ -124,11 +127,11 @@ def _skill_entry_ok(smd: Path, allowed, root, source: str) -> bool:
     经签名检测触发重建后，快照整体替换）。
     任一不满足 → 跳过并告警（fail-closed：宁误拒不误放，且可定位）。"""
     if allowed is not None and smd.parent.name not in allowed:
-        print(f"[skills] 技能目录「{smd.parent.name}」不在来源允许集合内，"
-              f"跳过（来源：{source}）")
+        logger.warning(f"[skills] 技能目录「{smd.parent.name}」不在来源允许集合内，"
+                       f"跳过（来源：{source}）")
         return False
     if root is not None and root not in smd.resolve().parents:
-        print(f"[skills] SKILL.md 指向包目录之外，跳过（{smd}）")
+        logger.warning(f"[skills] SKILL.md 指向包目录之外，跳过（{smd}）")
         return False
     return True
 
@@ -173,8 +176,8 @@ def list_skills(scope: str | None = None) -> list[dict]:
                 # 快照缺失 fail-closed（正常路径与 allowed 同源，防御性）
                 content = texts.get(smd.parent.name)
                 if content is None:
-                    print(f"[skills] 技能目录「{smd.parent.name}」无内容快照，"
-                          f"跳过（来源：{source}）")
+                    logger.warning(f"[skills] 技能目录「{smd.parent.name}」无内容快照，"
+                                   f"跳过（来源：{source}）")
                     continue
             else:
                 try:
@@ -185,7 +188,7 @@ def list_skills(scope: str | None = None) -> list[dict]:
                 meta = _parse_skill_md(content)
                 name = meta["name"] or smd.parent.name
                 if name in seen:
-                    print(f"[skills] 技能名冲突「{name}」（{source} 被遮蔽），跳过")
+                    logger.warning(f"[skills] 技能名冲突「{name}」（{source} 被遮蔽），跳过")
                     continue
                 seen.add(name)
                 result.append({
@@ -222,8 +225,8 @@ def load_skill(name: str, scope: str | None = None) -> str | None:
             if texts is not None:
                 content = texts.get(name)
                 if content is None:
-                    print(f"[skills] 技能目录「{name}」无内容快照，"
-                          f"跳过（来源：{_src}）")
+                    logger.warning(f"[skills] 技能目录「{name}」无内容快照，"
+                                   f"跳过（来源：{_src}）")
                     continue
                 return content
             return direct.read_text(encoding="utf-8", errors="replace")
@@ -240,8 +243,8 @@ def load_skill(name: str, scope: str | None = None) -> str | None:
                 content = texts.get(smd.parent.name)    # R8：只读快照，不读盘
                 if content is None:
                     # 评审 F3（P3）：与直查/索引同口径告警，兜底扫描不静默
-                    print(f"[skills] 技能目录「{smd.parent.name}」无内容快照，"
-                          f"跳过（来源：{_src}）")
+                    logger.warning(f"[skills] 技能目录「{smd.parent.name}」无内容快照，"
+                                   f"跳过（来源：{_src}）")
                     continue    # 快照缺失 fail-closed
             else:
                 try:
@@ -441,8 +444,8 @@ def personal_index_prompt(scope: str | None) -> str:
             meta = _parse_skill_md(smd.read_text(encoding="utf-8", errors="replace"))
             name = meta["name"] or smd.parent.name
             if name in shadowed:
-                print(f"[skills] 专属技能「{name}」与通用技能同名被遮蔽，"
-                      f"未注入索引（域：{scope}）")
+                logger.warning(f"[skills] 专属技能「{name}」与通用技能同名被遮蔽，"
+                               f"未注入索引（域：{scope}）")
                 continue
             items.append(f"- {name}: {meta['description'] or '（无描述）'}")
         except Exception:
@@ -498,7 +501,7 @@ def signature() -> tuple:
         except (OSError, RuntimeError) as e:
             # 评审 F2（P2）：哨兵键带来源标签（包来源 pack:<名>，内核用
             # 目录名）便于定位；补告警对齐 scan_packs 的可定位口径
-            print(f"[skills] 来源「{_src or d.name}」技能签名遍历遇链接循环/IO"
-                  f" 异常（{type(e).__name__}），哨兵条目参与比较待重建自愈")
+            logger.warning(f"[skills] 来源「{_src or d.name}」技能签名遍历遇链接循环/IO"
+                           f" 异常（{type(e).__name__}），哨兵条目参与比较待重建自愈")
             items.append((f"__error__:{_src or d.name}", f"{type(e).__name__}:{e}"))
     return tuple(items)

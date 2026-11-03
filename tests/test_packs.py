@@ -99,13 +99,13 @@ def test_parse_missing_required_env(packs_dir):
     assert "缺少环境变量" in p["error"]
 
 
-def test_parse_missing_tool_file_skipped(packs_dir, capsys):
+def test_parse_missing_tool_file_skipped(packs_dir, caplog):
     _mk_pack(packs_dir, "ghost-tool", _valid_manifest("ghost-tool",
               tools=["tools/not_exist.py"]))
     p = packs.scan_packs()[0]
     assert p["status"] == "ok"
     assert p["tools"] == []
-    assert "不存在" in capsys.readouterr().out
+    assert "不存在" in caplog.text
 
 
 # ---------------------------------------------------------------- 启用/禁用
@@ -218,7 +218,7 @@ def test_create_pack_enforced_rejects_unsigned(packs_dir, monkeypatch):
 
 # ---------------------------------------------------------------- 工具挂载
 
-def test_load_pack_tools_dedup(packs_dir, capsys):
+def test_load_pack_tools_dedup(packs_dir, caplog):
     _mk_pack(packs_dir, "pa", _valid_manifest("pa", tools=["tools/greet.py"]),
              {"tools/greet.py": TOOL_SRC})
     _mk_pack(packs_dir, "pb", _valid_manifest("pb", tools=["tools/greet.py"]),
@@ -226,10 +226,10 @@ def test_load_pack_tools_dedup(packs_dir, capsys):
     tools = packs.load_pack_tools()
     names = [t.name for t in tools]
     assert names.count("greet") == 1                          # 跨包同名跳过后挂载者
-    assert "工具名冲突" in capsys.readouterr().out
+    assert "工具名冲突" in caplog.text
 
 
-def test_load_pack_tools_env_conflict_warning(packs_dir, capsys, monkeypatch):
+def test_load_pack_tools_env_conflict_warning(packs_dir, caplog, monkeypatch):
     """跨包同名 env 键冲突 → WARNING 点名两包与值（检测只告警不改运行时语义）。"""
     key = "PA_TEST_ENV_CLASH_KEY"
     monkeypatch.delenv(key, raising=False)
@@ -237,22 +237,20 @@ def test_load_pack_tools_env_conflict_warning(packs_dir, capsys, monkeypatch):
     _mk_pack(packs_dir, "pb", _valid_manifest("pb", env={key: "from-b"}))
     try:
         packs.load_pack_tools()
-        out = capsys.readouterr().out
-        assert "WARNING" in out and key in out
-        assert "先加载的「pa」生效" in out
+        assert "WARNING" in caplog.text and key in caplog.text
+        assert "先加载的「pa」生效" in caplog.text
     finally:
         os.environ.pop(key, None)                             # 清理 setdefault 注入
 
 
-def test_load_pack_tools_env_external_override_hint(packs_dir, capsys, monkeypatch):
+def test_load_pack_tools_env_external_override_hint(packs_dir, caplog, monkeypatch):
     key = "PA_TEST_ENV_EXTERNAL_KEY"
     monkeypatch.setenv(key, "external")                       # 外部显式设置优先
     _mk_pack(packs_dir, "pa", _valid_manifest("pa", env={key: "from-a"}))
     _mk_pack(packs_dir, "pb", _valid_manifest("pb", env={key: "from-b"}))
     try:
         packs.load_pack_tools()
-        out = capsys.readouterr().out
-        assert "外部显式设置" in out                          # 两包默认值均被覆盖
+        assert "外部显式设置" in caplog.text                  # 两包默认值均被覆盖
     finally:
         monkeypatch.delenv(key, raising=False)
 
@@ -429,7 +427,7 @@ def test_ac2_signed_pack_skill_tamper_invalidates_trust(packs_dir, monkeypatch):
     assert "签名校验失败" in p["error"]
 
 
-def test_ac3_noncanonical_manifest_paths_rejected(packs_dir, capsys):
+def test_ac3_noncanonical_manifest_paths_rejected(packs_dir, caplog):
     """AC3：清单规范路径白名单（fail-closed）——工具须平铺 tools/<文件名>.py
     （对齐沙箱执行路径）、技能须 skills/<一级目录>、提示词须 prompt.md。
     复验实测 code/demo_tool.py 曾以 status=ok 挂载且不在签名/检测载荷内
@@ -454,10 +452,10 @@ def test_ac3_noncanonical_manifest_paths_rejected(packs_dir, capsys):
     assert [t.stem for t in info["tools"]] == ["greet"]  # 非规范工具拒收
     assert [s.name for s in info["skills"]] == ["ok"]     # 非规范技能拒收
     assert not info["prompt"]                            # 非规范提示词拒收
-    assert capsys.readouterr().out.count("非规范") == 7  # 逐项告警可定位（含 C2 两项）
+    assert caplog.text.count("非规范") == 7  # 逐项告警可定位（含 C2 两项）
 
 
-def test_ac4_skill_leaf_symlink_rejected(packs_dir, tmp_path, capsys):
+def test_ac4_skill_leaf_symlink_rejected(packs_dir, tmp_path, caplog):
     """AC4：SKILL.md 叶子指向包外的符号链接 → 技能拒收（复验 R3：技能
     目录包含校验通过，但叶子仅 is_file() 会跟随链接导致越界内容入索引）。
     环境无法创建符号链接时跳过（Windows 需开发者模式/管理员）。"""
@@ -476,10 +474,10 @@ def test_ac4_skill_leaf_symlink_rejected(packs_dir, tmp_path, capsys):
         pytest.skip("当前环境无法创建符号链接（Windows 需开发者模式/管理员）")
     info = next(p for p in packs.scan_packs() if p["name"] == "leaf-link")
     assert [s.name for s in info["skills"]] == ["normal"]   # 越界叶子拒收
-    assert "SKILL.md 指向包目录之外" in capsys.readouterr().out
+    assert "SKILL.md 指向包目录之外" in caplog.text
 
 
-def test_review_skill_manifest_duplicate_entries_deduped(packs_dir, capsys):
+def test_review_skill_manifest_duplicate_entries_deduped(packs_dir, caplog):
     """评审修复 E1：清单重复声明同一技能目录 → 只挂载一次（与工具分支的
     tool_stems 去重对称，v0.17.27）——此前重复条目会重复进入 info["skills"]
     与签名载荷（无运行时危害，register_extra_dir 去重兜底，仅分支不对称）。"""
@@ -488,7 +486,7 @@ def test_review_skill_manifest_duplicate_entries_deduped(packs_dir, capsys):
              {"skills/ok/SKILL.md": "---\nname: ok\n---\nx"})
     info = next(p for p in packs.scan_packs() if p["name"] == "dup-skills")
     assert [s.name for s in info["skills"]] == ["ok"]
-    assert "重复声明" in capsys.readouterr().out
+    assert "重复声明" in caplog.text
 
 
 # ---- v0.17.35 AC1-AC4：技能挂载同一集合 + 验签异常收口（复验报告 R4-R6）----
@@ -558,7 +556,7 @@ def test_ac2_loadable_set_matches_verified_set(packs_dir):
     assert sig_names == {"one", "two", "alias"}             # 签名载荷同一集合
 
 
-def test_ac3_scan_survives_resource_read_failure(packs_dir, monkeypatch, capsys):
+def test_ac3_scan_survives_resource_read_failure(packs_dir, monkeypatch, caplog):
     """AC3/R5：签名资源读取 OSError 不中断整个扫描——相关包 fail-closed 转
     invalid/unavailable，其他正常包不受影响（复验实测此前 verify 直接上抛
     OSError 炸掉 scan_packs，启动/热重载整条链路跟着失败）。"""
@@ -582,7 +580,7 @@ def test_ac3_scan_survives_resource_read_failure(packs_dir, monkeypatch, capsys)
     assert "签名校验失败" in infos["sick"]["error"]
     assert infos["healthy"]["trust"] == "signed"            # 其他包不受影响
     assert infos["healthy"]["status"] == "ok"
-    assert "读取失败" in capsys.readouterr().out            # 告警可定位
+    assert "读取失败" in caplog.text                        # 告警可定位
 
 
 def test_ac3_sign_failure_explicit_not_partial(packs_dir, monkeypatch):
@@ -743,7 +741,7 @@ def test_review_sign_pack_survives_encode_error(packs_dir, monkeypatch):
 
 # ---- v0.17.36 AC1-AC4：严格 skills 树布局 / 加载快照 / 链接循环哨兵（R7-R9）----
 
-def test_ac1_pack_internal_dir_link_rejected(packs_dir, monkeypatch, capsys):
+def test_ac1_pack_internal_dir_link_rejected(packs_dir, monkeypatch, caplog):
     """AC1/R7：skills/x -> ../hidden（目录链接指向 skills 树之外的包内目录）
     ——强制模式下不得出现「技能可加载且包 signed」：技能目录解析后必须仍
     位于 <pack>/skills/ 树内（hidden/、tools/ 等一律拒收，junction 与
@@ -768,7 +766,7 @@ def test_ac1_pack_internal_dir_link_rejected(packs_dir, monkeypatch, capsys):
     assert skills.load_skill("y") is not None
     for name in ("x", "hidden", "blind-spot"):          # 链接名/目标名/frontmatter 名全不可加载
         assert skills.load_skill(name) is None
-    assert "skills 树" in capsys.readouterr().out       # 拒收告警可定位
+    assert "skills 树" in caplog.text                       # 拒收告警可定位
 
 
 def test_ac2_mounted_set_covers_all_collections(packs_dir, monkeypatch):

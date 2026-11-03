@@ -7,11 +7,14 @@
 审批样板统一走 approval.require_approval（v0.13.0 起，原 7 处重复代码已收敛）。
 """
 import json
+import logging
 import re
 import urllib.request
 from pathlib import Path
 
 from . import approval, auth, config, usage
+
+logger = logging.getLogger(__name__)
 
 # 敏感文件判定（v0.17.4 安全审计 F1）：.env 及变体（含部署密钥）与运行时
 # SQLite 库（state.db/usage.db 及 WAL/SHM）。默认工作区=项目根目录时，
@@ -107,7 +110,7 @@ def read_text_file(path: str) -> str:
             target.read_text(encoding="utf-8", errors="replace"))[:20_000]
     except Exception as e:
         # 不回显原始异常文本（P1-3 约定：OSError 等可能携带服务器绝对路径）
-        print(f"[tools] read_text_file 读取失败: {e}")
+        logger.error(f"[tools] read_text_file 读取失败: {e}")
         return f"读取失败（{type(e).__name__}）"
 
 
@@ -266,7 +269,7 @@ def run_python_code(code: str) -> str:
         return data.get("output") or data.get("error") or "（无输出）"
     except Exception as e:
         # 不回显原始异常文本（P1-3 约定），细节仅进服务端日志
-        print(f"[tools] run_python_code 沙箱调用失败: {e}")
+        logger.error(f"[tools] run_python_code 沙箱调用失败: {e}")
         return f"沙箱调用失败（{type(e).__name__}），请检查沙箱服务状态"
 
 
@@ -293,7 +296,7 @@ def do_delete(path: str) -> str:
         return f"已删除文件: {path}"
     except Exception as e:
         # 不回显原始异常文本（P1-3 约定），细节仅进服务端日志
-        print(f"[tools] do_delete 删除失败: {e}")
+        logger.error(f"[tools] do_delete 删除失败: {e}")
         return f"删除失败（{type(e).__name__}）"
 
 

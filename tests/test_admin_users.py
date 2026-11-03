@@ -12,6 +12,8 @@
 - AC10 审计日志：管理动作产生 [admin] 结构化日志，且不含明文 Key
 - AC12 端点契约回归（404 目标不存在等）
 """
+import logging
+
 import pytest
 
 from server import auth, config
@@ -257,12 +259,13 @@ def test_ac8_admin_cannot_revoke_self(admin_client):
 
 # ---------------------------------------------------------------- AC10 审计日志
 
-def test_ac10_admin_actions_logged_without_plain_key(admin_client, capsys):
-    admin_client.post("/api/admin/users",
-                      json={"username": "alice", "role": "user"})
-    admin_client.post("/api/admin/users/alice/revoke", json={})
-    out = capsys.readouterr().out
-    assert "[admin]" in out and "alice" in out and "root" in out
+def test_ac10_admin_actions_logged_without_plain_key(admin_client, caplog):
+    with caplog.at_level(logging.INFO):
+        admin_client.post("/api/admin/users",
+                          json={"username": "alice", "role": "user"})
+        admin_client.post("/api/admin/users/alice/revoke", json={})
+    assert "[admin]" in caplog.text and "alice" in caplog.text \
+        and "root" in caplog.text
     # 明文 Key 不得出现在日志
     key = auth.list_users()  # 无法反查明文，改为确认日志不含 pak- 前缀串
-    assert "pak-" not in out
+    assert "pak-" not in caplog.text

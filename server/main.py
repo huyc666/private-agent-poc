@@ -11,6 +11,7 @@
 """
 import asyncio
 import json
+import logging
 import os
 import re
 import secrets
@@ -33,6 +34,8 @@ from server import (agent, approval, audit, auth, config, custom_tools,
                     html_sanitize, packs, session_lock, sessions, skills,
                     telemetry, usage)
 from tools import kb_parsers  # 定位端点按锚点重解析文档（服务器侧，不进包）
+
+logger = logging.getLogger(__name__)
 
 
 def _bearer_token(request: Request) -> str:
@@ -58,10 +61,10 @@ async def _approval_scan_loop():
         try:
             n = await asyncio.to_thread(approval.mark_abandoned, grace)
             if n:
-                print(f"[approval] 周期扫描：{n} 条「已批准但执行丢失」标记为 abandoned")
+                logger.info(f"[approval] 周期扫描：{n} 条「已批准但执行丢失」标记为 abandoned")
         except Exception as e:
             # 单次失败不终止任务：DB 短暂锁竞争/瞬时错误恢复后下一轮自动重试
-            print(f"[approval] 周期扫描失败（下轮重试）: {e}")
+            logger.warning(f"[approval] 周期扫描失败（下轮重试）: {e}")
 
 
 @asynccontextmanager
@@ -71,8 +74,8 @@ async def lifespan(app: FastAPI):
     cleaned = approval.cleanup_stale(
         grace=approval.APPROVAL_TIMEOUT + APPROVAL_SCAN_INTERVAL)
     if cleaned:
-        print(f"[approval] 启动清理：{cleaned} 条残留审批已处理"
-              "（pending→expired，approved 未执行→abandoned）")
+        logger.info(f"[approval] 启动清理：{cleaned} 条残留审批已处理"
+                    "（pending→expired，approved 未执行→abandoned）")
     auth.bootstrap_admin()  # 认证模式首启：创建引导 admin 并打印一次性 Key
     audit.init()  # PLAN 6.3：审计表建表 + 存量容量裁剪（失败不阻断启动）
     packs.load_disabled_packs()  # PLAN 3.2 Q2：恢复禁用名单（须在 Agent 装配前）
@@ -85,16 +88,16 @@ async def lifespan(app: FastAPI):
     # v0.17.4（安全审计 F2）：SSO 身份头必须配合受信代理白名单才生效；
     # 配置了身份头却没配白名单 = 身份头永远不生效（fail-closed），启动时明确告警
     if auth.enabled() and config.AUTH_IDENTITY_HEADER and not config.AUTH_PROXY_ALLOWED_IPS:
-        print("[auth] WARNING: 已配置 AUTH_IDENTITY_HEADER 但未配置"
-              " AUTH_PROXY_ALLOWED_IPS——身份头将被忽略（fail-closed，防伪造）。"
-              "请在 .env 配置受信代理来源 IP 白名单后重启，SSO 身份头才会生效。")
+        logger.warning("[auth] WARNING: 已配置 AUTH_IDENTITY_HEADER 但未配置"
+                       " AUTH_PROXY_ALLOWED_IPS——身份头将被忽略（fail-closed，防伪造）。"
+                       "请在 .env 配置受信代理来源 IP 白名单后重启，SSO 身份头才会生效。")
     # v0.17.11（评审）：部门头嵌套在身份头分支内读取——只配部门头不配身份头时
     # 永不生效且无提示，运维难以自查；按 fail-closed 配置须明确告警的惯例补提示
     if auth.enabled() and config.AUTH_IDENTITY_DEPARTMENT_HEADER \
             and not config.AUTH_IDENTITY_HEADER:
-        print("[auth] WARNING: 已配置 AUTH_IDENTITY_DEPARTMENT_HEADER 但未配置"
-              " AUTH_IDENTITY_HEADER——部门头不会被读取（部门头随身份头一同生效），"
-              "SSO 部门透传未启用。")
+        logger.warning("[auth] WARNING: 已配置 AUTH_IDENTITY_DEPARTMENT_HEADER 但未配置"
+                       " AUTH_IDENTITY_HEADER——部门头不会被读取（部门头随身份头一同生效），"
+                       "SSO 部门透传未启用。")
     await agent.build_agent()
     scan_task = asyncio.create_task(_approval_scan_loop())
     yield
@@ -135,8 +138,8 @@ async def auth_middleware(request: Request, call_next):
                 header_department = request.headers.get(
                     config.AUTH_IDENTITY_DEPARTMENT_HEADER, "")
         elif request.headers.get(config.AUTH_IDENTITY_HEADER):
-            print("[auth] 身份头来自非受信来源（不在 AUTH_PROXY_ALLOWED_IPS 白名单），"
-                  "已忽略（防伪造冒充）")
+            logger.warning("[auth] 身份头来自非受信来源（不在 AUTH_PROXY_ALLOWED_IPS 白名单），"
+                           "已忽略（防伪造冒充）")
     auth_via = ""  # header / bearer / cookie（CSRF 校验只针对 cookie 身份）
     if header_user:
         auth_via = "header"
@@ -235,7 +238,7 @@ def _admin_guard(request: Request):
 def _audit(operator: str, action: str, target: str, role: str = "") -> None:
     """管理动作结构化日志（AC10）+ 统一审计落库（PLAN 6.3）。
     绝不打印明文 Key 等敏感值。"""
-    print(f"[admin] {operator} {action} {target}")
+    logger.info(f"[admin] {operator} {action} {target}")
     audit.log(operator, role, action, target=target)
 
 
@@ -635,7 +638,7 @@ async def chat(req: ChatRequest, request: Request):
                             extra=(json.dumps(citations, ensure_ascii=False)
                                    if citations else None))
                 if discarded:
-                    print(f"[sessions] 会话 {session_id} 已删除，本轮 assistant 回复被丢弃")
+                    logger.warning(f"[sessions] 会话 {session_id} 已删除，本轮 assistant 回复被丢弃")
                     yield f"data: {json.dumps({'type': 'error', 'content': '会话已被删除，本轮回复已丢弃'}, ensure_ascii=False)}\n\n"
             finally:
                 await lease.__aexit__()  # 停心跳 + 释放租约（与 __aenter__ 配对）
@@ -749,8 +752,8 @@ async def _purge_session(session_id: str) -> int:
         try:
             await cp.adelete_thread(session_id)
         except Exception as e:
-            print(f"[sessions] checkpoint 删除失败（tombstone 已封禁，"
-                  f"残留不可达）: {e}")
+            logger.error(f"[sessions] checkpoint 删除失败（tombstone 已封禁，"
+                         f"残留不可达）: {e}")
     agent._compact_cache.pop(session_id, None)
     await asyncio.to_thread(approval.reject_pending_for_session, session_id)
     await asyncio.to_thread(session_lock.purge, session_id)
@@ -933,8 +936,8 @@ def _migrate_legacy_file_dirs() -> None:
                     break
                 except OSError as e:
                     if attempt == 2:
-                        print(f"[startup] WARNING: 存量文件迁移失败（旧版文件将"
-                              f"无法按新分域寻址，请手动移动）: {p.name}: {e}")
+                        logger.warning(f"[startup] WARNING: 存量文件迁移失败（旧版文件将"
+                                       f"无法按新分域寻址，请手动移动）: {p.name}: {e}")
                     else:
                         time.sleep(0.05)
 
@@ -951,7 +954,7 @@ def _migrate_scope_dirs() -> None:
     try:
         users = auth.list_users()
     except Exception as e:
-        print(f"[startup] WARNING: 用户表读取失败，跳过文件域目录迁移: {e}")
+        logger.warning(f"[startup] WARNING: 用户表读取失败，跳过文件域目录迁移: {e}")
         return
     claims: dict[str, list[str]] = {}
     for u in users:
@@ -965,8 +968,8 @@ def _migrate_scope_dirs() -> None:
                 continue
             owners = claims.get(d.name, [])
             if len(owners) > 1:
-                print(f"[startup] WARNING: 老域名「{d.name}」有 {len(owners)} 位"
-                      f"认领用户（清洗碰撞），目录未迁移、请人工分拣: {d}")
+                logger.warning(f"[startup] WARNING: 老域名「{d.name}」有 {len(owners)} 位"
+                               f"认领用户（清洗碰撞），目录未迁移、请人工分拣: {d}")
                 continue
             if not owners:
                 continue        # 无人认领（含已是新哈希名）：不动
@@ -975,8 +978,8 @@ def _migrate_scope_dirs() -> None:
                 continue
             target = base / new
             if target.exists():
-                print(f"[startup] WARNING: 新域名「{new}」已存在，跳过迁移"
-                      f"（请人工核对两目录内容）: {target}")
+                logger.warning(f"[startup] WARNING: 新域名「{new}」已存在，跳过迁移"
+                               f"（请人工核对两目录内容）: {target}")
                 continue
             moved = False
             for attempt in range(3):
@@ -988,11 +991,11 @@ def _migrate_scope_dirs() -> None:
                     if attempt < 2:
                         time.sleep(0.05)
             if moved:
-                print(f"[startup] 文件域目录已迁移（SEC-2 哈希防碰撞）: "
-                      f"{base.name}/{d.name} → {new}")
+                logger.info(f"[startup] 文件域目录已迁移（SEC-2 哈希防碰撞）: "
+                            f"{base.name}/{d.name} → {new}")
             else:
-                print(f"[startup] WARNING: 目录迁移失败（3 次重试），老域名文件"
-                      f"将无法按新域寻址，请手动改名: {base.name}/{d.name} → {new}")
+                logger.warning(f"[startup] WARNING: 目录迁移失败（3 次重试），老域名文件"
+                               f"将无法按新域寻址，请手动改名: {base.name}/{d.name} → {new}")
 
 
 @app.post("/api/uploads")
@@ -1542,5 +1545,5 @@ if __name__ == "__main__":
     import uvicorn
 
     host, port = _parse_host_port()
-    print(f"Private Agent POC 启动于 http://localhost:{port}  (模式: {'mock' if config.MOCK_LLM else 'live'})")
+    logger.info(f"Private Agent POC 启动于 http://localhost:{port}  (模式: {'mock' if config.MOCK_LLM else 'live'})")
     uvicorn.run(app, host=host, port=port)

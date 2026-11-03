@@ -18,6 +18,7 @@ AUTH_ENABLED=false（默认）= 开放模式，行为与认证引入前完全一
 import hashlib
 import hmac
 import ipaddress
+import logging
 import secrets
 import sqlite3
 import threading
@@ -25,6 +26,8 @@ import time
 from pathlib import Path
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 ROLES = ("user", "approver", "admin")
 _lock = threading.Lock()
@@ -294,8 +297,8 @@ def login(username: str, password: str) -> dict | None:
                 if row_fail else (0, 0.0)
             if lock_until > now:
                 # 锁定中：仍返回模糊 None（与密码错误不可区分），仅记日志供排障
-                print(f"[auth] 登录限流锁定中，拒绝: {username}"
-                      f"（{int(lock_until - now)}s 后解锁）")
+                logger.warning(f"[auth] 登录限流锁定中，拒绝: {username}"
+                               f"（{int(lock_until - now)}s 后解锁）")
                 return None
             row = conn.execute(
                 "SELECT username, role, password_hash, department FROM api_users"
@@ -307,9 +310,9 @@ def login(username: str, password: str) -> dict | None:
                     conn.execute(
                         "INSERT OR REPLACE INTO login_fails(username, fails, lock_until)"
                         " VALUES (?,0,?)", (username, now + LOGIN_LOCK_SECONDS))
-                    print(f"[auth] 登录连续失败 {LOGIN_MAX_FAILS} 次，"
-                          f"锁定 {username} {LOGIN_LOCK_SECONDS}s"
-                          "（锁定期内该账号登录一律拒绝）")
+                    logger.warning(f"[auth] 登录连续失败 {LOGIN_MAX_FAILS} 次，"
+                                   f"锁定 {username} {LOGIN_LOCK_SECONDS}s"
+                                   "（锁定期内该账号登录一律拒绝）")
                 else:
                     conn.execute(
                         "INSERT OR REPLACE INTO login_fails(username, fails, lock_until)"
@@ -541,5 +544,5 @@ def bootstrap_admin() -> None:
         return
     key = add_user(config.AUTH_BOOTSTRAP_ADMIN, role="admin")
     if key:
-        print(f"[auth] 已创建引导管理员「{config.AUTH_BOOTSTRAP_ADMIN}」，"
-              f"一次性 API Key（请立即保存，不再显示）: {key}")
+        logger.info(f"[auth] 已创建引导管理员「{config.AUTH_BOOTSTRAP_ADMIN}」，"
+                    f"一次性 API Key（请立即保存，不再显示）: {key}")
