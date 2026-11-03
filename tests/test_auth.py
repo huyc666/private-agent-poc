@@ -289,3 +289,18 @@ def test_bootstrap_admin_noop_without_config(monkeypatch):
     monkeypatch.setattr(config, "AUTH_BOOTSTRAP_ADMIN", "")
     auth.bootstrap_admin()
     assert auth.list_users() == []
+
+
+def test_bootstrap_admin_key_stdout_not_log(monkeypatch, capsys, caplog):
+    """方案 B（2026-11-03 裁决）：一次性引导 Key 只直写 stdout（部署终端可见），
+    禁止进入 logging/日志采集通道。"""
+    import logging
+    monkeypatch.setattr(config, "AUTH_BOOTSTRAP_ADMIN", "root-admin")
+    with caplog.at_level(logging.INFO):
+        auth.bootstrap_admin()
+    out = capsys.readouterr().out
+    assert "已创建引导管理员" in out and "一次性 API Key" in out
+    key = out.rsplit(":", 1)[-1].strip()
+    assert key
+    assert key not in caplog.text
+    assert "一次性 API Key" not in caplog.text

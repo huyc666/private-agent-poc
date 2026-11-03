@@ -46,7 +46,7 @@
 | must | 日志不得输出明文密码、API Key、token、Cookie 值（对齐 §2.6） | 审计设计约束见 README v0.17.30 条目（"明文密码/Key 与绝对路径绝不入审计"） |
 | must | 服务端业务代码（server/、sandbox/）一律走 `logging`，禁止 `print`；`print` 仅允许出现在 tools/ 下的独立 CLI 脚本（面向终端输出）。存量 print（如 [agent.py](file:///e:/codebase/GitHub/private-agent-poc/server/agent.py#L68-L70) 的 `[agent] ...`）触碰即改 | — |
 
-> 豁免脚注：sandbox/server.py 中 `print("__RESULT__" + json.dumps(...))`（L66-L68）是沙箱父子进程 IPC 协议帧——子进程执行结果经 stdout 数据通道回传父进程解析，不是日志输出，故不受上条约束；该文件中其余 print 仍须收敛为 logging。
+> 豁免脚注：两类 stdout 直写不受上条约束——① sandbox/server.py 的 `print("__RESULT__" + json.dumps(...))`（L66-L68）是沙箱父子进程 IPC 协议帧（stdout 数据通道），不是日志；② [auth.py](file:///e:/codebase/GitHub/private-agent-poc/server/auth.py#L545-L552) 引导管理员一次性 Key 直写 stdout（部署终端可见），系 §2.6 的明文凭据例外——该 Key 只允许存在于部署终端，禁止进入 logging/日志采集通道（2026-11-03 用户裁决方案 B）。除这两类外，server/ 与 sandbox/ 一律 logging。
 
 ### 1.5 配置读取（config.py 约定）
 
@@ -126,6 +126,8 @@
 | `read_text_file` / `do_delete` 拦截 `.env*`、`*.db/-wal/-shm`；文件内容中 TOKEN/KEY/SECRET/PASSWORD 等键值掩码 | [tools_builtin.py](file:///e:/codebase/GitHub/private-agent-poc/server/tools_builtin.py#L91-L111) 拦截段 |
 | 上传端点先查 `Content-Length` 预检（10MB）再读 body；docx 解压限 20MB 防 zip bomb | [main.py](file:///e:/codebase/GitHub/private-agent-poc/server/main.py#L891-L901) |
 | 沙箱子进程不继承 `SANDBOX_AUTH_TOKEN/SANDBOX_OPEN_MODE`；沙箱容器 iptables 阻断出站 | sandbox/Dockerfile、entrypoint.sh、docker/docker-compose.sandbox.yml |
+
+> 例外（2026-11-03 用户裁决方案 B）：引导管理员一次性 Key 允许且仅允许直写部署终端 stdout（auth.py `bootstrap_admin`），不得进入 logging/审计/错误消息；除该场景外明文凭据无例外。
 
 ---
 

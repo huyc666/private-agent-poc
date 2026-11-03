@@ -544,5 +544,7 @@ def bootstrap_admin() -> None:
         return
     key = add_user(config.AUTH_BOOTSTRAP_ADMIN, role="admin")
     if key:
-        logger.info(f"[auth] 已创建引导管理员「{config.AUTH_BOOTSTRAP_ADMIN}」，"
-                    f"一次性 API Key（请立即保存，不再显示）: {key}")
+        # 方案 B（2026-11-03 裁决）：一次性引导凭据直写 stdout（部署终端可见），
+        # 禁止进入 logging/日志采集通道——规范 §1.4/§2.6 的明文例外，仅限此处。
+        print(f"[auth] 已创建引导管理员「{config.AUTH_BOOTSTRAP_ADMIN}」，"
+              f"一次性 API Key（请立即保存，不再显示）: {key}", flush=True)
