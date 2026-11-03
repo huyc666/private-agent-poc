@@ -263,8 +263,9 @@ def test_ac4_sessions_persist_citations(tmp_path, monkeypatch):
 
 
 def test_ac4_chat_loop_collects_citations():
-    """静态断言：chat SSE 循环收集 citations 事件并随 assistant 消息落库。"""
-    src = (PROJECT_ROOT / "server/main.py").read_text(encoding="utf-8")
+    """静态断言：chat SSE 循环收集 citations 事件并随 assistant 消息落库。
+    （批 4 路由拆分后实现位于 server/routes/chat.py，守卫锚点随迁）"""
+    src = (PROJECT_ROOT / "server/routes/chat.py").read_text(encoding="utf-8")
     assert 'ev["type"] == "citations"' in src
     assert "extra=" in src
 
