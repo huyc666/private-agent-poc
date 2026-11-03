@@ -33,7 +33,7 @@
 
 | 级别 | 规则 | 实例 |
 |---|---|---|
-| must | 面向用户/模型的错误文本**不得拼接原始异常对象 `{e}`**（OSError 等会携带服务器绝对路径）。返回固定文案或归类原因 | [tools_builtin.py](file:///e:/codebase/GitHub/private-agent-poc/server/tools_builtin.py#L91-L111) `read_text_file` 捕获通用异常返回标准化错误文本；[tools_builtin.py](file:///e:/codebase/GitHub/private-agent-poc/server/tools_builtin.py#L204-L248) `save_output_file` 区分 OSError 与通用异常 |
+| must | **对外三通道零容忍拼接原始异常 `{e}`**：HTTP 响应/SSE 流/页面可见文本、工具返回给模型的文本、审计记录（这三类受众可能离开部署机）。返回固定文案或归类原因（OSError 等会携带服务器绝对路径）。**本机日志通道**（uvicorn/应用日志，只落部署机磁盘）允许保留原始异常文本——日志不出内网、排障需要完整堆栈，但禁止外发；外泄面由 §1.4 print 禁令与 §2.6 密钥条款覆盖。**存量 5 处对外通道命中列一期补齐**（非永久豁免）：custom_tools.py:195、packs.py:112/385、skills.py:506、weather.py:133，逐一改为类型名+泛化文案（参照 tools_builtin.py:248 先例），每处配「错误文本不含绝对路径/异常原文」断言用例 | [tools_builtin.py](file:///e:/codebase/GitHub/private-agent-poc/server/tools_builtin.py#L91-L111) `read_text_file` 捕获通用异常返回标准化错误文本；[tools_builtin.py](file:///e:/codebase/GitHub/private-agent-poc/server/tools_builtin.py#L204-L248) `save_output_file` 区分 OSError 与通用异常；通道口径详见 ENGINEERING-METRICS.md S4 |
 | must | 计量、审计等旁路回调的失败不得阻塞主链路：`except Exception` 吞掉并降级 | [usage.py](file:///e:/codebase/GitHub/private-agent-poc/server/usage.py#L193-L219) `UsageCallback` 明确"任何回调内异常吞掉" |
 | must | 安全判定路径的异常必须 fail-closed（拒绝），不得 fail-open 放行；参见 §2 | [auth.py](file:///e:/codebase/GitHub/private-agent-poc/server/auth.py#L416-L427) `proxy_ip_allowed` 白名单未配置/非法 IP 均返回 False |
 | should | HTTP 层错误统一用 `HTTPException(status_code, detail=固定文案)` | [sandbox/server.py](file:///e:/codebase/GitHub/private-agent-poc/sandbox/server.py#L38-L51) `check_token` 401/503 |
@@ -271,8 +271,10 @@
 
 - [ ] spec 已确认（docs/specs/ 对应文件存在，AC 可检验），且测试先行跑红过
 - [ ] 新增/变更的安全防线有**拒绝路径**用例；防线判定 fail-closed
-- [ ] 错误文本、日志、审计无 `{e}` 拼接、无明文凭据/token、无服务器绝对路径
+- [ ] 对外三通道（HTTP 响应/SSE/页面、工具返回模型文本、审计记录）无 `{e}` 拼接、无明文凭据/token、无服务器绝对路径（本机日志允许保留原始异常，不得外发）
 - [ ] 权限相关改动在提示层/执行层/端点层复用同一判定函数，无内联重写
+- [ ] 变更触及端点/中间件/认证时跑过 `python tests\perf_baseline.py`，各端点 P95 ≤ 500ms（ENGINEERING-METRICS U2）
+- [ ] requirements 变更时跑过 `pip-audit --vulnerability-service osv --timeout 60`，直接依赖命中为 0；离线环境改为有网环境定期扫描并把清单带回（ENGINEERING-METRICS S5）
 - [ ] 新增配置集中在 config.py 读取（含默认值与类型归一），业务代码按 `config.X` 调用时引用
 - [ ] async 代码中无裸同步阻塞调用（DB/文件/锁均 `asyncio.to_thread`）；代理类透传基类返回值
 - [ ] 新 ContextVar 已在 conftest 的 `isolated_env` 中 set+reset

@@ -1,0 +1,2 @@
+# 开发/质检工具链（不进部署运行时；部署只需 requirements.txt）
+pip-audit>=2.10,<3    # 依赖漏洞扫描（ENGINEERING-METRICS S5；本环境 PyPI 服务超时，固定用 --vulnerability-service osv）
