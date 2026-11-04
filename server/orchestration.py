@@ -163,7 +163,17 @@ def validate_definition(definition: dict) -> list[str]:
                 errors.append(f"角色「{rid or i + 1}」声明了危险工具「{tool_name}」，"
                               "编排禁止使用")
             elif tool_name not in available_tools():
-                errors.append(f"角色「{rid or i + 1}」声明了未知工具「{tool_name}」")
+                label = rid or i + 1
+                if _is_safe_tool_name(tool_name):
+                    # 白名单内但运行态未加载：排查方向是启用包 / 连接 MCP，不是改定义
+                    errors.append(f"角色「{label}」声明的工具「{tool_name}」已登记但当前"
+                                  "不可用，请检查包是否启用或 MCP 是否连接")
+                elif _is_known_tool_name(tool_name):
+                    errors.append(f"角色「{label}」声明了不在编排安全清单内的工具"
+                                  f"「{tool_name}」，编排禁止使用")
+                else:
+                    errors.append(f"角色「{label}」声明的工具「{tool_name}」不存在，"
+                                  "请检查名称")
 
     steps = definition.get("steps")
     if not isinstance(steps, list) or not steps:
@@ -323,6 +333,41 @@ def _deny_text(name: str) -> str:
 def _is_safe_tool_name(name: str) -> bool:
     return (name in SAFE_BUILTIN_TOOL_NAMES or name in SAFE_PACK_TOOL_NAMES
             or name in SAFE_MCP_TOOL_NAMES)
+
+
+def _known_builtin_tool_names() -> set[str]:
+    """全部已登记内置工具名（含编排安全清单之外的管理类工具）。"""
+    try:
+        from . import tools_admin
+        names = set()
+        for item in tools_admin.BUILTIN_TOOLS:
+            name = getattr(item, "name", None) or getattr(item, "__name__", "")
+            if name:
+                names.add(name)
+        return names
+    except Exception as e:
+        logger.warning("[orchestration] 读取内置工具清单失败（%s）", type(e).__name__)
+        return set(SAFE_BUILTIN_TOOL_NAMES)
+
+
+def _known_pack_tool_names() -> set[str]:
+    """全部已声明包工具名（含未启用/未加载的包，用于区分“不存在”与“未加载”）。"""
+    names = set(_pack_tool_meta())
+    try:
+        for pack in packs.scan_packs():
+            for path in pack.get("tools") or []:
+                stem = getattr(path, "stem", None) or Path(str(path)).stem
+                if stem:
+                    names.add(stem)
+    except Exception as e:
+        logger.warning("[orchestration] 读取包工具声明失败（%s）", type(e).__name__)
+    return names
+
+
+def _is_known_tool_name(name: str) -> bool:
+    if name in STATE.mcp_tools or name in SAFE_MCP_TOOL_NAMES:
+        return True
+    return name in _known_builtin_tool_names() or name in _known_pack_tool_names()
 
 
 class _GuardedLLM:

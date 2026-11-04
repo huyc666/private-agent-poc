@@ -7,6 +7,7 @@ import pytest
 
 from server import config
 from server import orchestration as orch
+from server.state import STATE
 
 
 def _valid_definition() -> dict:
@@ -153,7 +154,42 @@ def test_too_many_roles_or_steps_rejected():
 def test_unknown_tool_rejected():
     data = _valid_definition()
     data["roles"][1]["tools"] = ["totally_unknown_tool"]
-    assert any("totally_unknown_tool" in e for e in orch.validate_definition(data))
+    errors = orch.validate_definition(data)
+    assert any("totally_unknown_tool" in e for e in errors)
+    assert any("不存在" in e and "请检查名称" in e for e in errors)
+
+
+def test_whitelisted_pack_tool_unavailable_is_not_unknown(monkeypatch):
+    """白名单内工具但包未加载：文案应指向启用包，而不是说名称写错。"""
+    monkeypatch.setattr(STATE, "pack_tools", {})
+    data = _valid_definition()
+    data["roles"][1]["tools"] = ["search_hr_knowledge"]
+    errors = orch.validate_definition(data)
+    joined = "；".join(errors)
+    assert "search_hr_knowledge" in joined
+    assert "已登记但当前不可用" in joined
+    assert "请检查包是否启用" in joined
+    assert "不存在" not in joined
+    assert "未知工具" not in joined
+
+
+def test_whitelisted_mcp_tool_unavailable_mentions_connection(monkeypatch):
+    monkeypatch.setattr(STATE, "mcp_tools", {})
+    data = _valid_definition()
+    data["roles"][1]["tools"] = ["get_city_weather"]
+    joined = "；".join(orch.validate_definition(data))
+    assert "已登记但当前不可用" in joined
+    assert "MCP" in joined
+
+
+def test_known_tool_outside_safe_list_keeps_rejection():
+    """既有内置工具但不在安全清单：保持拒绝，文案点名安全清单。"""
+    data = _valid_definition()
+    data["roles"][1]["tools"] = ["load_skill"]
+    joined = "；".join(orch.validate_definition(data))
+    assert "load_skill" in joined
+    assert "安全清单" in joined
+    assert "不存在" not in joined
 
 
 @pytest.mark.parametrize("tool_name", sorted(orch.FORBIDDEN_TOOL_NAMES))
