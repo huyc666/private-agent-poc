@@ -341,6 +341,25 @@ async def orchestrate_subtasks(task: str) -> str:
         return f"多 Agent 编排执行失败（{type(e).__name__}），请稍后重试"
 
 
+async def run_orchestration(name: str, task: str) -> str:
+    """按已创建的编排定义执行一次多角色流程（v0.17.44，PLAN 5.1）。
+    定义由配置文件或 create_orchestration 工具创建；子角色只能使用安全工具
+    清单中、且发起者本人有权限使用的工具；全局定义全员可见，个人定义仅本人
+    可见。适合固定角色分工的流程（审核-修订-复核、拆解-调研-汇总等）；
+    一次性自由拆解仍可用 orchestrate_subtasks。name 为定义名，task 为总任务。"""
+    from . import orchestration
+    return await orchestration.run_orchestration(name, task)
+
+
+async def create_orchestration(content: str, overwrite: bool = False) -> str:
+    """创建一份多角色编排定义（v0.17.44，PLAN 5.1）。content 为完整 YAML 文本：
+    name/version/roles/steps，可选 aggregate 与 max_parallel。user 角色创建到
+    个人域（自助、仅本人可见）；approver/admin 创建全局定义，必须经审批。
+    overwrite 仅在明确覆盖同名定义时传 true。"""
+    from . import orchestration
+    return await orchestration.create_orchestration(content, overwrite=overwrite)
+
+
 # ---------------------------------------------------------------- 工具装配清单
 
 BUILTIN_TOOLS = [read_text_file, list_uploaded_docs, save_output_file,
@@ -349,7 +368,8 @@ BUILTIN_TOOLS = [read_text_file, list_uploaded_docs, save_output_file,
                  list_custom_tools, create_custom_tool, delete_custom_tool,
                  run_custom_tool,
                  list_packs, enable_pack, disable_pack, create_pack, delete_pack,
-                 sign_pack, orchestrate_subtasks]
+                 sign_pack, orchestrate_subtasks,
+                 run_orchestration, create_orchestration]
 
 
 def builtin_langchain_tools() -> list:
@@ -416,4 +436,10 @@ def builtin_langchain_tools() -> list:
         StructuredTool.from_function(
             coroutine=orchestrate_subtasks, name="orchestrate_subtasks",
             description=orchestrate_subtasks.__doc__),
+        StructuredTool.from_function(
+            coroutine=run_orchestration, name="run_orchestration",
+            description=run_orchestration.__doc__),
+        StructuredTool.from_function(
+            coroutine=create_orchestration, name="create_orchestration",
+            description=create_orchestration.__doc__),
     ]

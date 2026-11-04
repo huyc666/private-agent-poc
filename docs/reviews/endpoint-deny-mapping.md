@@ -64,3 +64,19 @@
 
 - 全局中间件（`server/main.py`）对所有 `/api/*`（除 `/api/health`、`/api/auth/login`）实施统一 401，对 cookie 身份的非 GET 请求实施 CSRF 403。表内只登记**实际打到该端点**的用例；中间件级 401 只在有用例命中的端点上登记，未命中的一律标缺口或行内备注，不做"中间件已覆盖"的推定。
 - 18 个 skipped 均为集成/环境门控（docker、真实 LLM、fastembed、Windows 符号链接、langfuse），与本表引用用例无交集。
+
+## 补充：编排工具级权限点（v0.17.44，PLAN 5.1）
+
+本轮不新增 HTTP 端点，编排通过对话工具 `run_orchestration` / `create_orchestration`
+进入，因此拒绝用例登记在工具级：
+
+| # | 权限点 | 拒绝场景 | 用例（文件::函数） | 状态 |
+|---|--------|----------|--------------------|------|
+| O1 | `run_orchestration` 定义解析 | 定义不存在 / 跨用户个人定义不可见 → 不执行 | test_orchestration_definition_approval.py::test_user_cannot_write_global_definition_via_name_path（写侧）；test_orchestration_identity.py::test_personal_assets_are_not_borrowed_from_definition_author（个人资产隔离） | 有覆盖 |
+| O2 | 子角色工具装配 | 低权限发起者越权包工具 → 装配层不绑定 | test_orchestration_identity.py::test_low_privilege_initiator_privileged_tool_denied | 有覆盖 |
+| O3 | 子角色工具执行 | 直调越权包工具 → 包守卫拒绝且无数据 | 同 O2（装配层 + 直调层 + 无数据泄漏三重断言） | 有覆盖 |
+| O4 | 发起者范围收窄 | 定义作者高权限、发起者低权限 → 检索范围按发起者收窄 | test_orchestration_identity.py::test_definition_author_privilege_does_not_expand_initiator_kb_scope | 有覆盖 |
+| O5 | 危险工具 | 定义声明删除/审批/管理工具 → 校验拒绝；执行层兜底拒绝 | test_orchestration_definition.py::test_forbidden_tool_rejected（参数化全清单）；test_orchestration_boundaries.py::test_forbidden_tool_never_executes_even_if_injected | 有覆盖 |
+| O6 | 沙箱边界 | 沙箱不可达 → 编排未启动；错误令牌 → 调用失败无数据；子进程环境剔除密钥 | test_orchestration_boundaries.py::test_sandbox_down_fails_closed_before_any_subagent / test_sandbox_wrong_token_returns_failure_without_data / test_sandbox_token_forwarded_on_orchestrated_tool_call / test_child_process_env_excludes_sandbox_secrets | 有覆盖 |
+| O7 | 代际栅栏 | 会话删除/代际变更 → 下一步不执行、不写产出、不产生审批 | test_orchestration_boundaries.py::test_stale_generation_stops_next_step；test_orchestration_boundaries.py::test_running_orchestration_does_not_create_approvals | 有覆盖 |
+| O8 | 全局定义创建 | user 角色不能直接写全局；approver/admin 全局创建必须审批；拒绝/异常不落盘 | test_orchestration_definition_approval.py::test_global_definition_requires_approval_then_persists / test_global_definition_rejected_does_not_persist / test_approval_unavailable_fails_closed / test_personal_definition_is_self_service_without_approval | 有覆盖 |

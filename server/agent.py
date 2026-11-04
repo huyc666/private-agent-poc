@@ -551,6 +551,9 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
     usage.current_user.set(user_id)
     usage.current_session.set(session_id)
     usage.current_run.set(run_id)
+    # 代际栅栏快照（v0.17.44）：编排引擎在工具内部每步/每次模型调用前读取
+    # 本 ContextVar，不依赖调用栈恰好共享局部变量。
+    usage.current_generation.set(generation)
     # 请求级身份快照（v0.17.39）：ContextVar 并发隔离——asyncio 任务创建时
     # 复制上下文，本请求的 set 不泄漏给其他会话；非对话调用方传 None 即复位
     usage.current_identity.set(identity)

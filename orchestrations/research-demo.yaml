@@ -1,0 +1,34 @@
+name: research-demo
+version: '1'
+description: 调研编排示例：拆解 → 并行调研 → 汇总，与 orchestrate_subtasks 等效
+max_parallel: 4
+roles:
+  - id: planner
+    name: 任务拆解
+    prompt: 你是规划者。把用户任务拆成 2~4 个可并行执行的子任务，只输出 JSON 字符串数组，不要解释。
+    tools: []
+  - id: researcher
+    name: 并行调研
+    prompt: 你是调研员。只完成分配给你的子任务，基于可用资料给出简洁、可核对的结论；不要编造出处。
+    tools:
+      - read_text_file
+  - id: aggregator
+    name: 汇总
+    prompt: 你是汇总者。整合各子任务结论，去重、标注分歧，输出一段结构化结论。
+    tools: []
+steps:
+  - id: plan
+    role: planner
+    mode: single
+  - id: research
+    role: researcher
+    mode: parallel
+    fanout:
+      from: plan
+      limit: 4
+    inputs:
+      - plan
+aggregate:
+  role: aggregator
+  inputs:
+    - research

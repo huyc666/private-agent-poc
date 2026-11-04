@@ -134,6 +134,15 @@ CUSTOM_TOOLS_DIR = Path(os.environ.get("CUSTOM_TOOLS_DIR", str(PROJECT_ROOT / "c
 PERSONAL_CUSTOM_TOOLS_DIR = Path(os.environ.get(
     "PERSONAL_CUSTOM_TOOLS_DIR", str(PROJECT_ROOT / "custom_tools_personal"))).resolve()
 
+# ---- 编排定义目录（v0.17.44，PLAN 5.1）：与 packs/skills 同资产模型----
+# 全局定义全员可见（approver/admin/开放模式创建，走审批）；个人定义仅本人可见
+# （user 角色自助）。执行前按内容 hash 快照，运行中改文件不影响本次语义。
+ORCHESTRATIONS_DIR = Path(os.environ.get(
+    "ORCHESTRATIONS_DIR", str(PROJECT_ROOT / "orchestrations"))).resolve()
+PERSONAL_ORCHESTRATIONS_DIR = Path(os.environ.get(
+    "PERSONAL_ORCHESTRATIONS_DIR", str(PROJECT_ROOT / "orchestrations_personal"))).resolve()
+
+
 # ---- 运行时数据目录（v0.17.19：SQLite 运行库归位 data/，根目录只放工程文件）----
 _DATA_DIR = PROJECT_ROOT / "data"
 try:

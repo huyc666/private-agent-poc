@@ -38,6 +38,23 @@ logger = logging.getLogger(__name__)
 current_user = contextvars.ContextVar("usage_user", default="anonymous")
 current_session = contextvars.ContextVar("usage_session", default="")
 current_run = contextvars.ContextVar("usage_run", default="")
+# 代际栅栏（v0.17.44）：编排引擎在每步开始前校验会话代际，防止用户删会话后
+# 后台编排继续写入。stream_reply 注入；非对话路径默认 None = 不做栅栏。
+current_generation = contextvars.ContextVar("usage_generation", default=None)
+
+
+def source_from_tags(tags) -> str:
+    """按回调继承的标签判定计量来源（v0.17.44 增加 orchestration）。
+
+    优先级：orchestration > worker > main。编排引擎整体打 orchestration 标签，
+    子 agent 内层即使带 ma_worker 也归到编排，避免把编排成本拆到系统侧。
+    """
+    tags = tags or []
+    if "orchestration" in tags:
+        return "orchestration"
+    if "ma_worker" in tags:
+        return "worker"
+    return "main"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -228,8 +245,9 @@ class UsageCallback:
                     u = getattr(msg, "usage_metadata", None) or {}
                     model = (getattr(msg, "response_metadata", None) or {}).get(
                         "model_name") or config.MODEL_NAME
-                    # 多 Agent worker 的调用带 ma_worker 标签时标记来源
-                    source = "worker" if "ma_worker" in (kwargs.get("tags") or []) else "main"
+                    # 多 Agent worker 的调用带 ma_worker 标签时标记来源；
+                    # 编排引擎整体带 orchestration 标签，优先归到编排（v0.17.44）
+                    source = source_from_tags(kwargs.get("tags"))
                     record(model, u, source, duration_ms=dur)
                 except Exception:
                     pass  # 计量失败绝不阻塞主链路
@@ -241,7 +259,7 @@ class UsageCallback:
                         st = starts.pop(rid, None)
                     dur = int((_mono() - st) * 1000) if st is not None else 0
                     # 失败时拿不到响应元数据，模型名近似取当前配置
-                    source = "worker" if "ma_worker" in (kwargs.get("tags") or []) else "main"
+                    source = source_from_tags(kwargs.get("tags"))
                     record("", {}, source, duration_ms=dur, status="error")
                 except Exception:
                     pass  # 计量失败绝不阻塞主链路

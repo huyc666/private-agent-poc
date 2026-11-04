@@ -31,6 +31,8 @@ _ENV_DEFAULTS = {
     "CUSTOM_TOOLS_DIR": str(_TMP / "custom_tools"),
     "PERSONAL_CUSTOM_TOOLS_DIR": str(_TMP / "custom_tools_personal"),
     "PACKS_DIR": str(_TMP / "packs"),
+    "ORCHESTRATIONS_DIR": str(_TMP / "orchestrations"),
+    "PERSONAL_ORCHESTRATIONS_DIR": str(_TMP / "orchestrations_personal"),
     "LANGFUSE_ENABLED": "false",   # 观测默认关闭
     "SANDBOX_URL": "",              # 沙箱不可达 → auto 模式回退 local / fail-closed
     "PACK_SIGNING_KEY": "",
@@ -60,6 +62,8 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CUSTOM_TOOLS_DIR", tmp_path / "custom_tools")
     monkeypatch.setattr(config, "PERSONAL_CUSTOM_TOOLS_DIR", tmp_path / "custom_tools_personal")
     monkeypatch.setattr(config, "PACKS_DIR", tmp_path / "packs")
+    monkeypatch.setattr(config, "ORCHESTRATIONS_DIR", tmp_path / "orchestrations")
+    monkeypatch.setattr(config, "PERSONAL_ORCHESTRATIONS_DIR", tmp_path / "orchestrations_personal")
     # 模块级缓存 / 内存态复位
     packs.invalidate_scan_cache()
     packs._disabled.clear()
@@ -68,17 +72,23 @@ def isolated_env(tmp_path, monkeypatch):
     # tombstone 进程内缓存（v0.17.38）随 STATE_DB 逐测试切换一并清空，
     # 否则上一测试（独立库）的已删会话会以同 ID 污染本测试的栅栏判定
     sessions._deleted_cache.clear()
+    # 编排工具集缓存（v0.17.44）按定义 hash+身份缓存，逐测试切换包/工具后清空
+    from server import orchestration
+    orchestration._TOOL_CACHE.clear()
     # 对话上下文复位（多用户隔离用例依赖 usage.current_user）
     tokens = [usage.current_user.set("anonymous"),
               usage.current_session.set(""),
               usage.current_run.set(""),
+              # 编排代际栅栏上下文（v0.17.44）逐测试复位
+              usage.current_generation.set(None),
               # 请求级身份快照（v0.17.39）逐测试复位，防跨用例泄漏
               usage.current_identity.set(None)]
     yield
     usage.current_user.reset(tokens[0])
     usage.current_session.reset(tokens[1])
     usage.current_run.reset(tokens[2])
-    usage.current_identity.reset(tokens[3])
+    usage.current_generation.reset(tokens[3])
+    usage.current_identity.reset(tokens[4])
 
 
 @pytest.fixture

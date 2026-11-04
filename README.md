@@ -1,10 +1,12 @@
 # Private Agent POC — 私有化 Agent 开发运行框架
 
-**版本：v0.17.43**（2026-11-03）
+**版本：v0.17.44**（2026-11-04）
 
 最小可运行的私有化 Agent 框架：**vLLM（Qwen 27B）+ LangGraph（Agent 循环 + 多 Agent 编排）+ MCP（工具协议）+ Skills（技能系统）+ 对话式自定义工具 + 人工审批流 + 代码沙箱 + 知识库问答（RAG，五类文档入库 + 混合检索 + 出处标注与点击定位 + 部门专属库隔离与跨领域知识库共享）+ API 认证与多用户（部门/角色/专属域 + 管理控制台）+ 用量计量（token / 金额 / 健康度 / 部门报表）+ Langfuse 观测 + FastAPI（SSE 流式接口）+ 离线聊天前端**。
 
 ## 版本记录
+
+- **v0.17.44**：通用多角色编排引擎（PLAN 5.1，spec：docs/specs/5.1-general-orchestration.md，八项取舍经用户裁决）——多角色流程从配置文件或对话式 `create_orchestration` 工具定义（名称/版本/角色/步骤/可选汇总/并发上限），角色按「规划→并行执行→汇总」或任意串行阶段分工；`run_orchestration` 按定义执行，旧的 `orchestrate_subtasks` 原样保留作回归基准。安全边界：子角色只能用安全工具清单（读文件/列文档/存产出/有权限的领域包工具/白名单 MCP），删除/审批/管理类工具在定义校验与执行两层都被拒绝；子执行身份是发起者不可变身份快照，定义作者权限不放大发起者的检索范围，全局定义创建走审批、个人定义自助，编排不绕过审批与沙箱令牌，沙箱不可达即拒绝启动；并发受定义上限与全局硬顶 4 约束，失败即停不自动重试；用量全部计入发起者父 run 并标 `source=orchestration`。内置调研与审核-修订-复核两份示例定义。TRAE-code-review 双子代理评审 10 条候选（8 条主清单 + 2 条补充）全部确认并修复：包工具静态白名单、执行层安全清单兜底、fanout 子任务数不被并发硬顶截断、角色工具缓存键补 role_id、预算按真实模型调用计数、代际/预算中止点名失败步骤、重名包工具元数据先到先得、全局创建审批后二次存在性检查、代际中止补充产出/审批断言、包工具不得覆盖同名内置工具。新增 104 个离线用例，全量 888 个用例通过（18 skipped 语义不变）。
 
 - **v0.17.43**：工程度量一期补齐（S2/S3/S5）——①S3 端点拒绝映射落地并补缺口：按 `server/main.py` 与 `server/routes/*.py` 实际注册的 35 个端点建 `docs/reviews/endpoint-deny-mapping.md`，31 个有真实拒绝用例覆盖、4 个公开端点、0 纯缺口；新增 `tests/test_endpoint_deny_gaps.py` 32 条用例，补齐管理端五个写端点专属 401/403/开放模式 400（并断言被拒无副作用）、`/vendor/{name}` 穿越 404（`%2E%2E` / 反斜杠真实构造）、approvals/uploads/usage 未认证 401、logout 未认证 401、audit/export 401 与 approver 403。②S2 覆盖率三文件达标：skills 85%→99%、custom_tools 82%→100%、sandbox/server 81%→100%，整体 89%→92%，新增 53 条用例聚焦角色/域守卫、越权、非法输入、异常兜底与清理失败，不堆正向用例。③S5 依赖收敛：pypdf→6.21.4、langgraph-checkpoint-postgres→3.2.0，pip-audit OSV 复扫直接依赖命中 3→1（总命中 119/10 包→107/8 包）；fastmcp 1 条仍存（GHSA-7xgj-8392-5q4r），因 4.x 需先验证与 mcp 1.x 锁定行兼容，requirements.txt 与 ENGINEERING-METRICS 均留明确注记，不隐藏。TRAE-code-review 各批执行：A 批修复 2 项弱断言（改密被拒改查库断言散列为空、401 场景补目标用户未被改动），B/C 批无阻断问题。全量 784 个用例通过（18 skipped 语义不变）。
 

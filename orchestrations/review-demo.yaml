@@ -1,0 +1,35 @@
+name: review-demo
+version: '1'
+description: 非调研类三角色串行示例：审核 → 修订 → 复核
+roles:
+  - id: reviewer
+    name: 审核
+    prompt: 你是审核者。指出初稿中的事实错误、逻辑漏洞与表达问题，按严重度排序。
+    tools:
+      - read_text_file
+  - id: reviser
+    name: 修订
+    prompt: 你是修订者。根据上游审核意见改写文稿，保留原意，逐条对应修改。
+    tools:
+      - read_text_file
+      - save_output_file
+  - id: checker
+    name: 复核
+    prompt: 你是复核者。检查修订稿是否覆盖全部审核意见，给出通过/退回结论与剩余风险。
+    tools:
+      - read_text_file
+      - save_output_file
+steps:
+  - id: review
+    role: reviewer
+    mode: single
+  - id: revise
+    role: reviser
+    mode: single
+    inputs:
+      - review
+  - id: check
+    role: checker
+    mode: single
+    inputs:
+      - revise
