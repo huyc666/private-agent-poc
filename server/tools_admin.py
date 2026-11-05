@@ -341,14 +341,18 @@ async def orchestrate_subtasks(task: str) -> str:
         return f"多 Agent 编排执行失败（{type(e).__name__}），请稍后重试"
 
 
-async def run_orchestration(name: str, task: str) -> str:
-    """按已创建的编排定义执行一次多角色流程（v0.17.44，PLAN 5.1）。
+async def run_orchestration(name: str, task: str = "",
+                            params: dict | None = None) -> str:
+    """按已创建的编排定义执行一次多角色流程（v0.17.44，PLAN 5.1；
+    v0.17.46 起支持参数，PLAN 4.1）。
     定义由配置文件或 create_orchestration 工具创建；子角色只能使用安全工具
     清单中、且发起者本人有权限使用的工具；全局定义全员可见，个人定义仅本人
     可见。适合固定角色分工的流程（审核-修订-复核、拆解-调研-汇总等）；
-    一次性自由拆解仍可用 orchestrate_subtasks。name 为定义名，task 为总任务。"""
+    一次性自由拆解仍可用 orchestrate_subtasks。name 为定义名；task 为总任务
+    （定义含 task_template 时可省略）；params 为可选参数对象，须与定义声明的
+    params 匹配（缺必填/未知参数/类型不符/超长会被拒绝且不产生实例）。"""
     from . import orchestration
-    return await orchestration.run_orchestration(name, task)
+    return await orchestration.run_orchestration(name, task, params=params)
 
 
 async def create_orchestration(content: str, overwrite: bool = False) -> str:
@@ -360,6 +364,23 @@ async def create_orchestration(content: str, overwrite: bool = False) -> str:
     return await orchestration.create_orchestration(content, overwrite=overwrite)
 
 
+def list_orchestrations() -> str:
+    """列举当前身份可见的编排定义（名称/版本/描述/参数声明/归属，
+    v0.17.46，PLAN 4.1）。只读、无审批门。触发流程前先用本工具发现
+    可用定义及其参数要求，再用 run_orchestration 触发。"""
+    from . import orchestration
+    return orchestration.list_orchestrations()
+
+
+def list_workflow_instances(definition_name: str = "", limit: int = 20) -> str:
+    """查询流程执行实例历史（实例 ID/定义/状态/发起者/开始时间，
+    v0.17.46，PLAN 4.1）。definition_name 可选，按定义名过滤；limit 默认 20、
+    上限 100。只读、无审批门；普通用户仅见本人发起的实例。"""
+    from . import orchestration
+    return orchestration.list_workflow_instances(
+        definition_name=definition_name, limit=limit)
+
+
 # ---------------------------------------------------------------- 工具装配清单
 
 BUILTIN_TOOLS = [read_text_file, list_uploaded_docs, save_output_file,
@@ -369,7 +390,8 @@ BUILTIN_TOOLS = [read_text_file, list_uploaded_docs, save_output_file,
                  run_custom_tool,
                  list_packs, enable_pack, disable_pack, create_pack, delete_pack,
                  sign_pack, orchestrate_subtasks,
-                 run_orchestration, create_orchestration]
+                 run_orchestration, create_orchestration,
+                 list_orchestrations, list_workflow_instances]
 
 
 def builtin_langchain_tools() -> list:
@@ -442,4 +464,10 @@ def builtin_langchain_tools() -> list:
         StructuredTool.from_function(
             coroutine=create_orchestration, name="create_orchestration",
             description=create_orchestration.__doc__),
+        StructuredTool.from_function(
+            func=list_orchestrations, name="list_orchestrations",
+            description=list_orchestrations.__doc__),
+        StructuredTool.from_function(
+            func=list_workflow_instances, name="list_workflow_instances",
+            description=list_workflow_instances.__doc__),
     ]

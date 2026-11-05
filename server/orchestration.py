@@ -1,13 +1,20 @@
-"""通用多角色编排引擎（v0.17.44，PLAN 5.1，spec docs/specs/5.1-general-orchestration.md）。
+"""通用多角色编排引擎（v0.17.46，PLAN 5.1 + 4.1）。
+
+- 5.1（spec docs/specs/5.1-general-orchestration.md）：声明式定义与执行引擎。
+- 4.1（spec docs/specs/4.1-workflow-solidification.md）：流程固化层——
+  参数化定义（params/task_template）、实例留存（workflow_instances 表）、
+  步骤级进度事件（wf_progress）、可发现触发（列举工具）。
 
 设计要点：
 - 定义是数据（YAML），引擎不 exec/eval；加载期与执行期双重校验，fail-closed。
+  唯一例外是 task_template 的 {{参数}} 单遍字面替换（不递归、不求值）。
 - 子执行身份是发起者 usage.Identity 的不可变快照：入口读一次、显式参数下传、
   每个执行边界与每次模型调用前重设，禁止依赖调用栈恰好共享 ContextVar。
 - 工具装配层按发起者身份过滤（包级 RBAC），执行层再包一层危险工具拒绝 +
   身份重设；两层同时存在。
 - 复用 packs / custom_tools / sandbox 既有构建器与守卫，不另造权限判定。
 - 失败语义 fail-fast、不重试；计量全部计入父 run，source=orchestration。
+- 实例落库是记录不是执行前提：写入失败仅记日志，绝不阻塞主链路。
 """
 import asyncio
 import hashlib
@@ -15,10 +22,14 @@ import json
 import logging
 import os
 import re
+import secrets
+import sqlite3
 import threading
+import time
 from pathlib import Path
 
 import yaml
+from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import StructuredTool
 
@@ -60,10 +71,22 @@ _ABS_PATH_RE = re.compile(
     r"(?:[A-Za-z]:[\\/]|(?:^|[^\w])/(?:etc|home|root|var|usr|tmp|opt|proc|sys)/)")
 
 _TOP_KEYS = {"name", "version", "description", "max_parallel", "on_error",
-             "roles", "steps", "aggregate"}
+             "roles", "steps", "aggregate", "params", "task_template"}
 _ROLE_KEYS = {"id", "name", "prompt", "tools"}
 _STEP_KEYS = {"id", "role", "mode", "fanout", "inputs"}
 _AGG_KEYS = {"role", "inputs"}
+
+# ---- 4.1 流程固化：参数模型 / 实例留存 / 进度事件 -------------------------
+_PARAM_KEYS = {"name", "type", "description", "required", "default"}
+_PARAM_TYPES = ("string", "int", "float", "bool")
+_PARAM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,29}$")
+# 单遍字面替换：不递归展开、不求值；参数值中的 {{...}} 按字面保留。
+_TEMPLATE_REF_RE = re.compile(r"\{\{\s*([a-z0-9_]+)\s*\}\}")
+MAX_PARAM_VALUE_LEN = 2000          # 单个参数值运行期长度上限（防成本放大）
+INSTANCE_OUTPUT_TRUNCATE = 2000     # 每个产出留存上限（与工具结果截断同口径）
+INSTANCE_SUMMARY_TRUNCATE = 2000
+INSTANCE_ERROR_TRUNCATE = 500
+WF_PROGRESS_EVENT = "wf_progress"   # 进度 custom event 名（SSE 侧白名单）
 
 _CACHE_LOCK = threading.Lock()
 _TOOL_CACHE: dict[tuple, tuple] = {}
@@ -99,6 +122,65 @@ def _abs_path_in(value) -> bool:
     return False
 
 
+def _param_value_ok(ptype: str, value) -> bool:
+    """参数值与声明类型是否匹配（bool 不是 int/float，严格区分）。"""
+    if ptype == "string":
+        return isinstance(value, str)
+    if ptype == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if ptype == "float":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if ptype == "bool":
+        return isinstance(value, bool)
+    return False
+
+
+def _validate_params_block(definition: dict, errors: list[str]) -> None:
+    """校验 params/task_template（4.1）；错误追加进 errors。"""
+    declared: set[str] = set()
+    params = definition.get("params")
+    if params is not None:
+        if not isinstance(params, list) or not params:
+            errors.append("params 必须是参数声明对象组成的非空列表")
+        else:
+            for i, p in enumerate(params):
+                if not isinstance(p, dict):
+                    errors.append(f"第 {i + 1} 个参数声明必须是对象")
+                    continue
+                unknown = sorted(set(p) - _PARAM_KEYS)
+                if unknown:
+                    errors.append(f"参数声明包含未知字段：{', '.join(unknown)}")
+                pname = p.get("name")
+                label = pname if isinstance(pname, str) and pname else i + 1
+                if not isinstance(pname, str) or not _PARAM_NAME_RE.match(pname):
+                    errors.append(f"参数名「{pname}」必须是 1~30 位小写字母/数字/"
+                                  "下划线（slug）")
+                elif pname in declared:
+                    errors.append(f"参数名「{pname}」重复")
+                else:
+                    declared.add(pname)
+                ptype = p.get("type", "string")
+                if ptype not in _PARAM_TYPES:
+                    errors.append(f"参数「{label}」的类型非法"
+                                  f"（仅 {'/'.join(_PARAM_TYPES)}）")
+                elif "default" in p and not _param_value_ok(ptype, p["default"]):
+                    errors.append(f"参数「{label}」的 default 值与类型不符")
+                required = p.get("required", False)
+                if not isinstance(required, bool):
+                    errors.append(f"参数「{label}」的 required 必须是布尔值")
+                desc = p.get("description")
+                if desc is not None and not isinstance(desc, str):
+                    errors.append(f"参数「{label}」的 description 必须是字符串")
+    template = definition.get("task_template")
+    if template is not None:
+        if not isinstance(template, str) or not template.strip():
+            errors.append("task_template 必须是非空字符串")
+        else:
+            for ref in sorted(set(_TEMPLATE_REF_RE.findall(template))):
+                if ref not in declared:
+                    errors.append(f"task_template 引用了未声明参数「{ref}」")
+
+
 def validate_definition(definition: dict) -> list[str]:
     """返回错误列表；空列表 = 可执行。错误文案不回显绝对路径。"""
     errors: list[str] = []
@@ -127,6 +209,8 @@ def validate_definition(definition: dict) -> list[str]:
     on_error = definition.get("on_error", "fail-fast")
     if on_error != "fail-fast":
         errors.append("on_error 仅支持 fail-fast（不自动重试）")
+
+    _validate_params_block(definition, errors)
 
     roles = definition.get("roles")
     if not isinstance(roles, list) or not roles:
@@ -584,7 +668,8 @@ async def _run_react(ctx: _Context, llm, tools: list, messages: list) -> str:
 
 def _failure(definition: dict, hash_value: str, *, error: str,
              failed_step: str = "", outputs: dict | None = None,
-             findings: list | None = None, subtasks: list | None = None) -> dict:
+             findings: list | None = None, subtasks: list | None = None,
+             aborted: bool = False) -> dict:
     return {
         "ok": False,
         "name": definition.get("name", "") if isinstance(definition, dict) else "",
@@ -597,13 +682,19 @@ def _failure(definition: dict, hash_value: str, *, error: str,
         "completed": False,
         "failed_step": failed_step,
         "error": error,
+        "aborted": aborted,
     }
 
 
 async def execute(definition: dict, task: str, *, identity: usage.Identity,
                   session_id: str = "", generation: int | None = None,
-                  run_id: str | None = None, llm=None) -> dict:
-    """执行一份定义。所有失败都以结构化结果返回，不抛裸异常。"""
+                  run_id: str | None = None, llm=None, on_progress=None) -> dict:
+    """执行一份定义。所有失败都以结构化结果返回，不抛裸异常。
+
+    on_progress（4.1）：可选异步回调，关键字参数 (step, step_index,
+    total_steps, status, detail)，在每步（含并行步骤整体与 aggregate）的
+    start/end/fail 时点调用；回调异常只记日志，绝不影响执行结果。
+    """
     if not isinstance(identity, usage.Identity):
         return _failure({}, "", error="编排需要显式身份快照，已拒绝")
     if custom_tools.exec_mode() == "sandbox-down":
@@ -628,59 +719,84 @@ async def execute(definition: dict, task: str, *, identity: usage.Identity,
     findings: list = []
     subtasks: list = []
     failed_step = ""
+    total_steps = len(definition["steps"]) + (1 if definition.get("aggregate") else 0)
+
+    async def _progress(step_id: str, index: int, status: str, detail: str = ""):
+        if on_progress is None:
+            return
+        try:
+            await on_progress(step=step_id, step_index=index,
+                              total_steps=total_steps, status=status, detail=detail)
+        except Exception as e:
+            logger.warning("[orchestration] 进度回调失败（%s），忽略",
+                           type(e).__name__)
+
     try:
-        for step in definition["steps"]:
+        for step_index, step in enumerate(definition["steps"], start=1):
             sid = step["id"]
             failed_step = sid
             ctx.check_fence()
             ctx.bind()
-            role = next(r for r in definition["roles"] if r["id"] == step["role"])
-            tools = role_tools(definition, step["role"], identity)
-            inputs = step.get("inputs") or []
-            if step.get("mode", "single") == "parallel":
-                src = step["fanout"]["from"]
-                fanout_limit = int(step["fanout"].get("limit", GLOBAL_MAX_PARALLEL))
-                # fanout.limit 决定子任务数量；全局硬顶只约束同时执行数
-                parse_limit = fanout_limit
-                concurrency = min(fanout_limit,
-                                  int(definition.get("max_parallel", GLOBAL_MAX_PARALLEL)),
-                                  GLOBAL_MAX_PARALLEL)
-                subtasks = _parse_fanout(outputs.get(src, ""), parse_limit, task)
-                findings_for_step = await _run_parallel(
-                    ctx, use_llm, tools, role, identity, task, outputs,
-                    inputs, subtasks, concurrency)
-                findings.extend(findings_for_step)
-                outputs[sid] = "\n\n".join(
-                    f"【子任务】{f['subtask']}\n【结果】{f['result']}"
-                    for f in findings_for_step)
-            else:
-                messages = _step_messages(role, identity, task, outputs, inputs)
-                if tools:
-                    out = await _run_react(ctx, use_llm, tools, messages)
+            await _progress(sid, step_index, "start")
+            try:
+                role = next(r for r in definition["roles"] if r["id"] == step["role"])
+                tools = role_tools(definition, step["role"], identity)
+                inputs = step.get("inputs") or []
+                if step.get("mode", "single") == "parallel":
+                    src = step["fanout"]["from"]
+                    fanout_limit = int(step["fanout"].get("limit", GLOBAL_MAX_PARALLEL))
+                    # fanout.limit 决定子任务数量；全局硬顶只约束同时执行数
+                    parse_limit = fanout_limit
+                    concurrency = min(fanout_limit,
+                                      int(definition.get("max_parallel", GLOBAL_MAX_PARALLEL)),
+                                      GLOBAL_MAX_PARALLEL)
+                    subtasks = _parse_fanout(outputs.get(src, ""), parse_limit, task)
+                    findings_for_step = await _run_parallel(
+                        ctx, use_llm, tools, role, identity, task, outputs,
+                        inputs, subtasks, concurrency)
+                    findings.extend(findings_for_step)
+                    outputs[sid] = "\n\n".join(
+                        f"【子任务】{f['subtask']}\n【结果】{f['result']}"
+                        for f in findings_for_step)
                 else:
-                    out = await _run_direct(ctx, use_llm, messages)
-                outputs[sid] = out
+                    messages = _step_messages(role, identity, task, outputs, inputs)
+                    if tools:
+                        out = await _run_react(ctx, use_llm, tools, messages)
+                    else:
+                        out = await _run_direct(ctx, use_llm, messages)
+                    outputs[sid] = out
+            except Exception:
+                await _progress(sid, step_index, "fail")
+                raise
+            await _progress(sid, step_index, "end")
 
         aggregate = definition.get("aggregate")
         if aggregate:
             failed_step = "aggregate"
-            role = next(r for r in definition["roles"]
-                        if r["id"] == aggregate["role"])
-            tools = role_tools(definition, aggregate["role"], identity)
-            messages = _step_messages(role, identity, task, outputs,
-                                      aggregate.get("inputs") or [])
-            if tools:
-                summary = await _run_react(ctx, use_llm, tools, messages)
-            else:
-                summary = await _run_direct(ctx, use_llm, messages)
+            agg_index = len(definition["steps"]) + 1
+            await _progress("aggregate", agg_index, "start")
+            try:
+                role = next(r for r in definition["roles"]
+                            if r["id"] == aggregate["role"])
+                tools = role_tools(definition, aggregate["role"], identity)
+                messages = _step_messages(role, identity, task, outputs,
+                                          aggregate.get("inputs") or [])
+                if tools:
+                    summary = await _run_react(ctx, use_llm, tools, messages)
+                else:
+                    summary = await _run_direct(ctx, use_llm, messages)
+            except Exception:
+                await _progress("aggregate", agg_index, "fail")
+                raise
             outputs["aggregate"] = summary
+            await _progress("aggregate", agg_index, "end")
         else:
             summary = outputs.get(definition["steps"][-1]["id"], "")
         summary = summary or "（整合结果为空）"
     except _FenceAbort as e:
         return _failure(definition, hash_value, error=str(e),
                         failed_step=failed_step, outputs=outputs,
-                        findings=findings, subtasks=subtasks)
+                        findings=findings, subtasks=subtasks, aborted=True)
     except _BudgetAbort as e:
         return _failure(definition, hash_value, error=str(e),
                         failed_step=failed_step, outputs=outputs,
@@ -705,6 +821,7 @@ async def execute(definition: dict, task: str, *, identity: usage.Identity,
         "completed": True,
         "failed_step": "",
         "error": "",
+        "aborted": False,
     }
 
 
@@ -794,8 +911,155 @@ def _identity_from_context() -> usage.Identity:
         auth_source="open" if not auth.enabled() else "local")
 
 
-async def run_orchestration(name: str, task: str) -> str:
-    """按已创建的编排定义执行一次多角色流程（工具入口）。"""
+# ---- 4.1：参数渲染与触发校验 ----------------------------------------------
+
+
+def render_task_template(template: str, values: dict) -> str:
+    """单遍字面替换 {{参数名}}；不递归展开、不求值（唯一允许的模板例外）。"""
+    return _TEMPLATE_REF_RE.sub(
+        lambda m: str(values.get(m.group(1), m.group(0))), template)
+
+
+def _resolve_trigger_params(definition: dict,
+                            params: dict | None) -> tuple[dict, str]:
+    """触发参数校验：返回 (渲染值字典, 错误文案)；成功时错误为空串。
+
+    缺必填/未知参数/类型不符/超长一律拒绝（fail-closed，不创建实例行）。
+    """
+    declared = definition.get("params") or []
+    provided = params or {}
+    if not isinstance(provided, dict):
+        return {}, "params 必须是参数名到值的对象"
+    values: dict = {}
+    for p in declared:
+        name = p.get("name")
+        if not isinstance(name, str):
+            continue
+        ptype = p.get("type", "string")
+        if name in provided:
+            value = provided[name]
+            if isinstance(value, str) and len(value) > MAX_PARAM_VALUE_LEN:
+                return {}, f"参数「{name}」的值超过 {MAX_PARAM_VALUE_LEN} 字符上限"
+            if not _param_value_ok(ptype, value):
+                return {}, f"参数「{name}」类型不符（期望 {ptype}）"
+            values[name] = value
+        elif p.get("required"):
+            return {}, f"缺少必填参数「{name}」"
+        else:
+            values[name] = p.get("default", "")
+    unknown = sorted(set(provided) - set(values))
+    if unknown:
+        return {}, f"未知参数：{', '.join(unknown)}"
+    return values, ""
+
+
+# ---- 4.1：流程实例留存（STATE_DB 新表，写入尽力而为不阻塞主链路）-----------
+
+_WF_LOCK = threading.Lock()
+
+
+def _wf_connect() -> sqlite3.Connection:
+    path = Path(config.STATE_DB)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=3000")
+    return conn
+
+
+def _wf_ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS workflow_instances (
+            instance_id        TEXT PRIMARY KEY,
+            definition_name    TEXT NOT NULL,
+            definition_version TEXT NOT NULL,
+            definition_hash    TEXT NOT NULL,
+            initiator          TEXT NOT NULL,
+            department         TEXT NOT NULL DEFAULT '',
+            session_id         TEXT NOT NULL DEFAULT '',
+            run_id             TEXT NOT NULL DEFAULT '',
+            params_json        TEXT NOT NULL DEFAULT '{}',
+            status             TEXT NOT NULL,
+            failed_step        TEXT NOT NULL DEFAULT '',
+            error              TEXT NOT NULL DEFAULT '',
+            started_at         REAL NOT NULL,
+            finished_at        REAL,
+            outputs_json       TEXT NOT NULL DEFAULT '{}',
+            summary            TEXT NOT NULL DEFAULT ''
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_wf_initiator"
+                 " ON workflow_instances(initiator)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_wf_started"
+                 " ON workflow_instances(started_at)")
+
+
+def _new_instance_id() -> str:
+    return "wfi-" + secrets.token_hex(6)
+
+
+def create_instance_row(definition: dict, identity: usage.Identity,
+                        values: dict, def_hash: str) -> str | None:
+    """创建 running 实例行；失败仅记日志返回 None（实例是记录，不是执行前提）。"""
+    instance_id = _new_instance_id()
+    try:
+        with _WF_LOCK:
+            conn = _wf_connect()
+            try:
+                _wf_ensure_schema(conn)
+                conn.execute(
+                    "INSERT INTO workflow_instances (instance_id,"
+                    " definition_name, definition_version, definition_hash,"
+                    " initiator, department, session_id, run_id, params_json,"
+                    " status, started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (instance_id, definition.get("name", ""),
+                     str(definition.get("version", "1")), def_hash,
+                     identity.username or "anonymous", identity.department or "",
+                     usage.current_session.get() or "", usage.current_run.get() or "",
+                     json.dumps(values, ensure_ascii=False, default=str),
+                     "running", time.time()))
+                conn.commit()
+            finally:
+                conn.close()
+        return instance_id
+    except Exception as e:
+        logger.error("[orchestration] 实例创建写入失败（%s），执行继续",
+                     type(e).__name__)
+        return None
+
+
+def finish_instance_row(instance_id: str | None, *, status: str,
+                        failed_step: str = "", error: str = "",
+                        outputs: dict | None = None, summary: str = "") -> None:
+    """回写终态与产出（截断口径防 DB 膨胀）；失败仅记日志。"""
+    if not instance_id:
+        return
+    outputs_json = json.dumps(
+        {k: str(v)[:INSTANCE_OUTPUT_TRUNCATE] for k, v in (outputs or {}).items()},
+        ensure_ascii=False, default=str)
+    try:
+        with _WF_LOCK:
+            conn = _wf_connect()
+            try:
+                _wf_ensure_schema(conn)
+                conn.execute(
+                    "UPDATE workflow_instances SET status=?, failed_step=?,"
+                    " error=?, finished_at=?, outputs_json=?, summary=?"
+                    " WHERE instance_id=?",
+                    (status, failed_step or "",
+                     (error or "")[:INSTANCE_ERROR_TRUNCATE], time.time(),
+                     outputs_json, (summary or "")[:INSTANCE_SUMMARY_TRUNCATE],
+                     instance_id))
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error("[orchestration] 实例终态写入失败（%s）", type(e).__name__)
+
+
+async def run_orchestration(name: str, task: str = "",
+                            params: dict | None = None) -> str:
+    """按已创建的编排定义执行一次多角色流程（工具入口，4.1 起支持参数）。"""
     if STATE.llm is None:
         return "多角色编排需要真实模型支持（当前为 Mock 模式）"
     identity = _identity_from_context()
@@ -805,19 +1069,183 @@ async def run_orchestration(name: str, task: str) -> str:
     loaded = load_definition(resolved["path"])
     if loaded["status"] != "ok":
         return f"编排未执行：定义校验失败（{loaded['error']}）"
+    definition = loaded["definition"]
+    values, perr = _resolve_trigger_params(definition, params)
+    if perr:
+        return f"编排未执行：{perr}"
+    template = definition.get("task_template")
+    if task and task.strip():
+        final_task = task  # 显式任务优先于模板
+    elif isinstance(template, str) and template.strip():
+        final_task = render_task_template(template, values)
+    else:
+        return "编排未执行：需要提供任务描述（task），或定义包含 task_template"
+    instance_id = create_instance_row(definition, identity, values, loaded["hash"])
+
+    async def _emit_progress(*, step: str, step_index: int, total_steps: int,
+                             status: str, detail: str = "") -> None:
+        # 尽力而为：脱离 runnable 上下文（如直接调用/测试路径）时吞掉异常
+        try:
+            await adispatch_custom_event(WF_PROGRESS_EVENT, {
+                "instance_id": instance_id or "",
+                "definition": definition.get("name", ""),
+                "step": step, "step_index": step_index,
+                "total_steps": total_steps, "status": status, "detail": detail})
+        except Exception as e:
+            logger.debug("[orchestration] 进度事件发送失败（%s），忽略",
+                         type(e).__name__)
+
     result = await execute(
-        loaded["definition"], task, identity=identity,
+        definition, final_task, identity=identity,
         session_id=usage.current_session.get(),
         generation=usage.current_generation.get(),
-        run_id=usage.current_run.get(), llm=STATE.llm)
+        run_id=usage.current_run.get(), llm=STATE.llm,
+        on_progress=_emit_progress)
+    if result["ok"]:
+        finish_instance_row(instance_id, status="completed",
+                            outputs=result.get("outputs"),
+                            summary=result.get("summary", ""))
+    else:
+        finish_instance_row(
+            instance_id,
+            status="aborted" if result.get("aborted") else "failed",
+            failed_step=result.get("failed_step", ""),
+            error=result.get("error", ""),
+            outputs=result.get("outputs"),
+            summary=result.get("summary", ""))
+    suffix = f"\n实例 ID：{instance_id}" if instance_id else ""
     if not result["ok"]:
         step = f"步骤「{result['failed_step']}」" if result["failed_step"] else ""
-        return f"多角色编排执行失败{step}（{result['error']}）"
+        return f"多角色编排执行失败{step}（{result['error']}）" + suffix
     return (f"多角色编排完成：定义「{result['name']}」（v{result['version']}），"
             f"{len(result['outputs'])} 个产出节点，"
             f"{len(result['findings'])} 个并行子任务。\n"
             f"子任务清单：{json.dumps(result['subtasks'], ensure_ascii=False)}\n\n"
-            f"{result['summary']}")
+            f"{result['summary']}" + suffix)
+
+
+# ---- 4.1：可发现触发（只读列举，无审批门）----------------------------------
+
+
+def _load_yaml_lenient(path: Path) -> dict | None:
+    """宽松加载定义 YAML：损坏/非对象返回 None（列举跳过，不崩溃）。"""
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _format_params_line(params) -> str:
+    parts = []
+    for p in params or []:
+        if not isinstance(p, dict):
+            continue
+        seg = f"{p.get('name', '?')}（{p.get('type', 'string')}"
+        if p.get("required"):
+            seg += "，必填"
+        if "default" in p:
+            seg += f"，默认：{p['default']}"
+        parts.append(seg + "）")
+    return "；".join(parts)
+
+
+def list_orchestrations() -> str:
+    """列举当前身份可见的编排定义（名称/版本/描述/参数声明/归属）。
+
+    可见性：user = 本人个人定义 + 全局；approver/admin = 全局 + 全部个人；
+    开放模式 = 仅全局（与 list_custom_tools 同口径）。
+    """
+    identity = _identity_from_context()
+    show_all_personal = False
+    personal_scope: str | None = None
+    if auth.enabled():
+        if identity.role in ("approver", "admin"):
+            show_all_personal = True
+        elif identity.role == "user" and identity.username \
+                and identity.username != "anonymous":
+            personal_scope = config.user_scope(identity.username)
+
+    entries: list[tuple[str, dict]] = []  # (归属标签, 定义)
+    for path in sorted(Path(config.ORCHESTRATIONS_DIR).glob("*.yaml")):
+        data = _load_yaml_lenient(path)
+        if data:
+            entries.append(("全局", data))
+    personal_root = Path(config.PERSONAL_ORCHESTRATIONS_DIR)
+    if show_all_personal and personal_root.exists():
+        for sub in sorted(personal_root.iterdir()):
+            if not sub.is_dir():
+                continue
+            for path in sorted(sub.glob("*.yaml")):
+                data = _load_yaml_lenient(path)
+                if data:
+                    entries.append((f"个人（{sub.name}）", data))
+    elif personal_scope:
+        sub = personal_root / personal_scope
+        if sub.exists():
+            for path in sorted(sub.glob("*.yaml")):
+                data = _load_yaml_lenient(path)
+                if data:
+                    entries.append((f"个人（{personal_scope}）", data))
+
+    if not entries:
+        return "当前没有可用的编排定义（可用 create_orchestration 工具创建）。"
+    lines = []
+    for scope_label, data in entries:
+        name = data.get("name", "?")
+        version = data.get("version", "1")
+        desc = data.get("description") or ""
+        line = f"- {name}（v{version}，{scope_label}）"
+        if desc:
+            line += f"：{desc}"
+        if data.get("params"):
+            line += f"\n  参数：{_format_params_line(data.get('params'))}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def list_workflow_instances(definition_name: str = "", limit: int = 20) -> str:
+    """按身份查流程实例历史（user 仅本人；approver/admin 与开放模式全部）。"""
+    identity = _identity_from_context()
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 20
+    limit = max(1, min(limit, 100))
+    try:
+        with _WF_LOCK:
+            conn = _wf_connect()
+            try:
+                _wf_ensure_schema(conn)
+                conn.row_factory = sqlite3.Row
+                where: list[str] = []
+                args: list = []
+                if definition_name:
+                    where.append("definition_name = ?")
+                    args.append(definition_name)
+                if auth.enabled() and identity.role == "user":
+                    where.append("initiator = ?")
+                    args.append(identity.username or "")
+                sql = "SELECT * FROM workflow_instances"
+                if where:
+                    sql += " WHERE " + " AND ".join(where)
+                sql += " ORDER BY started_at DESC LIMIT ?"
+                args.append(limit)
+                rows = conn.execute(sql, args).fetchall()
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error("[orchestration] 实例历史查询失败（%s）", type(e).__name__)
+        return "流程实例查询失败，请稍后重试"
+    if not rows:
+        return "暂无流程实例历史。"
+    lines = []
+    for r in rows:
+        started = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["started_at"]))
+        lines.append(f"- {r['instance_id']} {r['definition_name']}"
+                     f"（v{r['definition_version']}）[{r['status']}]"
+                     f" 发起者：{r['initiator']} 开始：{started}")
+    return "\n".join(lines)
 
 
 def _write_scope(identity: usage.Identity) -> str | None:

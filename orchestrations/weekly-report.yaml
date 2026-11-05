@@ -1,0 +1,45 @@
+# 周报汇总示例流程（v0.17.46，PLAN 4.1 验收载体）
+# 参数化、可重复触发：每次传不同 week 即生成对应周的周报。
+# 角色与工具全部取自编排安全清单且默认加载可用（不依赖可选包）。
+name: weekly-report
+version: "1"
+description: 周报汇总：采集员归集上传文档素材，写作者撰写周报并落产出文件
+
+params:
+  - name: week
+    type: string
+    required: true
+    description: 周次标识，如 2026-W45
+  - name: highlights
+    type: string
+    default: "无"
+    description: 本周重点（可选）
+
+task_template: >
+  请制作 {{week}} 的周报。本周重点：{{highlights}}。
+  先由采集员归集可用素材，再由写作者成稿并将周报保存为产出文件。
+
+roles:
+  - id: collector
+    name: 素材采集员
+    prompt: >
+      你是素材采集员。使用 list_uploaded_docs 查看用户上传的文档，
+      必要时用 read_text_file 读取相关文档正文，归纳可用于周报的素材要点；
+      没有素材时如实说明。
+    tools: [list_uploaded_docs, read_text_file, get_current_time]
+  - id: writer
+    name: 周报写作者
+    prompt: >
+      你是周报写作者。基于上一步的素材要点撰写结构化周报
+      （本周进展 / 问题与风险 / 下周计划），并调用 save_output_file
+      将周报保存为 Markdown 产出文件。
+    tools: [read_text_file, save_output_file]
+
+steps:
+  - id: collect
+    role: collector
+    mode: single
+  - id: write
+    role: writer
+    mode: single
+    inputs: [collect]

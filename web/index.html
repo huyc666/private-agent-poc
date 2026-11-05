@@ -51,6 +51,10 @@
   .tool-chip { align-self: flex-start; font-size: 12.5px; color: var(--tool);
     background: #f6f2fd; border: 1px solid #e6dcf8; padding: 4px 12px; border-radius: 999px; }
   .tool-chip .result { color: var(--dim); }
+  /* 工作流步骤进度状态行（v0.17.46，PLAN 4.1）：同一轮对话复用同一元素原地更新 */
+  .wf-progress { align-self: flex-start; font-size: 11.5px; color: var(--muted);
+    background: var(--panel2, #f7f7fb); border: 1px solid var(--border, #e5e5ef);
+    padding: 3px 10px; border-radius: 6px; margin-top: 6px; }
   .approval-card { align-self: flex-start; background: var(--warning-bg); border: 1px solid var(--warning-border);
     border-left: 4px solid var(--warning-strong); border-radius: var(--radius-m); padding: 13px 16px;
     font-size: 13.5px; max-width: 76%; box-shadow: var(--shadow);
@@ -667,6 +671,7 @@ async function send() {
   let bubble = null;  // 延迟到首个 token 再创建，保证工具调用标签显示在回答之前
   const getBubble = () => bubble || (bubble = addMsg('assistant', ''));
   let streamCites = [];  // 本轮出处（citations 事件累积，流结束挂到回答气泡下）
+  let progressEl = null;  // 本轮工作流进度状态行（v0.17.46，PLAN 4.1，原地更新）
 
   try {
     const resp = await fetch('/api/chat', {
@@ -714,6 +719,20 @@ async function send() {
         }
         else if (ev.type === 'token') { closeThink(); getBubble().textContent += ev.content; chat.scrollTop = chat.scrollHeight; }
         else if (ev.type === 'tool') { closeThink(); addToolChip(ev); }
+        else if (ev.type === 'progress') {
+          // 工作流步骤进度（v0.17.46，PLAN 4.1）：当前回答下方原地更新状态行
+          closeThink();
+          getBubble();
+          if (!progressEl) {
+            progressEl = document.createElement('div');
+            progressEl.className = 'wf-progress';
+            chat.appendChild(progressEl);
+          }
+          const label = { start: '开始', end: '完成', fail: '失败' }[ev.status] || ev.status;
+          const icon = ev.status === 'end' ? '✓' : ev.status === 'fail' ? '✗' : '⚙';
+          progressEl.textContent = `${icon} 步骤 ${ev.step_index}/${ev.total_steps} · ${ev.step} ${label}`;
+          chat.scrollTop = chat.scrollHeight;
+        }
         else if (ev.type === 'citations') { streamCites.push(...(ev.citations || [])); }
         else if (ev.type === 'approval_required') addApprovalCard(ev);
         else if (ev.type === 'done') { closeThink(); addUsageNote(ev.usage); }

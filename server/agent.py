@@ -33,6 +33,13 @@ logger = logging.getLogger(__name__)
 
 _CITE_TAG = re.compile(r"<kb-citations>(\[.*?\])</kb-citations>", re.S)
 
+# 工作流进度事件白名单（v0.17.46，PLAN 4.1）：仅透传名称为 wf_progress 的
+# custom event，且只保留下列字段——其余 custom event 与字段一律忽略，
+# 防止任意事件/任意字段注入用户可见流。
+_WF_PROGRESS_NAME = "wf_progress"
+_WF_PROGRESS_FIELDS = ("instance_id", "definition", "step", "step_index",
+                       "total_steps", "status", "detail")
+
 
 def parse_citations(text: str) -> tuple[str, list | None]:
     """从知识库检索工具输出剥离机器可读出处块（v0.17.25，PLAN 2.2）。
@@ -633,6 +640,17 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
                     yield {"type": "tool", "status": "end",
                            "name": event.get("name", "?"),
                            "result": clean[:2000]}
+                elif kind == "on_custom_event":
+                    # 工作流进度（v0.17.46，PLAN 4.1）：仅透传 wf_progress，
+                    # 且只保留白名单字段；其余 custom event 一律忽略（防注入）
+                    if event.get("name") != _WF_PROGRESS_NAME:
+                        continue
+                    data = event.get("data") or {}
+                    if not isinstance(data, dict):
+                        continue
+                    progress = {k: data[k] for k in _WF_PROGRESS_FIELDS if k in data}
+                    if progress:
+                        yield {"type": "progress", **progress}
         except sessions.SessionDeletedError:
             # 评审 C4（v0.17.38）：checkpoint 栅栏异常（FencedCheckpointer 抛出，
             # 在途图执行在写点死亡）须以删除中止文案收尾——落入通用分支会被
