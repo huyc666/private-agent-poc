@@ -720,9 +720,9 @@ async function send() {
         else if (ev.type === 'token') { closeThink(); getBubble().textContent += ev.content; chat.scrollTop = chat.scrollHeight; }
         else if (ev.type === 'tool') { closeThink(); addToolChip(ev); }
         else if (ev.type === 'progress') {
-          // 工作流步骤进度（v0.17.46，PLAN 4.1）：当前回答下方原地更新状态行
+          // 工作流步骤进度（v0.17.46，PLAN 4.1）：独立状态行原地更新；
+          // 不提前创建回答气泡（首个 token 才创建，保证工具标签显示在回答之前）
           closeThink();
-          getBubble();
           if (!progressEl) {
             progressEl = document.createElement('div');
             progressEl.className = 'wf-progress';

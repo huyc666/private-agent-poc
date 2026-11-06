@@ -181,8 +181,8 @@ def test_ac4_instance_fields_complete(monkeypatch):
     assert r["initiator"] == "alice" and r["department"] == "finance"
     assert r["session_id"] == "sess-1" and r["run_id"] == "run-1"
     assert r["definition_hash"]
-    # 触发时未传的可选参数按声明 default 填充后一并留存
-    assert json.loads(r["params_json"]) == {"week": "2026-W44", "highlights": "无"}
+    # 触发时未传的可选参数按声明 default 填充后一并留存（N6：默认空）
+    assert json.loads(r["params_json"]) == {"week": "2026-W44", "highlights": ""}
 
 
 def _simple_definition(name="inst-demo") -> dict:
@@ -352,3 +352,40 @@ def test_ac7_instance_write_failure_does_not_block(monkeypatch):
     usage.current_user.set("alice")
     out = asyncio.run(orch.run_orchestration("dbfail-demo", "任务"))
     assert "多角色编排完成" in out, out
+
+
+def test_ac7_midway_fence_abort_drops_partial_outputs(monkeypatch):
+    # N1 整改（AC7「无产出留存」）：首步已完成、第二步模型调用前栅栏失效
+    # → aborted，且中止前的部分产出也不写入实例
+    _prepare(monkeypatch)
+    monkeypatch.setattr(state.STATE, "llm", _FakeLLM(["第一步敏感产出", "unused"]))
+    definition = {
+        "name": "midway-abort", "version": "1",
+        "roles": [{"id": "r", "prompt": "执行", "tools": ["read_text_file"]}],
+        "steps": [{"id": "first", "role": "r", "mode": "single"},
+                  {"id": "second", "role": "r", "mode": "single"}],
+    }
+    orch.save_definition(definition, scope=None)
+
+    # 栅栏检查时点：每步步前一次 + 每次模型调用前一次
+    # （步1前、步1模型、步2前）→ 步1完成、步2启动即中止
+    fence_results = iter([True, True, False])
+    monkeypatch.setattr(sessions, "fence_ok",
+                        lambda sid, gen: next(fence_results))
+
+    async def factory(agent, payload, config):
+        resp = await agent.llm.ainvoke(payload["messages"])  # 触发栅栏检查
+        return {"messages": [resp]}
+
+    _install_react(monkeypatch, factory=factory)
+    usage.current_identity.set(_identity())
+    usage.current_user.set("alice")
+    usage.current_generation.set(3)
+    asyncio.run(orch.run_orchestration("midway-abort", "任务"))
+    rows = _instance_rows("alice")
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["status"] == "aborted"
+    assert r["failed_step"] == "second"
+    assert json.loads(r["outputs_json"] or "{}") == {}
+    assert r["summary"] == ""

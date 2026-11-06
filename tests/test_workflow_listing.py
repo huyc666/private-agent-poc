@@ -117,3 +117,29 @@ def test_ac6_tools_admin_wrappers_delegate():
     # Mock 模式（conftest 默认）下触发：包装层透传提示文案
     out = asyncio.run(tools_admin.run_orchestration("any-demo", "任务"))
     assert "Mock" in out
+
+
+# -------------------------------------------- 外部审核整改（v0.17.47，N3）
+
+
+def test_n3_semantically_invalid_definition_not_listed():
+    # N3：YAML 可解析但语义无效（roles/steps 为空）不得混入列举
+    _seed_three_scopes()
+    bad = config.ORCHESTRATIONS_DIR / "semantic-bad.yaml"
+    bad.write_text("name: semantic-bad\nversion: '1'\nroles: []\nsteps: []\n",
+                   encoding="utf-8")
+    usage.current_identity.set(_identity("alice"))
+    out = orch.list_orchestrations()
+    assert "semantic-bad" not in out
+    assert "global-demo" in out  # 有效定义不受影响
+
+
+def test_n3_non_list_params_file_does_not_crash_listing():
+    # N3：单个 params: 1 文件不得拖垮整个发现工具（TypeError）
+    orch.save_definition(_definition("global-demo"), scope=None)
+    crash = config.ORCHESTRATIONS_DIR / "aaa-crash.yaml"
+    crash.write_text("name: aaa-crash\nparams: 1\n", encoding="utf-8")
+    usage.current_identity.set(_identity("alice"))
+    out = orch.list_orchestrations()  # 不得抛异常
+    assert "aaa-crash" not in out
+    assert "global-demo" in out

@@ -6,6 +6,7 @@ execute 无进度时点、stream_reply 不透传 on_custom_event——
 """
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, AIMessageChunk
@@ -199,3 +200,16 @@ def test_ac5_stream_reply_only_wf_progress_whitelisted(monkeypatch):
     # 其他 custom event 名称一律不透传（防任意事件注入）
     assert not any("evil" in json.dumps(e, ensure_ascii=False) for e in out)
     assert out[-1]["type"] == "done"
+
+
+# -------------------------------------------- 外部审核整改（v0.17.47，N5）
+
+
+def test_ac5_progress_branch_does_not_precreate_bubble():
+    # N5：progress 分支不得提前创建回答气泡——回答气泡仍在首个 token 时创建，
+    # 保证工具调用标签显示在回答之前；进度行是独立容器（静态守护）
+    text = (Path(__file__).resolve().parent.parent / "web" / "index.html"
+            ).read_text(encoding="utf-8")
+    start = text.index("ev.type === 'progress'")
+    branch = text[start:text.index("else if", start)]
+    assert "getBubble" not in branch

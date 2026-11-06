@@ -1,4 +1,4 @@
-"""通用多角色编排引擎（v0.17.46，PLAN 5.1 + 4.1）。
+"""通用多角色编排引擎（v0.17.47，PLAN 5.1 + 4.1）。
 
 - 5.1（spec docs/specs/5.1-general-orchestration.md）：声明式定义与执行引擎。
 - 4.1（spec docs/specs/4.1-workflow-solidification.md）：流程固化层——
@@ -165,6 +165,10 @@ def _validate_params_block(definition: dict, errors: list[str]) -> None:
                                   f"（仅 {'/'.join(_PARAM_TYPES)}）")
                 elif "default" in p and not _param_value_ok(ptype, p["default"]):
                     errors.append(f"参数「{label}」的 default 值与类型不符")
+                elif ("default" in p and ptype == "string"
+                      and len(p["default"]) > MAX_PARAM_VALUE_LEN):
+                    errors.append(f"参数「{label}」的 default 超过 "
+                                  f"{MAX_PARAM_VALUE_LEN} 字符上限")
                 required = p.get("required", False)
                 if not isinstance(required, bool):
                     errors.append(f"参数「{label}」的 required 必须是布尔值")
@@ -927,7 +931,7 @@ def _resolve_trigger_params(definition: dict,
     缺必填/未知参数/类型不符/超长一律拒绝（fail-closed，不创建实例行）。
     """
     declared = definition.get("params") or []
-    provided = params or {}
+    provided = {} if params is None else params  # falsy 非字典不得归一为 {}
     if not isinstance(provided, dict):
         return {}, "params 必须是参数名到值的对象"
     values: dict = {}
@@ -938,8 +942,6 @@ def _resolve_trigger_params(definition: dict,
         ptype = p.get("type", "string")
         if name in provided:
             value = provided[name]
-            if isinstance(value, str) and len(value) > MAX_PARAM_VALUE_LEN:
-                return {}, f"参数「{name}」的值超过 {MAX_PARAM_VALUE_LEN} 字符上限"
             if not _param_value_ok(ptype, value):
                 return {}, f"参数「{name}」类型不符（期望 {ptype}）"
             values[name] = value
@@ -947,6 +949,10 @@ def _resolve_trigger_params(definition: dict,
             return {}, f"缺少必填参数「{name}」"
         else:
             values[name] = p.get("default", "")
+    # 长度上限对最终值统一生效：显式值与默认值同口径（防成本放大）
+    for name, value in values.items():
+        if isinstance(value, str) and len(value) > MAX_PARAM_VALUE_LEN:
+            return {}, f"参数「{name}」的值超过 {MAX_PARAM_VALUE_LEN} 字符上限"
     unknown = sorted(set(provided) - set(values))
     if unknown:
         return {}, f"未知参数：{', '.join(unknown)}"
@@ -1106,13 +1112,15 @@ async def run_orchestration(name: str, task: str = "",
                             outputs=result.get("outputs"),
                             summary=result.get("summary", ""))
     else:
+        aborted = bool(result.get("aborted"))
         finish_instance_row(
             instance_id,
-            status="aborted" if result.get("aborted") else "failed",
+            status="aborted" if aborted else "failed",
             failed_step=result.get("failed_step", ""),
             error=result.get("error", ""),
-            outputs=result.get("outputs"),
-            summary=result.get("summary", ""))
+            # AC7：栅栏中止无产出留存——中止前的部分产出也不回写实例
+            outputs=None if aborted else result.get("outputs"),
+            summary="" if aborted else result.get("summary", ""))
     suffix = f"\n实例 ID：{instance_id}" if instance_id else ""
     if not result["ok"]:
         step = f"步骤「{result['failed_step']}」" if result["failed_step"] else ""
@@ -1127,18 +1135,11 @@ async def run_orchestration(name: str, task: str = "",
 # ---- 4.1：可发现触发（只读列举，无审批门）----------------------------------
 
 
-def _load_yaml_lenient(path: Path) -> dict | None:
-    """宽松加载定义 YAML：损坏/非对象返回 None（列举跳过，不崩溃）。"""
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    return data if isinstance(data, dict) else None
-
-
 def _format_params_line(params) -> str:
+    if not isinstance(params, list):
+        return ""
     parts = []
-    for p in params or []:
+    for p in params:
         if not isinstance(p, dict):
             continue
         seg = f"{p.get('name', '?')}（{p.get('type', 'string')}"
@@ -1167,26 +1168,28 @@ def list_orchestrations() -> str:
             personal_scope = config.user_scope(identity.username)
 
     entries: list[tuple[str, dict]] = []  # (归属标签, 定义)
+    # 列举只展示可执行定义（load_definition 校验通过）：语法或语义无效均跳过
     for path in sorted(Path(config.ORCHESTRATIONS_DIR).glob("*.yaml")):
-        data = _load_yaml_lenient(path)
-        if data:
-            entries.append(("全局", data))
+        loaded = load_definition(path)
+        if loaded["status"] == "ok":
+            entries.append(("全局", loaded["definition"]))
     personal_root = Path(config.PERSONAL_ORCHESTRATIONS_DIR)
     if show_all_personal and personal_root.exists():
         for sub in sorted(personal_root.iterdir()):
             if not sub.is_dir():
                 continue
             for path in sorted(sub.glob("*.yaml")):
-                data = _load_yaml_lenient(path)
-                if data:
-                    entries.append((f"个人（{sub.name}）", data))
+                loaded = load_definition(path)
+                if loaded["status"] == "ok":
+                    entries.append((f"个人（{sub.name}）", loaded["definition"]))
     elif personal_scope:
         sub = personal_root / personal_scope
         if sub.exists():
             for path in sorted(sub.glob("*.yaml")):
-                data = _load_yaml_lenient(path)
-                if data:
-                    entries.append((f"个人（{personal_scope}）", data))
+                loaded = load_definition(path)
+                if loaded["status"] == "ok":
+                    entries.append((f"个人（{personal_scope}）",
+                                    loaded["definition"]))
 
     if not entries:
         return "当前没有可用的编排定义（可用 create_orchestration 工具创建）。"

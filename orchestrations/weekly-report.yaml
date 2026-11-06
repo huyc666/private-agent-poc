@@ -12,7 +12,7 @@ params:
     description: 周次标识，如 2026-W45
   - name: highlights
     type: string
-    default: "无"
+    default: ""
     description: 本周重点（可选）
 
 task_template: >

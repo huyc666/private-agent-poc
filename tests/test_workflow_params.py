@@ -179,3 +179,41 @@ def test_ac2_no_task_no_template_rejected(monkeypatch):
     out = asyncio.run(orch.run_orchestration("param-demo", "", params={}))
     assert "编排未执行" in out, out
     assert _instance_count() == 0
+
+
+# -------------------------------------------- 外部审核整改（v0.17.47，N2/N4）
+
+
+def test_n2_oversized_string_default_rejected_at_declaration():
+    # N2：声明的字符串 default 也受 2000 字符上限（此前只查类型）
+    d = _base_definition(params=[{"name": "week", "type": "string",
+                                  "default": "x" * 2001}])
+    errors = orch.validate_definition(d)
+    assert errors and any("上限" in e for e in errors), errors
+
+
+def test_n2_oversized_default_rejected_at_resolve():
+    # N2：触发层对最终值（显式值与默认值）统一做长度校验
+    d = _base_definition(params=[{"name": "week", "type": "string",
+                                  "default": "x" * 2001}])
+    values, err = orch._resolve_trigger_params(d, None)
+    assert values == {} and "上限" in err
+
+
+def test_n2_oversized_default_no_instance(monkeypatch):
+    # N2：省略参数时超长默认值 → 定义校验即拒绝，不创建实例行
+    d = _base_definition(params=[{"name": "week", "type": "string",
+                                  "default": "x" * 2001}],
+                         task_template="周报 {{week}}")
+    _prepare(monkeypatch, d)
+    out = asyncio.run(orch.run_orchestration("param-demo", "", params=None))
+    assert "编排未执行" in out, out
+    assert _instance_count() == 0
+
+
+@pytest.mark.parametrize("bad", [[], "", 0])
+def test_n4_non_dict_params_rejected_direct(bad):
+    # N4：falsy 非字典 params 不得被归一为 {}（直接函数契约，类型检查在前）
+    d = _base_definition(params=[{"name": "week", "type": "string"}])
+    values, err = orch._resolve_trigger_params(d, bad)
+    assert values == {} and "对象" in err
