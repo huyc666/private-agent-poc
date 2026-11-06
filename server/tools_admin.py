@@ -381,6 +381,61 @@ def list_workflow_instances(definition_name: str = "", limit: int = 20) -> str:
         definition_name=definition_name, limit=limit)
 
 
+# ---------------------------------------------------------------- 4.2 调度管理
+
+
+def create_schedule(definition_name: str, interval_seconds: int = 0,
+                    params: dict | None = None, event_scope: str = "",
+                    name_filter: str = "") -> str:
+    """为编排定义登记自动触发（v0.17.49，PLAN 4.2）：定时（interval_seconds，
+    下限 60，首次到点=登记时间+interval）和/或文件上传事件（event_scope 为
+    上传者域的精确绑定，可选 name_filter 文件名过滤）。params 须与定义声明
+    匹配；仅 approver/admin 可登记。例：登记每 10 分钟执行：
+    create_schedule("weekly-report", 600, {"week": "2026-W45"})。"""
+    from . import schedulers
+    out = schedulers.create_schedule(
+        definition_name, interval_seconds=interval_seconds, params=params,
+        event_scope=event_scope, name_filter=name_filter)
+    if out["status"] != "ok":
+        return f"调度登记失败：{out['error']}"
+    parts = []
+    if out.get("next_run_text"):
+        parts.append(f"下次到点 {out['next_run_text']}")
+    if out.get("event_scope"):
+        detail = f"事件触发（域「{out['event_scope']}」"
+        if out.get("name_filter"):
+            detail += f"，文件名匹配 {out['name_filter']}"
+        parts.append(detail + "）")
+    return (f"调度已登记：{out['schedule_id']}"
+            f"（{'；'.join(parts)}，定义「{definition_name}」）")
+
+
+def list_schedules() -> str:
+    """列举当前身份可见的调度登记（ID/定义/触发方式/参数摘要/创建者/状态，
+    v0.17.49，PLAN 4.2）。只读。普通用户仅见本人登记，approver/admin 全部。"""
+    from . import schedulers
+    return schedulers.list_schedules()
+
+
+def delete_schedule(schedule_id: str) -> str:
+    """删除调度登记（v0.17.49，PLAN 4.2）。仅创建者本人或 admin 可删；
+    删除只停止未来触发，在途实例自然结束。schedule_id 见 list_schedules。"""
+    from . import schedulers
+    out = schedulers.delete_schedule(schedule_id)
+    if out["status"] != "ok":
+        return f"调度删除失败：{out['error']}"
+    return f"调度已删除：{schedule_id}"
+
+
+def list_trigger_attempts(schedule_id: str = "", limit: int = 20) -> str:
+    """查询调度触发历史（v0.17.49，PLAN 4.2）：每次尝试的结果
+    （triggered/skipped/denied）、原因与时间——跳过/失效原因经此查询，
+    不只存在日志。schedule_id 可选过滤；普通用户仅见本人调度的记录。"""
+    from . import schedulers
+    return schedulers.list_trigger_attempts(
+        schedule_id=schedule_id, limit=limit)
+
+
 # ---------------------------------------------------------------- 工具装配清单
 
 BUILTIN_TOOLS = [read_text_file, list_uploaded_docs, save_output_file,
@@ -391,7 +446,9 @@ BUILTIN_TOOLS = [read_text_file, list_uploaded_docs, save_output_file,
                  list_packs, enable_pack, disable_pack, create_pack, delete_pack,
                  sign_pack, orchestrate_subtasks,
                  run_orchestration, create_orchestration,
-                 list_orchestrations, list_workflow_instances]
+                 list_orchestrations, list_workflow_instances,
+                 create_schedule, list_schedules, delete_schedule,
+                 list_trigger_attempts]
 
 
 def builtin_langchain_tools() -> list:
@@ -470,4 +527,16 @@ def builtin_langchain_tools() -> list:
         StructuredTool.from_function(
             func=list_workflow_instances, name="list_workflow_instances",
             description=list_workflow_instances.__doc__),
+        StructuredTool.from_function(
+            func=create_schedule, name="create_schedule",
+            description=create_schedule.__doc__),
+        StructuredTool.from_function(
+            func=list_schedules, name="list_schedules",
+            description=list_schedules.__doc__),
+        StructuredTool.from_function(
+            func=delete_schedule, name="delete_schedule",
+            description=delete_schedule.__doc__),
+        StructuredTool.from_function(
+            func=list_trigger_attempts, name="list_trigger_attempts",
+            description=list_trigger_attempts.__doc__),
     ]

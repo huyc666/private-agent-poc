@@ -96,8 +96,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                        "生产 HTTPS 部署（含反向代理终止 TLS 的场景）请在 .env 设置"
                        " AUTH_COOKIE_SECURE=true；仅本地 HTTP 开发可忽略本告警。")
     await agent.build_agent()
+    # 4.2（PLAN #16）：启动 stale 清扫 + 调度循环（单进程守护，多 worker
+    # 拒启在 schedulers.start_loop 内 fail-closed 处理）
+    from server import schedulers
+    swept = await asyncio.to_thread(schedulers.sweep_stale_running)
+    if swept:
+        logger.info(f"[scheduler] 启动清扫：{swept} 条 running 实例标记为"
+                    " failed（进程重启中断）")
+    schedulers.start_loop()
     scan_task = asyncio.create_task(_approval_scan_loop())
     yield
+    await schedulers.stop_loop()  # 4.2：取消并等待在途触发任务
     scan_task.cancel()  # 周期扫描随服务退出结束
     telemetry.flush()  # 关闭前冲刷 Langfuse 缓冲的观测数据
     await agent.close_checkpointer()  # 关闭 PostgresSaver 连接（若启用）

@@ -176,6 +176,12 @@ async def upload_doc(request: Request, name: str = "") -> Any:
         ident = _acl_identity(request)
         audit.log(ident["username"] if ident else "", ident["role"] if ident else "",
                   "文件上传", target=safe)
+        # 4.2 事件挂钩：落盘且转换均成功后触发（旁路自界隔离，不影响上传响应）
+        from .. import schedulers
+        await schedulers.dispatch_upload_event(
+            rel_path=f"{scope}/{safe}",
+            uploader=ident["username"] if ident else "",
+            scope=scope, chars=len(text))
         return {"name": f"{scope}/{safe}", "chars": len(text), "preview": text[:200]}
     except OSError:
         # 不拼 {e}：OSError 文本含完整服务器绝对路径，外泄部署布局

@@ -64,6 +64,8 @@ FORBIDDEN_TOOL_NAMES = frozenset({
     "delete_pack", "sign_pack", "run_python_code", "orchestrate_subtasks",
     "create_orchestration", "run_orchestration", "add_user", "delete_user",
     "list_users", "delete_uploaded_file",
+    # 4.2：调度登记类工具（防编排递归建/删调度）
+    "create_schedule", "delete_schedule",
 })
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,49}$")
@@ -1012,9 +1014,23 @@ def _wf_ensure_schema(conn: sqlite3.Connection) -> None:
             started_at         REAL NOT NULL,
             finished_at        REAL,
             outputs_json       TEXT NOT NULL DEFAULT '{}',
-            summary            TEXT NOT NULL DEFAULT ''
+            summary            TEXT NOT NULL DEFAULT '',
+            trigger_source     TEXT NOT NULL DEFAULT 'manual',
+            schedule_id        TEXT NOT NULL DEFAULT '',
+            trigger_id         TEXT NOT NULL DEFAULT '',
+            planned_at         REAL
         )
     """)
+    # 4.2 触发字段：存量库启动自动迁移（沿 v0.17.22 ALTER 先例，幂等）
+    cols = {r[1] for r in conn.execute(
+        "PRAGMA table_info(workflow_instances)")}
+    for col, ddl in (("trigger_source", "TEXT NOT NULL DEFAULT 'manual'"),
+                      ("schedule_id", "TEXT NOT NULL DEFAULT ''"),
+                      ("trigger_id", "TEXT NOT NULL DEFAULT ''"),
+                      ("planned_at", "REAL")):
+        if col not in cols:
+            conn.execute(
+                f"ALTER TABLE workflow_instances ADD COLUMN {col} {ddl}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_wf_initiator"
                  " ON workflow_instances(initiator)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_wf_started"
@@ -1026,9 +1042,19 @@ def _new_instance_id() -> str:
 
 
 def create_instance_row(definition: dict, identity: usage.Identity,
-                        values: dict, def_hash: str) -> str | None:
-    """创建 running 实例行；失败仅记日志返回 None（实例是记录，不是执行前提）。"""
+                        values: dict, def_hash: str, *,
+                        trigger_source: str = "manual", schedule_id: str = "",
+                        trigger_id: str = "", planned_at: float | None = None,
+                        session_id: str | None = None,
+                        run_id: str | None = None) -> str | None:
+    """创建 running 实例行；失败仅记日志返回 None（实例是记录，不是执行前提）。
+
+    4.2：trigger_source/schedule_id/trigger_id/planned_at 标记触发来源；
+    自动触发的 session_id/run_id 显式传空串（不绑会话生命周期）。
+    """
     instance_id = _new_instance_id()
+    sess = usage.current_session.get() or "" if session_id is None else session_id
+    rid = usage.current_run.get() or "" if run_id is None else run_id
     try:
         with _WF_LOCK:
             conn = _wf_connect()
@@ -1038,13 +1064,15 @@ def create_instance_row(definition: dict, identity: usage.Identity,
                     "INSERT INTO workflow_instances (instance_id,"
                     " definition_name, definition_version, definition_hash,"
                     " initiator, department, session_id, run_id, params_json,"
-                    " status, started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    " status, started_at, trigger_source, schedule_id,"
+                    " trigger_id, planned_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (instance_id, definition.get("name", ""),
                      str(definition.get("version", "1")), def_hash,
                      identity.username or "anonymous", identity.department or "",
-                     usage.current_session.get() or "", usage.current_run.get() or "",
+                     sess, rid,
                      json.dumps(values, ensure_ascii=False, default=str),
-                     "running", time.time()))
+                     "running", time.time(),
+                     trigger_source, schedule_id, trigger_id, planned_at))
                 conn.commit()
             finally:
                 conn.close()
@@ -1128,6 +1156,11 @@ async def run_orchestration(name: str, task: str = "",
         generation=usage.current_generation.get(),
         run_id=usage.current_run.get(), llm=STATE.llm,
         on_progress=_emit_progress)
+    return _finish_from_result(result, instance_id)
+
+
+def _finish_from_result(result: dict, instance_id: str | None) -> str:
+    """回写实例终局并生成用户文案（手动/自动触发共用）。"""
     if result["ok"]:
         finish_instance_row(instance_id, status="completed",
                             outputs=result.get("outputs"),
@@ -1151,6 +1184,45 @@ async def run_orchestration(name: str, task: str = "",
             f"{len(result['findings'])} 个并行子任务。\n"
             f"子任务清单：{json.dumps(result['subtasks'], ensure_ascii=False)}\n\n"
             f"{result['summary']}" + suffix)
+
+
+async def run_triggered(name: str, params: dict, identity: usage.Identity, *,
+                        trigger_source: str = "scheduled",
+                        schedule_id: str = "", trigger_id: str = "",
+                        planned_at: float | None = None) -> str:
+    """自动触发执行入口（4.2）：复用 run_orchestration 语义。
+
+    与手动触发的差异：身份显式下传（触发时重解析的创建者当前身份）、
+    session_id=""/generation=None（check_fence 对空会话直接跳过，自动实例
+    不绑会话删除生命周期，无栅栏 aborted 路径）、无进度事件（无 SSE 监听）。
+    """
+    if not isinstance(identity, usage.Identity):
+        return "自动触发未执行：身份无效"
+    if STATE.llm is None:
+        return "自动触发未执行：需要真实模型支持（当前为 Mock 模式）"
+    resolved = resolve_definition(name, identity)
+    if resolved["status"] != "ok":
+        return f"自动触发未执行：{resolved['error']}"
+    loaded = load_definition(resolved["path"])
+    if loaded["status"] != "ok":
+        return f"自动触发未执行：定义校验失败（{loaded['error']}）"
+    definition = loaded["definition"]
+    values, perr = _resolve_trigger_params(definition, params)
+    if perr:
+        return f"自动触发未执行：{perr}"
+    template = definition.get("task_template")
+    if not (isinstance(template, str) and template.strip()):
+        return "自动触发未执行：定义缺少 task_template"
+    final_task = render_task_template(template, values)
+    instance_id = create_instance_row(
+        definition, identity, values, loaded["hash"],
+        trigger_source=trigger_source, schedule_id=schedule_id,
+        trigger_id=trigger_id, planned_at=planned_at,
+        session_id="", run_id="")
+    result = await execute(definition, final_task, identity=identity,
+                           session_id="", generation=None, run_id="",
+                           llm=STATE.llm)
+    return _finish_from_result(result, instance_id)
 
 
 # ---- 4.1：可发现触发（只读列举，无审批门）----------------------------------
@@ -1266,9 +1338,12 @@ def list_workflow_instances(definition_name: str = "", limit: int = 20) -> str:
     lines = []
     for r in rows:
         started = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["started_at"]))
-        lines.append(f"- {r['instance_id']} {r['definition_name']}"
-                     f"（v{r['definition_version']}）[{r['status']}]"
-                     f" 发起者：{r['initiator']} 开始：{started}")
+        line = (f"- {r['instance_id']} {r['definition_name']}"
+                f"（v{r['definition_version']}）[{r['status']}]"
+                f" 发起者：{r['initiator']} 开始：{started}")
+        if r["trigger_source"] != "manual":
+            line += f" 触发：{r['trigger_source']}"
+        lines.append(line)
     return "\n".join(lines)
 
 
