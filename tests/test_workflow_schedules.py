@@ -12,6 +12,7 @@ import io
 import json
 import sqlite3
 import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -1153,3 +1154,243 @@ def test_ac13_mock_mode_claim_skipped(monkeypatch):
     assert attempts[-1]["result"] == "skipped"
     assert "真实模型" in attempts[-1]["reason"]
     assert _instance_rows() == []
+
+
+# ------------------------------------------------ AC14 评审整改（v0.17.49 补丁）
+
+
+def _set_lease(sid, running_since, trigger_id="other-trigger"):
+    conn = sqlite3.connect(config.STATE_DB)
+    try:
+        conn.execute("UPDATE workflow_schedules SET running_since = ?,"
+                     " running_trigger_id = ? WHERE schedule_id = ?",
+                     (running_since, trigger_id, sid))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_ac14_definition_mutex_skips_overlapping_execution(monkeypatch):
+    """同名流程上一轮仍在执行：新作业不执行、留痕 skipped、不建实例。"""
+    _register_timer(monkeypatch)
+    _prepare_llm(monkeypatch)
+    S = _sched()
+    sid = _schedule_rows()[0]["schedule_id"]
+    job = S.process_due(1060.0)[0]
+    _set_lease(sid, time.time())
+    out = _run_job(job)
+    assert "上一轮仍在执行" in out
+    att = _attempt_rows()[-1]
+    assert att["outcome"] == "skipped" and "运行中互斥" in att["reason"]
+    assert _instance_rows() == []
+    # 别的租约未被误释放
+    assert _schedule_rows()[0]["running_trigger_id"] == "other-trigger"
+
+
+def test_ac14_lease_released_and_attempt_outcome(monkeypatch):
+    """正常执行后释放租约，尝试记录回写终态 completed / finished_at。"""
+    _register_timer(monkeypatch)
+    _prepare_llm(monkeypatch)
+    S = _sched()
+    job = S.process_due(1060.0)[0]
+    out = _run_job(job)
+    assert "多角色编排完成" in out
+    row = _schedule_rows()[0]
+    assert row["running_since"] is None and row["running_trigger_id"] == ""
+    att = _attempt_rows()[-1]
+    assert att["result"] == "triggered"
+    assert att["outcome"] == "completed" and att["finished_at"]
+
+
+def test_ac14_stale_lease_taken_over(monkeypatch):
+    """超龄租约视为进程中断遗留，允许接手执行。"""
+    _register_timer(monkeypatch)
+    _prepare_llm(monkeypatch)
+    S = _sched()
+    sid = _schedule_rows()[0]["schedule_id"]
+    job = S.process_due(1060.0)[0]
+    _set_lease(sid, time.time() - 7200)
+    out = _run_job(job)
+    assert "多角色编排完成" in out
+    assert _schedule_rows()[0]["running_since"] is None
+
+
+def test_ac14_cancel_marks_failed_and_releases_lease(monkeypatch):
+    """停机取消：实例标 failed、尝试终态 cancelled、租约释放。"""
+    _register_timer(monkeypatch)
+    _prepare_llm(monkeypatch)
+    S = _sched()
+
+    async def fake_run(name, params, identity, **kw):
+        orch.create_instance_row(
+            _def_dict(), identity, params, "h",
+            trigger_source=kw.get("trigger_source", "scheduled"),
+            schedule_id=kw.get("schedule_id", ""),
+            trigger_id=kw.get("trigger_id", ""),
+            planned_at=kw.get("planned_at"),
+            session_id="", run_id="wfr-fake")
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(orch, "run_triggered", fake_run)
+
+    async def scenario():
+        job = S.process_due(1060.0)[0]
+        task = asyncio.create_task(S.execute_job(job))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    inst = _instance_rows()[-1]
+    assert inst["status"] == "failed" and "停机取消" in (inst["error"] or "")
+    att = _attempt_rows()[-1]
+    assert att["outcome"] == "cancelled" and "停机取消" in att["reason"]
+    assert _schedule_rows()[0]["running_since"] is None
+
+
+def test_ac14_run_id_recorded_per_execution(monkeypatch):
+    """每次自动执行生成独立 run_id，写入实例行（计量/关联依据）。"""
+    _register_timer(monkeypatch)
+    _prepare_llm(monkeypatch)
+    S = _sched()
+    _run_job(S.process_due(1060.0)[0])
+    _run_job(S.process_due(1120.0)[0])
+    runs = [r["run_id"] for r in _instance_rows()]
+    assert len(runs) == 2
+    assert all(r.startswith("wfr-") for r in runs)
+    assert len(set(runs)) == 2
+
+
+def test_ac14_event_vars_rendered_from_whitelist(monkeypatch):
+    """事件白名单变量可进模板；不进参数/实例参数（历史可复现）。"""
+    scope = config.user_scope("root")
+    auth.add_user("root", role="admin")
+    _install_def("sched-demo",
+                 template="来源 {{event_path}}；事件 {{event_id}}；主题 {{topic}}")
+    _as("root", "admin")
+    S = _sched()
+    out = S.create_schedule("sched-demo", interval_seconds=0,
+                            params={"topic": "周报"}, event_scope=scope,
+                            now=1000.0)
+    assert out["status"] == "ok", out.get("error")
+    llm = _prepare_llm(monkeypatch)
+    jobs = S.on_file_uploaded(**_file_event(scope))
+    assert len(jobs) == 1
+    _run_job(jobs[0])
+    human = llm.seen_messages[0][1].content
+    assert f"来源 uploads/{scope}/报告.docx.md" in human
+    assert "事件 evt-1" in human and "主题 周报" in human
+    assert json.loads(_instance_rows()[-1]["params_json"]) \
+        == {"topic": "周报", "note": ""}
+
+
+def test_ac14_expired_creator_denied(monkeypatch):
+    """账号过期（Bearer Key 已失效）的创建者不再触发执行。"""
+    _register_timer(monkeypatch)
+    conn = sqlite3.connect(config.STATE_DB)
+    try:
+        conn.execute("UPDATE api_users SET expires_at = ?"
+                     " WHERE username = 'carol'", (time.time() - 10,))
+        conn.commit()
+    finally:
+        conn.close()
+    _prepare_llm(monkeypatch)
+    S = _sched()
+    assert S.process_due(1060.0) == []
+    att = _attempt_rows()[-1]
+    assert att["result"] == "denied" and "过期" in att["reason"]
+
+
+def test_ac14_dispatch_failure_isolated_per_job(monkeypatch):
+    """单个作业派发失败只记日志，后续作业照常派发（上传不受影响）。"""
+    scope = config.user_scope("root")
+    _register_event(monkeypatch, event_scope=scope)
+    _register_event(monkeypatch, event_scope=scope)
+    _prepare_llm(monkeypatch)
+    S = _sched()
+    calls = []
+
+    def fake_dispatch(job):
+        calls.append(job["trigger_id"])
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(S, "_dispatch", fake_dispatch)
+    asyncio.run(S.dispatch_upload_event(rel_path=f"{scope}/报告.docx.md",
+                                        uploader="root", scope=scope, chars=5))
+    assert len(calls) == 2
+
+
+def test_ac14_startup_sweep_clears_leases_and_pending_attempts(monkeypatch):
+    """启动清扫：清空运行租约，未执行完的尝试记 abandoned（终态可查）。"""
+    _register_timer(monkeypatch)
+    _prepare_llm(monkeypatch)
+    S = _sched()
+    sid = _schedule_rows()[0]["schedule_id"]
+    _set_lease(sid, time.time())
+    assert S.process_due(1060.0)[0]["trigger_id"]
+    S.sweep_stale_running(now=time.time(), grace=3600)
+    row = _schedule_rows()[0]
+    assert row["running_since"] is None and row["running_trigger_id"] == ""
+    assert _attempt_rows()[-1]["outcome"] == "abandoned"
+
+
+def test_ac14_attempt_listing_shows_outcome(monkeypatch):
+    """触发历史可查终态（completed/cancelled 等），不只 claim 结果。"""
+    _register_timer(monkeypatch)
+    _prepare_llm(monkeypatch)
+    S = _sched()
+    _run_job(S.process_due(1060.0)[0])
+    listing = S.list_trigger_attempts(limit=10)
+    assert "终态：completed" in listing
+
+
+def test_ac14_schema_migrates_existing_tables():
+    """存量库升级：旧表自动补运行租约/终态列（幂等，不丢历史）。"""
+    S = _sched()
+    conn = sqlite3.connect(config.STATE_DB)
+    try:
+        conn.execute(
+            "CREATE TABLE workflow_schedules (schedule_id TEXT PRIMARY KEY,"
+            " definition_name TEXT NOT NULL, params_json TEXT NOT NULL"
+            " DEFAULT '{}', interval_seconds INTEGER NOT NULL DEFAULT 0,"
+            " event_scope TEXT NOT NULL DEFAULT '', name_filter TEXT NOT NULL"
+            " DEFAULT '', status TEXT NOT NULL DEFAULT 'active', creator TEXT"
+            " NOT NULL, creator_role TEXT NOT NULL DEFAULT '',"
+            " creator_department TEXT NOT NULL DEFAULT '', next_run REAL,"
+            " claimed_at REAL, created_at REAL NOT NULL)")
+        conn.execute(
+            "CREATE TABLE workflow_trigger_attempts (attempt_id TEXT PRIMARY KEY,"
+            " schedule_id TEXT NOT NULL, trigger_id TEXT NOT NULL,"
+            " trigger_source TEXT NOT NULL, definition_name TEXT NOT NULL"
+            " DEFAULT '', creator TEXT NOT NULL DEFAULT '', result TEXT NOT NULL,"
+            " reason TEXT NOT NULL DEFAULT '', payload_json TEXT NOT NULL"
+            " DEFAULT '{}', created_at REAL NOT NULL)")
+        conn.commit()
+    finally:
+        conn.close()
+    conn = S._connect()
+    try:
+        S._ensure_schema(conn)
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(workflow_schedules)")}
+        acols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(workflow_trigger_attempts)")}
+    finally:
+        conn.close()
+    assert {"running_since", "running_trigger_id"} <= cols
+    assert {"outcome", "finished_at"} <= acols
+
+
+def test_ac14_bookkeeping_failure_does_not_raise(monkeypatch):
+    """租约释放/终态回写尽力而为：库异常只记日志，不外抛。"""
+    S = _sched()
+
+    def boom(*args, **kwargs):
+        raise sqlite3.OperationalError("locked")
+
+    monkeypatch.setattr(S, "_connect", boom)
+    S._release_run("wfs-x", "trg-x")
+    S._finish_attempt("wfs-x", "trg-x", "completed")

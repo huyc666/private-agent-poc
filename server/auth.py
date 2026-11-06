@@ -381,7 +381,7 @@ def user_by_name(username: str) -> dict | None:
         try:
             _ensure_schema(conn)
             row = conn.execute(
-                "SELECT username, role, department FROM api_users"
+                "SELECT username, role, department, expires_at FROM api_users"
                 " WHERE username = ? AND revoked = 0", (username,)).fetchone()
             return dict(row) if row else None
         finally:

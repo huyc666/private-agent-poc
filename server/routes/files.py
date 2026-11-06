@@ -177,11 +177,15 @@ async def upload_doc(request: Request, name: str = "") -> Any:
         audit.log(ident["username"] if ident else "", ident["role"] if ident else "",
                   "文件上传", target=safe)
         # 4.2 事件挂钩：落盘且转换均成功后触发（旁路自界隔离，不影响上传响应）
-        from .. import schedulers
-        await schedulers.dispatch_upload_event(
-            rel_path=f"{scope}/{safe}",
-            uploader=ident["username"] if ident else "",
-            scope=scope, chars=len(text))
+        try:
+            from .. import schedulers
+            await schedulers.dispatch_upload_event(
+                rel_path=f"{scope}/{safe}",
+                uploader=ident["username"] if ident else "",
+                scope=scope, chars=len(text))
+        except Exception:
+            # 窄兜底：调度旁路任何失败都不得影响上传主链路（不吞取消）
+            logger.warning("[files] 上传事件触发失败，上传不受影响")
         return {"name": f"{scope}/{safe}", "chars": len(text), "preview": text[:200]}
     except OSError:
         # 不拼 {e}：OSError 文本含完整服务器绝对路径，外泄部署布局

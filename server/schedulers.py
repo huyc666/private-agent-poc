@@ -50,6 +50,15 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_columns(conn: sqlite3.Connection, table: str,
+                    columns: tuple) -> None:
+    """存量库幂等增列（沿 v0.17.22 ALTER 先例）。"""
+    existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    for col, ddl in columns:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS workflow_schedules (
@@ -65,6 +74,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             creator_department TEXT NOT NULL DEFAULT '',
             next_run           REAL,
             claimed_at         REAL,
+            running_since      REAL,
+            running_trigger_id TEXT NOT NULL DEFAULT '',
             created_at         REAL NOT NULL
         )
     """)
@@ -78,10 +89,19 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             creator        TEXT NOT NULL DEFAULT '',
             result         TEXT NOT NULL,
             reason         TEXT NOT NULL DEFAULT '',
+            outcome        TEXT NOT NULL DEFAULT '',
+            finished_at    REAL,
             payload_json   TEXT NOT NULL DEFAULT '{}',
             created_at     REAL NOT NULL
         )
     """)
+    # v0.17.49 补丁：运行租约（P1-1）与尝试终态（P2-3）列
+    _ensure_columns(conn, "workflow_schedules", (
+        ("running_since", "REAL"),
+        ("running_trigger_id", "TEXT NOT NULL DEFAULT ''")))
+    _ensure_columns(conn, "workflow_trigger_attempts", (
+        ("outcome", "TEXT NOT NULL DEFAULT ''"),
+        ("finished_at", "REAL")))
     # 事件 × 调度唯一触发键（幂等）
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_wf_attempt_key"
                  " ON workflow_trigger_attempts(schedule_id, trigger_id)")
@@ -99,7 +119,7 @@ def _context_identity() -> usage.Identity:
 
 
 def _resolve_creator(creator: str) -> tuple[dict | None, str]:
-    """重解析创建者当前有效身份：账号存在、未吊销、角色满足 Q3。"""
+    """重解析创建者当前有效身份：账号存在、未吊销、未过期、角色满足 Q3。"""
     if not auth.enabled():
         # 开放模式无账号体系：按 admin 口径放行（登记入口本身就无 RBAC）
         return {"username": creator or "anonymous", "role": "admin",
@@ -107,6 +127,9 @@ def _resolve_creator(creator: str) -> tuple[dict | None, str]:
     user = auth.user_by_name(creator)
     if user is None:
         return None, "创建者身份失效（账号不存在或已吊销）"
+    expires = user.get("expires_at")
+    if isinstance(expires, (int, float)) and expires <= time.time():
+        return None, "创建者账号已过期"
     if user.get("role") not in ("approver", "admin"):
         return None, "创建者角色不满足（需 approver/admin）"
     return {"username": creator, "role": user["role"],
@@ -155,14 +178,25 @@ def _load_for_claim(schedule: dict, user: dict) -> tuple[dict | None, str]:
     return {"definition": definition, "params": values}, ""
 
 
+def _event_vars(payload: dict | None) -> dict:
+    """上传事件白名单变量（不含正文/preview/绝对路径）。"""
+    if not payload:
+        return {}
+    rel = str(payload.get("rel_path", "") or "")
+    return {"event_path": f"uploads/{rel}" if rel else "",
+            "event_id": str(payload.get("event_id", "") or ""),
+            "event_uploader": str(payload.get("uploader", "") or "")}
+
+
 def _job(schedule: dict, params: dict, trigger_id: str, source: str,
-         planned_at: float) -> dict:
+         planned_at: float, event: dict | None = None) -> dict:
     return {"schedule_id": schedule["schedule_id"],
             "definition_name": schedule["definition_name"],
             "params": params,
             "creator": schedule["creator"],
             "trigger_source": source, "trigger_id": trigger_id,
-            "planned_at": planned_at}
+            "planned_at": planned_at,
+            "event": event or {}}
 
 
 # ---- 登记 / 删除 / 列举（管理工具核心）------------------------------------
@@ -387,6 +421,8 @@ def list_trigger_attempts(schedule_id: str = "", limit: int = 20) -> str:
         line = (f"- {r['attempt_id']} [{r['result']}] {r['definition_name']}"
                 f" 调度：{r['schedule_id']}"
                 f" {_fmt_ts(r['created_at'])}")
+        if r["outcome"]:
+            line += f" 终态：{r['outcome']}"
         if r["reason"]:
             line += f" 原因：{r['reason']}"
         lines.append(line)
@@ -461,7 +497,8 @@ def _claim_common(conn: sqlite3.Connection, schedule: dict, trigger_id: str,
     if not _insert_attempt(conn, schedule, trigger_id, source, "triggered",
                            "", event_payload or {}, at):
         return None  # 幂等：该触发键已留痕（事件重复派发）
-    return _job(schedule, loaded["params"], trigger_id, source, at)
+    return _job(schedule, loaded["params"], trigger_id, source, at,
+                _event_vars(event_payload))
 
 
 def process_due(now: float | None = None) -> list[dict]:
@@ -568,26 +605,126 @@ def _dispatch(job: dict) -> asyncio.Task:
     return task
 
 
+def _acquire_run(schedule_id: str, definition_name: str, trigger_id: str,
+                 now: float) -> bool:
+    """领取定义级运行租约（P1-1）：同名定义同一时刻只允许一轮执行。
+
+    租约落在调度行，按 definition_name 互斥——不同调度引用同一定义同样
+    互斥；超过 STALE_RUNNING_GRACE 的租约视为进程遗留，可被接手。
+    """
+    with _SCHED_LOCK:
+        conn = _connect()
+        try:
+            _ensure_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT running_trigger_id FROM workflow_schedules"
+                " WHERE definition_name = ? AND running_since IS NOT NULL"
+                " AND running_since > ? LIMIT 1",
+                (definition_name, now - STALE_RUNNING_GRACE)).fetchone()
+            if row is not None and row["running_trigger_id"] != trigger_id:
+                conn.rollback()
+                return False
+            conn.execute(
+                "UPDATE workflow_schedules SET running_since = ?,"
+                " running_trigger_id = ? WHERE schedule_id = ?",
+                (now, trigger_id, schedule_id))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+
+def _release_run(schedule_id: str, trigger_id: str) -> None:
+    """释放运行租约；仅当租约仍属本次触发时清空（防误清他轮）。"""
+    try:
+        with _SCHED_LOCK:
+            conn = _connect()
+            try:
+                _ensure_schema(conn)
+                conn.execute(
+                    "UPDATE workflow_schedules SET running_since = NULL,"
+                    " running_trigger_id = '' WHERE schedule_id = ?"
+                    " AND running_trigger_id = ?", (schedule_id, trigger_id))
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error("[scheduler] 运行租约释放失败（%s）", type(e).__name__)
+
+
+def _finish_attempt(schedule_id: str, trigger_id: str, outcome: str,
+                    reason: str = "") -> None:
+    """回写触发尝试终态（P2-3）：completed/failed/cancelled/skipped/denied。
+
+    只回写尚未终结（outcome 为空）的尝试，避免覆盖启动清扫的 abandoned。
+    """
+    try:
+        with _SCHED_LOCK:
+            conn = _connect()
+            try:
+                _ensure_schema(conn)
+                conn.execute(
+                    "UPDATE workflow_trigger_attempts SET outcome = ?,"
+                    " reason = ?, finished_at = ? WHERE schedule_id = ?"
+                    " AND trigger_id = ? AND outcome = ''",
+                    (outcome, reason, time.time(), schedule_id, trigger_id))
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error("[scheduler] 触发尝试终态回写失败（%s）", type(e).__name__)
+
+
 async def execute_job(job: dict) -> str:
-    """执行一个已 claim 的触发作业（重新解析创建者身份后下传编排）。"""
+    """执行一个已 claim 的触发作业。
+
+    顺序：身份重解析 → 定义级运行租约（互斥）→ 编排执行 → 尝试终态回写
+    → finally 释放租约。停机取消时补偿标记实例 failed、回写 cancelled 后
+    重新抛出，保持任务取消语义。
+    """
+    schedule_id = job.get("schedule_id", "")
+    trigger_id = job.get("trigger_id", "")
     user, uerr = _resolve_creator(job.get("creator", ""))
     if user is None:
-        logger.warning("[scheduler] 触发拒绝（%s）：%s",
-                       job.get("schedule_id", ""), uerr)
+        logger.warning("[scheduler] 触发拒绝（%s）：%s", schedule_id, uerr)
+        _finish_attempt(schedule_id, trigger_id, "denied", uerr)
         return f"自动触发未执行：{uerr}"
+    if not _acquire_run(schedule_id, job.get("definition_name", ""),
+                        trigger_id, time.time()):
+        reason = "运行中互斥：同名流程上一轮仍在执行，本次跳过"
+        logger.warning("[scheduler] 触发跳过（%s）：%s", schedule_id, reason)
+        _finish_attempt(schedule_id, trigger_id, "skipped", reason)
+        return "自动触发未执行：同名流程上一轮仍在执行（运行中互斥）"
     identity = usage.Identity(username=user["username"], role=user["role"],
                               department=user.get("department", ""),
                               auth_source="local")
     try:
-        return await orch.run_triggered(
+        out = await orch.run_triggered(
             job["definition_name"], job.get("params") or {}, identity,
             trigger_source=job.get("trigger_source", "scheduled"),
-            schedule_id=job.get("schedule_id", ""),
-            trigger_id=job.get("trigger_id", ""),
-            planned_at=job.get("planned_at"))
+            schedule_id=schedule_id, trigger_id=trigger_id,
+            planned_at=job.get("planned_at"),
+            event=job.get("event") or None)
+        status = orch.instance_status_for_trigger(trigger_id)
+        if status == "completed" or (not status and
+                                     out.startswith("多角色编排完成")):
+            _finish_attempt(schedule_id, trigger_id, "completed")
+        else:
+            _finish_attempt(schedule_id, trigger_id, "failed",
+                            f"执行失败（实例状态：{status or '未知'}）")
+        return out
+    except asyncio.CancelledError:
+        orch.abort_instance_for_trigger(trigger_id, "停机取消")
+        _finish_attempt(schedule_id, trigger_id, "cancelled", "停机取消")
+        raise
     except Exception as e:
         logger.error("[scheduler] 自动触发执行失败（%s）", type(e).__name__)
+        _finish_attempt(schedule_id, trigger_id, "failed",
+                        f"执行异常（{type(e).__name__}）")
         return f"自动触发执行失败（{type(e).__name__}）"
+    finally:
+        _release_run(schedule_id, trigger_id)
 
 
 async def dispatch_upload_event(*, rel_path: str, uploader: str,
@@ -604,14 +741,21 @@ async def dispatch_upload_event(*, rel_path: str, uploader: str,
                        type(e).__name__)
         return
     for job in jobs:
-        _dispatch(job)
+        try:
+            _dispatch(job)
+        except Exception as e:
+            # 逐作业隔离（P2-4）：单个派发失败不影响其余命中调度
+            logger.warning("[scheduler] 触发作业派发失败（%s），其余继续",
+                           type(e).__name__)
 
 
 def sweep_stale_running(now: float | None = None,
                         grace: float = STALE_RUNNING_GRACE) -> int:
-    """启动 stale 清扫：超龄 running 实例标 failed（进程重启中断）。"""
+    """启动清扫：超龄 running 实例标 failed（进程重启中断）；清空运行租约，
+    并把上一进程未回写终态的 triggered 尝试标 abandoned。"""
     if now is None:
         now = time.time()
+    n = 0
     try:
         with orch._WF_LOCK:
             conn = orch._wf_connect()
@@ -626,10 +770,26 @@ def sweep_stale_running(now: float | None = None,
                 conn.commit()
             finally:
                 conn.close()
-        return n
     except Exception as e:
         logger.error("[scheduler] stale 实例清扫失败（%s）", type(e).__name__)
-        return 0
+    try:
+        with _SCHED_LOCK:
+            conn = _connect()
+            try:
+                _ensure_schema(conn)
+                conn.execute(
+                    "UPDATE workflow_schedules SET running_since = NULL,"
+                    " running_trigger_id = '' WHERE running_since IS NOT NULL")
+                conn.execute(
+                    "UPDATE workflow_trigger_attempts SET outcome = 'abandoned',"
+                    " reason = '进程重启中断，执行结果未知', finished_at = ?"
+                    " WHERE result = 'triggered' AND outcome = ''", (now,))
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error("[scheduler] 启动清扫调度侧失败（%s）", type(e).__name__)
+    return n
 
 
 # ---- 调度循环（lifespan 宿主，沿 _approval_scan_loop 先例）------------------
