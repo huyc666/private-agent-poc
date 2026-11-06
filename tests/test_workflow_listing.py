@@ -143,3 +143,63 @@ def test_n3_non_list_params_file_does_not_crash_listing():
     out = orch.list_orchestrations()  # 不得抛异常
     assert "aaa-crash" not in out
     assert "global-demo" in out
+
+
+# -------------------------------------- 复核整改（v0.17.48，P2 畸形 YAML）
+
+# 四类「合法但畸形」的 safe_load 结果：此前使 validate_definition 抛异常
+_P2_MALFORMED_DEFS = [
+    # 混合 str/int 顶层键 → sorted(unknown) / join 抛 TypeError
+    {"name": "p2-mixed", 1: "x", "zzz": "y", "roles": [], "steps": []},
+    # 步骤 role 非字符串 → 成员判断 unhashable
+    {"name": "p2-srole", "roles": [{"id": "r", "prompt": "p"}],
+     "steps": [{"id": "s", "role": []}]},
+    # fanout.from 非字符串 → 成员判断 unhashable
+    {"name": "p2-fanout", "roles": [{"id": "r", "prompt": "p"}],
+     "steps": [{"id": "s", "role": "r", "mode": "parallel",
+                "fanout": {"from": [], "limit": 2}}]},
+    # aggregate.role 非字符串 → 成员判断 unhashable
+    {"name": "p2-aggrole", "roles": [{"id": "r", "prompt": "p"}],
+     "steps": [{"id": "s", "role": "r"}],
+     "aggregate": {"role": [], "inputs": ["s"]}},
+    # aggregate.inputs 含非字符串元素 → 成员判断 unhashable
+    {"name": "p2-aggin", "roles": [{"id": "r", "prompt": "p"}],
+     "steps": [{"id": "s", "role": "r"}],
+     "aggregate": {"role": "r", "inputs": [["s"]]}},
+]
+
+
+@pytest.mark.parametrize("bad", _P2_MALFORMED_DEFS,
+                         ids=["mixed-keys", "step-role", "fanout-from",
+                              "agg-role", "agg-inputs"])
+def test_p2_validate_definition_is_total(bad):
+    # P2：validate_definition 对任意 safe_load 结果保持 total——
+    # 只返回错误列表，绝不抛异常
+    errors = orch.validate_definition(bad)
+    assert errors
+
+
+_P2_MALFORMED_YAMLS = [
+    "name: p2-mixed\n1: x\nzzz: y\n",
+    ("name: p2-srole\nroles:\n  - id: r\n    prompt: p\nsteps:\n"
+     "  - id: s\n    role: []\n"),
+    ("name: p2-fanout\nroles:\n  - id: r\n    prompt: p\nsteps:\n"
+     "  - id: s\n    role: r\n    mode: parallel\n"
+     "    fanout:\n      from: []\n      limit: 2\n"),
+    ("name: p2-aggrole\nroles:\n  - id: r\n    prompt: p\nsteps:\n"
+     "  - id: s\n    role: r\naggregate:\n  role: []\n  inputs: [s]\n"),
+    ("name: p2-aggin\nroles:\n  - id: r\n    prompt: p\nsteps:\n"
+     "  - id: s\n    role: r\naggregate:\n  role: r\n  inputs:\n    - []\n"),
+]
+
+
+def test_p2_malformed_yaml_files_do_not_crash_listing():
+    # P2：四类畸形 YAML 文件同时存在时列举不抛错，有效定义仍可见
+    orch.save_definition(_definition("global-demo"), scope=None)
+    for i, text in enumerate(_P2_MALFORMED_YAMLS):
+        (config.ORCHESTRATIONS_DIR / f"p2-bad-{i}.yaml").write_text(
+            text, encoding="utf-8")
+    usage.current_identity.set(_identity("alice"))
+    out = orch.list_orchestrations()  # 不得抛异常
+    assert "global-demo" in out
+    assert "p2-" not in out

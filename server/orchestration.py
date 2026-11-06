@@ -1,4 +1,4 @@
-"""通用多角色编排引擎（v0.17.47，PLAN 5.1 + 4.1）。
+"""通用多角色编排引擎（v0.17.48，PLAN 5.1 + 4.1）。
 
 - 5.1（spec docs/specs/5.1-general-orchestration.md）：声明式定义与执行引擎。
 - 4.1（spec docs/specs/4.1-workflow-solidification.md）：流程固化层——
@@ -185,15 +185,27 @@ def _validate_params_block(definition: dict, errors: list[str]) -> None:
                     errors.append(f"task_template 引用了未声明参数「{ref}」")
 
 
+def _unknown_fields(keys: set, label: str) -> str | None:
+    """未知字段错误文案；混合类型键安全排序与字符串化（P2 整改，不抛异常）。"""
+    unknown = sorted(keys, key=repr)
+    if not unknown:
+        return None
+    names = ", ".join(k if isinstance(k, str) else repr(k) for k in unknown)
+    return f"{label}包含未知字段：{names}"
+
+
 def validate_definition(definition: dict) -> list[str]:
-    """返回错误列表；空列表 = 可执行。错误文案不回显绝对路径。"""
+    """返回错误列表；空列表 = 可执行。错误文案不回显绝对路径。
+
+    对任意 yaml.safe_load 结果保持 total：只返回错误，绝不抛异常（P2 整改）。
+    """
     errors: list[str] = []
     if not isinstance(definition, dict):
         return ["定义必须是 YAML 对象"]
 
-    unknown = sorted(set(definition) - _TOP_KEYS)
-    if unknown:
-        errors.append(f"定义包含未知字段：{', '.join(unknown)}")
+    err = _unknown_fields(set(definition) - _TOP_KEYS, "定义")
+    if err:
+        errors.append(err)
 
     name = definition.get("name")
     if not isinstance(name, str) or not _NAME_RE.match(name):
@@ -227,9 +239,9 @@ def validate_definition(definition: dict) -> list[str]:
         if not isinstance(role, dict):
             errors.append(f"第 {i + 1} 个角色必须是对象")
             continue
-        unknown = sorted(set(role) - _ROLE_KEYS)
-        if unknown:
-            errors.append(f"角色包含未知字段：{', '.join(unknown)}")
+        err = _unknown_fields(set(role) - _ROLE_KEYS, "角色")
+        if err:
+            errors.append(err)
         rid = role.get("id")
         if not isinstance(rid, str) or not rid.strip():
             errors.append(f"第 {i + 1} 个角色缺少 id")
@@ -275,9 +287,9 @@ def validate_definition(definition: dict) -> list[str]:
         if not isinstance(step, dict):
             errors.append(f"第 {i + 1} 个步骤必须是对象")
             continue
-        unknown = sorted(set(step) - _STEP_KEYS)
-        if unknown:
-            errors.append(f"步骤包含未知字段：{', '.join(unknown)}")
+        err = _unknown_fields(set(step) - _STEP_KEYS, "步骤")
+        if err:
+            errors.append(err)
         sid = step.get("id")
         if not isinstance(sid, str) or not sid.strip():
             errors.append(f"第 {i + 1} 个步骤缺少 id")
@@ -286,7 +298,7 @@ def validate_definition(definition: dict) -> list[str]:
         else:
             seen_steps.add(sid)
         role = step.get("role")
-        if role not in role_ids:
+        if not isinstance(role, str) or role not in role_ids:
             errors.append(f"步骤「{sid or i + 1}」引用了未定义角色「{role}」")
         mode = step.get("mode", "single")
         if mode not in ("single", "parallel"):
@@ -305,7 +317,8 @@ def validate_definition(definition: dict) -> list[str]:
                 errors.append(f"并行步骤「{sid or i + 1}」缺少 fanout")
             else:
                 src = fanout.get("from")
-                if src not in seen_steps or src == sid:
+                if (not isinstance(src, str) or src not in seen_steps
+                        or src == sid):
                     errors.append(f"步骤「{sid or i + 1}」的 fanout 只能引用前序步骤")
                 limit = fanout.get("limit", GLOBAL_MAX_PARALLEL)
                 if (not isinstance(limit, int) or isinstance(limit, bool)
@@ -320,13 +333,15 @@ def validate_definition(definition: dict) -> list[str]:
         if not isinstance(aggregate, dict):
             errors.append("aggregate 必须是对象")
         else:
-            unknown = sorted(set(aggregate) - _AGG_KEYS)
-            if unknown:
-                errors.append(f"aggregate 包含未知字段：{', '.join(unknown)}")
-            if aggregate.get("role") not in role_ids:
-                errors.append(f"aggregate 引用了未定义角色「{aggregate.get('role')}」")
+            err = _unknown_fields(set(aggregate) - _AGG_KEYS, "aggregate")
+            if err:
+                errors.append(err)
+            agg_role = aggregate.get("role")
+            if not isinstance(agg_role, str) or agg_role not in role_ids:
+                errors.append(f"aggregate 引用了未定义角色「{agg_role}」")
             agg_inputs = aggregate.get("inputs", [])
-            if not isinstance(agg_inputs, list):
+            if (not isinstance(agg_inputs, list)
+                    or any(not isinstance(x, str) for x in agg_inputs)):
                 errors.append("aggregate.inputs 必须是字符串列表")
                 agg_inputs = []
             for ref in agg_inputs:
@@ -348,10 +363,16 @@ def load_definition_text(text: str) -> dict:
     if not isinstance(data, dict):
         return {"status": "error", "error": "定义必须是 YAML 对象",
                 "definition": None, "hash": ""}
-    errors = validate_definition(data)
+    try:
+        errors = validate_definition(data)
+    except Exception as e:
+        # 结构化兜底：validate_definition 应对任意 safe_load 结果保持 total，
+        # 此为最后防线，不替代逐字段类型校验（P2 整改）
+        errors = [f"定义校验异常（{type(e).__name__}）"]
     if errors:
+        # 错误分支不计算内容哈希：畸形定义（如混合类型键）无法安全排序序列化
         return {"status": "error", "error": "；".join(errors),
-                "definition": data, "hash": definition_hash(data)}
+                "definition": data, "hash": ""}
     return {"status": "ok", "error": "", "definition": data,
             "hash": definition_hash(data)}
 
