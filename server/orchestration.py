@@ -1114,9 +1114,10 @@ def finish_instance_row(instance_id: str | None, *, status: str,
         logger.error("[orchestration] 实例终态写入失败（%s）", type(e).__name__)
 
 
-def instance_status_for_trigger(trigger_id: str) -> str:
-    """按触发键取最近一次实例的状态（自动触发尝试终态回写依据）。"""
-    if not trigger_id:
+def instance_status_for_run(run_id: str) -> str:
+    """按本次执行 run_id 精确取实例状态（P2-1：不用 trigger_id 全局推断，
+    接管/重入场景下 trigger_id 会命中他轮实例）。"""
+    if not run_id:
         return ""
     try:
         with _WF_LOCK:
@@ -1124,9 +1125,9 @@ def instance_status_for_trigger(trigger_id: str) -> str:
             try:
                 _wf_ensure_schema(conn)
                 row = conn.execute(
-                    "SELECT status FROM workflow_instances WHERE trigger_id = ?"
+                    "SELECT status FROM workflow_instances WHERE run_id = ?"
                     " ORDER BY started_at DESC LIMIT 1",
-                    (trigger_id,)).fetchone()
+                    (run_id,)).fetchone()
                 return row[0] if row else ""
             finally:
                 conn.close()
@@ -1135,9 +1136,10 @@ def instance_status_for_trigger(trigger_id: str) -> str:
         return ""
 
 
-def abort_instance_for_trigger(trigger_id: str, reason: str) -> int:
-    """停机取消补偿：把该触发仍在 running 的实例标 failed（不覆盖已有终态）。"""
-    if not trigger_id:
+def abort_instance_for_run(run_id: str, reason: str) -> int:
+    """停机取消补偿：仅终止本次 run_id 仍在 running 的实例（P2-1：按
+    run_id 精确执行，不波及同 trigger 下他轮运行；不覆盖已有终态）。"""
+    if not run_id:
         return 0
     try:
         with _WF_LOCK:
@@ -1146,9 +1148,9 @@ def abort_instance_for_trigger(trigger_id: str, reason: str) -> int:
                 _wf_ensure_schema(conn)
                 cur = conn.execute(
                     "UPDATE workflow_instances SET status = 'failed', error = ?,"
-                    " finished_at = ? WHERE trigger_id = ? AND status = 'running'",
+                    " finished_at = ? WHERE run_id = ? AND status = 'running'",
                     ((reason or "")[:INSTANCE_ERROR_TRUNCATE], time.time(),
-                     trigger_id))
+                     run_id))
                 n = cur.rowcount
                 conn.commit()
             finally:
@@ -1237,15 +1239,17 @@ async def run_triggered(name: str, params: dict, identity: usage.Identity, *,
                         trigger_source: str = "scheduled",
                         schedule_id: str = "", trigger_id: str = "",
                         planned_at: float | None = None,
-                        event: dict | None = None) -> str:
+                        event: dict | None = None,
+                        run_id: str | None = None) -> str:
     """自动触发执行入口（4.2）：复用 run_orchestration 语义。
 
     与手动触发的差异：身份显式下传（触发时重解析的创建者当前身份）、
     session_id=""/generation=None（check_fence 对空会话直接跳过，自动实例
     不绑会话删除生命周期，无栅栏 aborted 路径）、无进度事件（无 SSE 监听）。
     event 仅允许白名单变量（event_path/event_id/event_uploader）参与模板渲染，
-    不写入 params/实例 params_json（历史可复现）。每次执行生成独立 run_id，
-    实例行与执行上下文同源（计量/日志/实例可串联）。
+    不写入 params/实例 params_json（历史可复现）。每次执行独立 run_id（调用方
+    下传或自生成），实例行与执行上下文同源（计量/日志/实例可串联）；终态
+    查询与取消补偿按 run_id 精确定位（P2-1）。
     """
     if not isinstance(identity, usage.Identity):
         return "自动触发未执行：身份无效"
@@ -1270,14 +1274,14 @@ async def run_triggered(name: str, params: dict, identity: usage.Identity, *,
             if key in event:
                 render_values[key] = str(event[key])
     final_task = render_task_template(template, render_values)
-    run_id = "wfr-" + secrets.token_hex(6)
+    rid = run_id or ("wfr-" + secrets.token_hex(6))
     instance_id = create_instance_row(
         definition, identity, values, loaded["hash"],
         trigger_source=trigger_source, schedule_id=schedule_id,
         trigger_id=trigger_id, planned_at=planned_at,
-        session_id="", run_id=run_id)
+        session_id="", run_id=rid)
     result = await execute(definition, final_task, identity=identity,
-                           session_id="", generation=None, run_id=run_id,
+                           session_id="", generation=None, run_id=rid,
                            llm=STATE.llm)
     return _finish_from_result(result, instance_id)
 

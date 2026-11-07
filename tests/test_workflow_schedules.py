@@ -997,6 +997,8 @@ def test_ac13_claim_rollback_on_attempt_failure(monkeypatch):
 
 
 def test_ac13_execute_job_error_paths(monkeypatch):
+    _register_timer(monkeypatch)
+    _prepare_llm(monkeypatch)
     S = _sched()
     job = {"schedule_id": "wfs-x", "definition_name": "sched-demo",
            "params": {}, "creator": "ghost", "trigger_source": "scheduled",
@@ -1004,15 +1006,15 @@ def test_ac13_execute_job_error_paths(monkeypatch):
     # claim 后创建者失效的竞态兜底：拒绝执行且不崩
     out = asyncio.run(S.execute_job(job))
     assert "自动触发未执行" in out
-    # 编排内部异常：自吞并返回明确文案（循环不死亡）
-    job["creator"] = "carol"
-    auth.add_user("carol", role="approver")
+    # 编排内部异常：自吞并返回明确文案（循环不死亡）——用真实 claim 的
+    # 作业（手工 job 无调度行，租约 CAS 会按不存在行 fail-closed 拒绝）
+    real_job = S.process_due(1060.0)[0]
 
     async def boom(*a, **k):
         raise RuntimeError("编排爆炸")
 
     monkeypatch.setattr(orch, "run_triggered", boom)
-    out = asyncio.run(S.execute_job(job))
+    out = asyncio.run(S.execute_job(real_job))
     assert "自动触发执行失败（RuntimeError）" in out
 
 
@@ -1202,19 +1204,6 @@ def test_ac14_lease_released_and_attempt_outcome(monkeypatch):
     assert att["outcome"] == "completed" and att["finished_at"]
 
 
-def test_ac14_stale_lease_taken_over(monkeypatch):
-    """超龄租约视为进程中断遗留，允许接手执行。"""
-    _register_timer(monkeypatch)
-    _prepare_llm(monkeypatch)
-    S = _sched()
-    sid = _schedule_rows()[0]["schedule_id"]
-    job = S.process_due(1060.0)[0]
-    _set_lease(sid, time.time() - 7200)
-    out = _run_job(job)
-    assert "多角色编排完成" in out
-    assert _schedule_rows()[0]["running_since"] is None
-
-
 def test_ac14_cancel_marks_failed_and_releases_lease(monkeypatch):
     """停机取消：实例标 failed、尝试终态 cancelled、租约释放。"""
     _register_timer(monkeypatch)
@@ -1228,7 +1217,7 @@ def test_ac14_cancel_marks_failed_and_releases_lease(monkeypatch):
             schedule_id=kw.get("schedule_id", ""),
             trigger_id=kw.get("trigger_id", ""),
             planned_at=kw.get("planned_at"),
-            session_id="", run_id="wfr-fake")
+            session_id="", run_id=kw.get("run_id") or "wfr-fake")
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(orch, "run_triggered", fake_run)
@@ -1381,7 +1370,7 @@ def test_ac14_schema_migrates_existing_tables():
     finally:
         conn.close()
     assert {"running_since", "running_trigger_id"} <= cols
-    assert {"outcome", "finished_at"} <= acols
+    assert {"outcome", "finished_at", "run_id"} <= acols
 
 
 def test_ac14_bookkeeping_failure_does_not_raise(monkeypatch):
@@ -1394,3 +1383,133 @@ def test_ac14_bookkeeping_failure_does_not_raise(monkeypatch):
     monkeypatch.setattr(S, "_connect", boom)
     S._release_run("wfs-x", "trg-x")
     S._finish_attempt("wfs-x", "trg-x", "completed")
+
+
+# ------------------------------------------------ AC15 复核整改（第三轮评审）
+
+
+def test_ac15_same_trigger_reentry_rejected(monkeypatch):
+    """同一触发重复派发不允许重入续租（P1-1）：第二次领取同样拒绝。
+
+    旧实现按 running_since 时长 + trigger_id 判定，同 trigger 可刷新
+    自己的租约并重入执行，同一作业可生成两个实例。
+    """
+    _register_timer(monkeypatch)
+    _prepare_llm(monkeypatch)
+    S = _sched()
+    sid = _schedule_rows()[0]["schedule_id"]
+    job = S.process_due(1060.0)[0]
+    now = time.time()
+    assert S._acquire_run(sid, "sched-demo", job["trigger_id"], now) is True
+    # 本人重入：不允许（普通执行无续租语义）
+    assert S._acquire_run(sid, "sched-demo", job["trigger_id"], now) is False
+    # 释放后可再次领取
+    S._release_run(sid, job["trigger_id"])
+    assert S._acquire_run(sid, "sched-demo", job["trigger_id"], now) is True
+    S._release_run(sid, job["trigger_id"])
+
+
+def test_ac15_active_long_task_not_taken_over(monkeypatch):
+    """超龄但未释放的租约运行期不按时长接管（P1-2 方案 1）：新触发仍
+    skipped；只有启动清扫清空租约后才能接手。"""
+    _register_timer(monkeypatch)
+    _prepare_llm(monkeypatch)
+    S = _sched()
+    sid = _schedule_rows()[0]["schedule_id"]
+    job = S.process_due(1060.0)[0]
+    _set_lease(sid, time.time() - 7200)  # 超过 grace，但任务可能仍活跃
+    out = _run_job(job)
+    assert "上一轮仍在执行" in out
+    att = _attempt_rows()[-1]
+    assert att["outcome"] == "skipped" and "运行中互斥" in att["reason"]
+    # 模拟进程重启：启动清扫清空遗留租约后，下一轮触发可正常执行
+    S.sweep_stale_running(now=time.time(), grace=3600)
+    out2 = _run_job(S.process_due(1120.0)[0])
+    assert "多角色编排完成" in out2
+
+
+def test_ac15_run_scoped_status_and_abort():
+    """终态查询/取消补偿按 run_id 精确执行（P2-1）：同 trigger_id 的
+    其他运行实例不被误伤。"""
+    ident = _identity("carol")
+    for rid in ("wfr-a", "wfr-b"):
+        orch.create_instance_row(
+            _def_dict(), ident, {"topic": "x", "note": ""}, "h",
+            trigger_source="scheduled", schedule_id="s1",
+            trigger_id="same-trigger", planned_at=None,
+            session_id="", run_id=rid)
+    assert orch.instance_status_for_run("wfr-b") == "running"
+    assert orch.instance_status_for_run("wfr-none") == ""
+    n = orch.abort_instance_for_run("wfr-a", "停机取消")
+    assert n == 1
+    assert orch.instance_status_for_run("wfr-a") == "failed"
+    # 旧任务的取消补偿不得影响同 trigger 下的新运行实例
+    assert orch.instance_status_for_run("wfr-b") == "running"
+
+
+def test_ac15_takeover_old_task_cancel_never_touches_new_run(monkeypatch):
+    """端到端（P1-1/P1-2/P2-1 组合）：旧任务被启动清扫接替后，其取消
+    补偿只命中自己 run_id 的实例，新执行照常完成且不受影响。"""
+    _register_timer(monkeypatch)
+    _prepare_llm(monkeypatch)
+    S = _sched()
+    job1 = S.process_due(1060.0)[0]
+
+    async def fake_run(name, params, identity, **kw):
+        iid = orch.create_instance_row(
+            _def_dict(), identity, params, "h",
+            trigger_source=kw.get("trigger_source", "scheduled"),
+            schedule_id=kw.get("schedule_id", ""),
+            trigger_id=kw.get("trigger_id", ""),
+            planned_at=kw.get("planned_at"),
+            session_id="", run_id=kw.get("run_id") or "wfr-fake")
+        if kw.get("trigger_id") == job1["trigger_id"]:
+            await asyncio.sleep(3600)  # 第一轮长任务迟迟不结束
+        else:
+            orch.finish_instance_row(iid, status="completed", summary="完成")
+        return "多角色编排完成"
+
+    monkeypatch.setattr(orch, "run_triggered", fake_run)
+    seen = {}
+
+    async def scenario():
+        task1 = asyncio.create_task(S.execute_job(job1))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        # 模拟进程重启：清扫清空租约（实例 1 在 grace 内不被标 failed）
+        S.sweep_stale_running(now=time.time(), grace=3600)
+        job2 = S.process_due(1120.0)[0]
+        seen["trigger2"] = job2["trigger_id"]
+        out2 = await S.execute_job(job2)
+        assert "多角色编排完成" in out2
+        task1.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task1
+
+    asyncio.run(scenario())
+    rows = _instance_rows()
+    assert len(rows) == 2
+    old_inst, new_inst = rows[0], rows[1]
+    assert old_inst["status"] == "failed"
+    assert "停机取消" in (old_inst["error"] or "")
+    # 新执行不被旧任务的取消补偿误伤，且尝试回写关联本次 run_id
+    assert new_inst["status"] == "completed"
+    assert new_inst["run_id"] != old_inst["run_id"]
+    atts = {a["trigger_id"]: a for a in _attempt_rows()}
+    assert atts[seen["trigger2"]]["outcome"] == "completed"
+    assert atts[seen["trigger2"]]["run_id"] == new_inst["run_id"]
+
+
+def test_ac15_orphan_job_lease_rejected(monkeypatch):
+    """调度行不存在的手工作业：租约 CAS 条件更新命中 0 行 fail-closed
+    拒绝（不执行、不建实例、留痕 skipped）。"""
+    _register_timer(monkeypatch)
+    _prepare_llm(monkeypatch)
+    S = _sched()
+    job = {"schedule_id": "wfs-none", "definition_name": "sched-demo",
+           "params": {}, "creator": "carol", "trigger_source": "scheduled",
+           "trigger_id": "t-orphan", "planned_at": 1.0}
+    out = asyncio.run(S.execute_job(job))
+    assert "上一轮仍在执行" in out
+    assert _instance_rows() == []
+    assert _attempt_rows() == []  # 未经 claim，无留痕可回写

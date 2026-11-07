@@ -91,6 +91,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             reason         TEXT NOT NULL DEFAULT '',
             outcome        TEXT NOT NULL DEFAULT '',
             finished_at    REAL,
+            run_id         TEXT NOT NULL DEFAULT '',
             payload_json   TEXT NOT NULL DEFAULT '{}',
             created_at     REAL NOT NULL
         )
@@ -101,7 +102,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         ("running_trigger_id", "TEXT NOT NULL DEFAULT ''")))
     _ensure_columns(conn, "workflow_trigger_attempts", (
         ("outcome", "TEXT NOT NULL DEFAULT ''"),
-        ("finished_at", "REAL")))
+        ("finished_at", "REAL"),
+        ("run_id", "TEXT NOT NULL DEFAULT ''")))
     # 事件 × 调度唯一触发键（幂等）
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_wf_attempt_key"
                  " ON workflow_trigger_attempts(schedule_id, trigger_id)")
@@ -607,10 +609,12 @@ def _dispatch(job: dict) -> asyncio.Task:
 
 def _acquire_run(schedule_id: str, definition_name: str, trigger_id: str,
                  now: float) -> bool:
-    """领取定义级运行租约（P1-1）：同名定义同一时刻只允许一轮执行。
+    """领取定义级运行租约（P1-1/P1-2 复核整改）：有活跃租约即拒绝。
 
     租约落在调度行，按 definition_name 互斥——不同调度引用同一定义同样
-    互斥；超过 STALE_RUNNING_GRACE 的租约视为进程遗留，可被接手。
+    互斥；同一触发重复派发同样拒绝（普通执行无重入续租语义）。运行期
+    不按固定时长自动接管（无心跳语义，长任务不会被误判遗留）；进程
+    遗留租约仅由启动清扫 sweep_stale_running 清空（单进程前提，方案 1）。
     """
     with _SCHED_LOCK:
         conn = _connect()
@@ -618,17 +622,20 @@ def _acquire_run(schedule_id: str, definition_name: str, trigger_id: str,
             _ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT running_trigger_id FROM workflow_schedules"
-                " WHERE definition_name = ? AND running_since IS NOT NULL"
-                " AND running_since > ? LIMIT 1",
-                (definition_name, now - STALE_RUNNING_GRACE)).fetchone()
-            if row is not None and row["running_trigger_id"] != trigger_id:
+                "SELECT 1 FROM workflow_schedules WHERE definition_name = ?"
+                " AND running_trigger_id != '' LIMIT 1",
+                (definition_name,)).fetchone()
+            if row is not None:
                 conn.rollback()
                 return False
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE workflow_schedules SET running_since = ?,"
-                " running_trigger_id = ? WHERE schedule_id = ?",
+                " running_trigger_id = ? WHERE schedule_id = ?"
+                " AND running_trigger_id = ''",
                 (now, trigger_id, schedule_id))
+            if cur.rowcount != 1:
+                conn.rollback()
+                return False
             conn.commit()
             return True
         finally:
@@ -654,10 +661,11 @@ def _release_run(schedule_id: str, trigger_id: str) -> None:
 
 
 def _finish_attempt(schedule_id: str, trigger_id: str, outcome: str,
-                    reason: str = "") -> None:
-    """回写触发尝试终态（P2-3）：completed/failed/cancelled/skipped/denied。
+                    reason: str = "", run_id: str = "") -> None:
+    """回写触发尝试终态（P2-3/P2-1）：completed/failed/cancelled/skipped/denied。
 
-    只回写尚未终结（outcome 为空）的尝试，避免覆盖启动清扫的 abandoned。
+    只回写尚未终结（outcome 为空）的尝试，避免覆盖启动清扫的 abandoned；
+    run_id 关联本次实际执行（P2-1：不用 trigger_id 推断实例）。
     """
     try:
         with _SCHED_LOCK:
@@ -666,9 +674,11 @@ def _finish_attempt(schedule_id: str, trigger_id: str, outcome: str,
                 _ensure_schema(conn)
                 conn.execute(
                     "UPDATE workflow_trigger_attempts SET outcome = ?,"
-                    " reason = ?, finished_at = ? WHERE schedule_id = ?"
-                    " AND trigger_id = ? AND outcome = ''",
-                    (outcome, reason, time.time(), schedule_id, trigger_id))
+                    " reason = ?, finished_at = ?, run_id = ?"
+                    " WHERE schedule_id = ? AND trigger_id = ?"
+                    " AND outcome = ''",
+                    (outcome, reason, time.time(), run_id,
+                     schedule_id, trigger_id))
                 conn.commit()
             finally:
                 conn.close()
@@ -699,29 +709,35 @@ async def execute_job(job: dict) -> str:
     identity = usage.Identity(username=user["username"], role=user["role"],
                               department=user.get("department", ""),
                               auth_source="local")
+    # P2-1：本次执行独立 run_id，终态/取消补偿按它精确定位，不用
+    # trigger_id 全局推断（接管/重入场景下会误读他轮实例）
+    run_id = "wfr-" + secrets.token_hex(6)
     try:
         out = await orch.run_triggered(
             job["definition_name"], job.get("params") or {}, identity,
             trigger_source=job.get("trigger_source", "scheduled"),
             schedule_id=schedule_id, trigger_id=trigger_id,
             planned_at=job.get("planned_at"),
-            event=job.get("event") or None)
-        status = orch.instance_status_for_trigger(trigger_id)
+            event=job.get("event") or None, run_id=run_id)
+        status = orch.instance_status_for_run(run_id)
         if status == "completed" or (not status and
                                      out.startswith("多角色编排完成")):
-            _finish_attempt(schedule_id, trigger_id, "completed")
+            _finish_attempt(schedule_id, trigger_id, "completed",
+                            run_id=run_id)
         else:
             _finish_attempt(schedule_id, trigger_id, "failed",
-                            f"执行失败（实例状态：{status or '未知'}）")
+                            f"执行失败（实例状态：{status or '未知'}）",
+                            run_id=run_id)
         return out
     except asyncio.CancelledError:
-        orch.abort_instance_for_trigger(trigger_id, "停机取消")
-        _finish_attempt(schedule_id, trigger_id, "cancelled", "停机取消")
+        orch.abort_instance_for_run(run_id, "停机取消")
+        _finish_attempt(schedule_id, trigger_id, "cancelled", "停机取消",
+                        run_id=run_id)
         raise
     except Exception as e:
         logger.error("[scheduler] 自动触发执行失败（%s）", type(e).__name__)
         _finish_attempt(schedule_id, trigger_id, "failed",
-                        f"执行异常（{type(e).__name__}）")
+                        f"执行异常（{type(e).__name__}）", run_id=run_id)
         return f"自动触发执行失败（{type(e).__name__}）"
     finally:
         _release_run(schedule_id, trigger_id)
