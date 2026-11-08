@@ -370,3 +370,88 @@ def test_whitelisted_mcp_tool_is_available(monkeypatch):
     assert orch.validate_definition(data) == []
     assert "get_city_weather" in orch.available_tools()
 
+
+# ---- 5.2 执行期空产出显式标记（PLAN 5.2，5.1 补丁） ----
+
+def _empty_mark(step_id: str) -> str:
+    return f"上游步骤 {step_id} 输出为空"
+
+
+def _prompt_text(call) -> str:
+    messages = call["messages"] if isinstance(call, dict) else call
+    return "\n".join(str(getattr(m, "content", m)) for m in messages)
+
+
+def test_empty_upstream_output_marked_in_serial_inputs():
+    definition = {
+        "name": "empty-serial", "version": "1",
+        "roles": [
+            {"id": "intake", "prompt": "接收", "tools": []},
+            {"id": "writer", "prompt": "写作", "tools": []},
+        ],
+        "steps": [
+            {"id": "intake", "role": "intake", "mode": "single"},
+            {"id": "write", "role": "writer", "mode": "single",
+             "inputs": ["intake"]},
+        ],
+    }
+    llm = _FakeLLM(["", "成稿"])
+    result = asyncio.run(orch.execute(definition, "写报告",
+                                     identity=_identity(), llm=llm))
+    assert len(llm.calls) == 2
+    assert _empty_mark("intake") in _prompt_text(llm.calls[1])
+    assert result["ok"] is True
+    assert result["failed_step"] == ""
+    assert result["completed"] is True
+
+
+def test_empty_fanout_source_marked_and_fallback_kept(monkeypatch):
+    made = _install_react(monkeypatch, answer="子任务结果")
+    definition = {
+        "name": "empty-fanout", "version": "1",
+        "roles": [
+            {"id": "planner", "prompt": "规划", "tools": []},
+            {"id": "worker", "prompt": "执行", "tools": []},
+        ],
+        "steps": [
+            {"id": "plan", "role": "planner", "mode": "single"},
+            {"id": "work", "role": "worker", "mode": "parallel",
+             "fanout": {"from": "plan", "limit": 2}},
+        ],
+    }
+    result = asyncio.run(orch.execute(definition, "调研任务",
+                                     identity=_identity(),
+                                     llm=_FakeLLM([""])))
+    assert result["ok"] is True
+    assert result["subtasks"] == ["调研任务"]
+    assert len(made) == 1
+    assert _empty_mark("plan") in _prompt_text(made[0].calls[0])
+
+
+def test_empty_upstream_output_marked_for_aggregate():
+    definition = {
+        "name": "empty-aggregate", "version": "1",
+        "roles": [
+            {"id": "solo", "prompt": "执行", "tools": []},
+            {"id": "agg", "prompt": "汇总", "tools": []},
+        ],
+        "steps": [{"id": "s", "role": "solo", "mode": "single"}],
+        "aggregate": {"role": "agg", "inputs": ["s"]},
+    }
+    llm = _FakeLLM(["", "汇总结果"])
+    result = asyncio.run(orch.execute(definition, "任务",
+                                     identity=_identity(), llm=llm))
+    assert len(llm.calls) == 2
+    assert _empty_mark("s") in _prompt_text(llm.calls[1])
+    assert result["ok"] is True
+    assert result["summary"] == "汇总结果"
+
+
+def test_step_messages_marks_missing_and_empty_references():
+    role = {"id": "reviewer", "prompt": "复核", "tools": []}
+    messages = orch._step_messages(
+        role, _identity(), "总任务", {"empty": ""}, ["empty", "missing"])
+    text = _prompt_text(messages)
+    assert _empty_mark("empty") in text
+    assert _empty_mark("missing") in text
+

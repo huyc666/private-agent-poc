@@ -641,13 +641,20 @@ def _system_prompt(role: dict, identity: usage.Identity) -> str:
     return prompt
 
 
+def _empty_output_note(ref: str) -> str:
+    """空产出显式标记（5.2）：下游可区分「上游无产出」与「未引用上游」。"""
+    return f"【上游步骤 {ref} 输出为空】（没有可用产出，请基于其余信息继续）"
+
+
 def _step_messages(role: dict, identity: usage.Identity, task: str,
                    outputs: dict, inputs: list, extra: str = "") -> list:
     user = f"总任务：{task}"
     for ref in inputs or []:
         text = outputs.get(ref)
-        if text:
+        if isinstance(text, str) and text.strip():
             user += f"\n\n【上游步骤 {ref} 输出】\n{text}"
+        else:
+            user += f"\n\n{_empty_output_note(ref)}"
     if extra:
         user += f"\n\n{extra}"
     return [SystemMessage(content=_system_prompt(role, identity)),
@@ -779,10 +786,16 @@ async def execute(definition: dict, task: str, *, identity: usage.Identity,
                     concurrency = min(fanout_limit,
                                       int(definition.get("max_parallel", GLOBAL_MAX_PARALLEL)),
                                       GLOBAL_MAX_PARALLEL)
-                    subtasks = _parse_fanout(outputs.get(src, ""), parse_limit, task)
+                    src_text = outputs.get(src, "")
+                    subtasks = _parse_fanout(src_text, parse_limit, task)
+                    # 5.2：来源空产出退回 [task] 时给出可见标记（兜底语义不变）
+                    fanout_note = ""
+                    if (not (isinstance(src_text, str) and src_text.strip())
+                            and src not in inputs):
+                        fanout_note = _empty_output_note(src)
                     findings_for_step = await _run_parallel(
                         ctx, use_llm, tools, role, identity, task, outputs,
-                        inputs, subtasks, concurrency)
+                        inputs, subtasks, concurrency, fanout_note)
                     findings.extend(findings_for_step)
                     outputs[sid] = "\n\n".join(
                         f"【子任务】{f['subtask']}\n【结果】{f['result']}"
@@ -864,7 +877,7 @@ def _current_step_id(definition: dict, outputs: dict) -> str:
 async def _run_parallel(ctx: _Context, llm, tools: list, role: dict,
                         identity: usage.Identity, task: str, outputs: dict,
                         inputs: list, subtasks: list[str],
-                        concurrency: int) -> list:
+                        concurrency: int, notice: str = "") -> list:
     """阶段内并行；峰值受 semaphore（已按双重上限取 min）约束。"""
     if not subtasks:
         return []
@@ -875,8 +888,11 @@ async def _run_parallel(ctx: _Context, llm, tools: list, role: dict,
         async with sem:
             ctx.check_fence()
             ctx.bind()
+            extra = f"你负责的子任务：{sub}"
+            if notice:
+                extra = f"{notice}\n{extra}"
             messages = _step_messages(role, identity, task, outputs, inputs,
-                                      extra=f"你负责的子任务：{sub}")
+                                      extra=extra)
             out = await _run_react(ctx, llm, tools, messages)
             return {"step": role.get("id", ""), "subtask": sub, "result": out}
 
