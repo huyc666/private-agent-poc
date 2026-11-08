@@ -215,7 +215,9 @@
 
 | 级别 | 规则 | 实例 |
 |---|---|---|
-| must | 每项 PLAN 任务/加固版本开发前先产 spec，含四部分：①背景与目标 ②需求分析与约束澄清 ③关键技术与选型决策 ④验收标准（AC 可检验）；经用户确认才开发 | [spec-first/SKILL.md](file:///e:/codebase/GitHub/private-agent-poc/.trae/skills/spec-first/SKILL.md#L30-L50)；[security-hardening-v0.17.39.md](file:///e:/codebase/GitHub/private-agent-poc/docs/specs/security-hardening-v0.17.39.md#L1-L30) |
+| must | 需要 spec 的档位（见 spec-first「任务档位与裁剪」）开发前先产 spec，含四部分：①背景与目标 ②需求分析与约束澄清 ③关键技术与选型决策 ④验收标准（AC 可检验）；经用户确认才开发 | [spec-first/SKILL.md](file:///e:/codebase/GitHub/private-agent-poc/.trae/skills/spec-first/SKILL.md#L30-L50)；[security-hardening-v0.17.39.md](file:///e:/codebase/GitHub/private-agent-poc/docs/specs/security-hardening-v0.17.39.md#L1-L30) |
+| must | spec 除四部分外须含 §4.1 AC 账本（验证方式/用例/红态/实现证据/收敛）与 §5 红测试清单、§6 红运行记录（含基线 passed/skipped）、§7 收敛结论；证据须为测试名或 `文件:行号`，可由评审机械复核 | spec-first「契约关」「兑现关」；[4.2-scheduled-triggers.md](file:///e:/codebase/GitHub/private-agent-poc/docs/specs/4.2-scheduled-triggers.md) |
+| must | 任务档位与裁剪按 spec-first「任务档位与裁剪」执行；免 spec 档位（纯文档/缺陷修复）在交付汇报声明档位与裁剪，声明与实际不符按 P1 处理 | spec-first 同名章节 |
 | must | 命名二选一：PLAN 任务用 `<任务号>-<短名>.md`（`2.3-kb-permissions.md`）；版本加固用 `<主题>-v0.17.xx.md`（`security-hardening-v0.17.39.md`） | docs/specs/ 目录现状（两种各 8+ 篇并存） |
 | should | spec 含"现状证据"表（层/位置/口径 + 行号）与"回归门槛"；评审裁决（修复/误报/有意保留）回写 spec 留痕 | [security-hardening-v0.17.39.md](file:///e:/codebase/GitHub/private-agent-poc/docs/specs/security-hardening-v0.17.39.md#L21-L30)、[L99-L113](file:///e:/codebase/GitHub/private-agent-poc/docs/specs/security-hardening-v0.17.39.md#L99-L113) |
 | must | 有意保留的行为变更（如 fail-closed 收紧）须在 spec 写明并在 SECURITY.md/部署文档加警示 | v0.17.39 SSO 空部门头（SECURITY.md 部署警示） |
@@ -224,7 +226,9 @@
 
 | 级别 | 规则 | 实例 |
 |---|---|---|
-| must | 提交前必须过一次代码评审（TRAE-code-review），触及安全边界追加独立交叉验证；未评审不提交 | spec-first 流程「代码评审」步骤（project 约定） |
+| must | 提交前必须过一次代码评审（TRAE-code-review）；命中复审条件时按 spec-first「代码评审（含触发式复审）」执行；未评审不提交 | spec-first 流程「代码评审（含触发式复审）」（project 约定） |
+| must | 编码前 spec 独立评审（触发条件见 spec-first「任务档位与裁剪」）报告命名 `YYYY-MM-DD-plan-<任务号>-spec-review.md`；结论分 P0/P1/P2 并含「不成立/误报」区；P0/P1 修复或书面拒绝后才可请求用户确认 | [2026-11-06-plan-4.2-spec-review.md](file:///e:/codebase/GitHub/private-agent-poc/docs/reviews/2026-11-06-plan-4.2-spec-review.md) |
+| must | 修复后复审报告命名 `YYYY-MM-DD-v0.17.xx-<修复后短hash>-rereview.md`；只查上轮问题关闭与本轮新改动，最多 2 轮且每轮 P0/P1 严格递减 | [2026-11-07-v0.17.49-a8198ef-rereview.md](file:///e:/codebase/GitHub/private-agent-poc/docs/reviews/2026-11-07-v0.17.49-a8198ef-rereview.md) |
 | must | 评审报告命名 `YYYY-MM-DD-v0.17.xx-<短hash>-review.md`；整改回执 `-review-response.md`；结论按「确认缺陷已修复 / 误报证伪（附证据）/ 有意保留（附理由）」分类 | docs/reviews/ 目录；[2026-11-02-v0.17.39-8bba994-review-response.md](file:///e:/codebase/GitHub/private-agent-poc/docs/reviews/2026-11-02-v0.17.39-8bba994-review-response.md#L8-L18) 逐条处置表 |
 
 ### 5.3 PLAN.md 待办
