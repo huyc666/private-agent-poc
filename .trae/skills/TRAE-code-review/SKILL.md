@@ -1,6 +1,6 @@
 ---
 name: TRAE-code-review
-description: 对当前变更执行结构化代码评审——范围判定、意图推断（mermaid 图）、双子代理并行交叉验证（2/2 确认纳入 / 1/2 带疑纳入 / 0/2 证伪排除）、问题表格输出与 AskUserQuestion 修复选择。适用于提交前的强制评审关卡（spec-first 流程第 9 步），或用户明确要求评审代码/变更/commit。Use when the user asks 执行代码评审 / 评审这次变更 / code review。Do not use for 与评审无关的问答、纯测试运行或用户明确说跳过的场合。
+description: 对当前变更执行结构化代码评审——范围判定、意图推断（mermaid 图）、双子代理并行交叉验证（2/2 确认纳入 / 1/2 带疑纳入 / 0/2 证伪排除）、问题表格输出与 AskUserQuestion 修复选择。适用于提交前的强制评审关卡（spec-first 流程的「代码评审」步骤），或用户明确要求评审代码/变更/commit。Use when the user asks 执行代码评审 / 评审这次变更 / code review。Do not use for 与评审无关的问答、纯测试运行或用户明确说跳过的场合。
 ---
 
 # TRAE Code Review

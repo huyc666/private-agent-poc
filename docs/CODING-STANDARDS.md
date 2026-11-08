@@ -224,7 +224,7 @@
 
 | 级别 | 规则 | 实例 |
 |---|---|---|
-| must | 提交前必须过一次代码评审（TRAE-code-review），触及安全边界追加独立交叉验证；未评审不提交 | spec-first 流程第 7 步（project 约定） |
+| must | 提交前必须过一次代码评审（TRAE-code-review），触及安全边界追加独立交叉验证；未评审不提交 | spec-first 流程「代码评审」步骤（project 约定） |
 | must | 评审报告命名 `YYYY-MM-DD-v0.17.xx-<短hash>-review.md`；整改回执 `-review-response.md`；结论按「确认缺陷已修复 / 误报证伪（附证据）/ 有意保留（附理由）」分类 | docs/reviews/ 目录；[2026-11-02-v0.17.39-8bba994-review-response.md](file:///e:/codebase/GitHub/private-agent-poc/docs/reviews/2026-11-02-v0.17.39-8bba994-review-response.md#L8-L18) 逐条处置表 |
 
 ### 5.3 PLAN.md 待办
@@ -239,7 +239,7 @@
 | 级别 | 规则 | 实例 |
 |---|---|---|
 | must | 版本提交信息格式：`类型 v0.17.xx：<一句话主题>（spec: docs/specs/xxx.md）`。类型统一用英文词：`feat`（新功能）/ `fix`（缺陷修复）/ `security`（安全加固）/ `docs`（纯文档/报告归档，可声明不计版本）/ `refactor` / `chore` / `ui`。历史提交中的中文前缀（`安全加固 vX`、`存档：`）与 `feat(v0.17.xx):` 写法不追溯、不回改 | `8bba994` `安全加固 v0.17.39：…`（历史形态）；新提交示例：`security v0.17.41：…（spec: docs/specs/security-hardening-v0.17.41.md）` |
-| should | spec/测试/实现/文档同 commit 入库；纯文档/报告归档用 `docs` 类型前缀，可声明不计版本 | `ad7f0c6`（历史「存档：」形态，今后写 `docs：…`） |
+| must | 提交按「成对提交」：功能 commit（spec + 测试 + 实现 + README）在前；评审/复核报告单独 `docs` commit 在后，message 引用被评审 commit 短 hash；两个 commit 同批推送、不跨版本积压；编码前的 spec 评审报告例外，先行独立 `docs` commit。理由：功能 commit 须可独立回滚/bisect（报告混入会连带回滚审计记录、污染代码路径 log），且报告须引用被评审 hash、必然晚于功能 commit 产生。本条优先于其他文档中的旧表述 | `3ddfaad`（功能交付同 commit）；`2bb6919`（复核报告单独 `docs` commit）；两例分属 v0.17.46 / v0.17.49——历史无同版本内干净分离的成对提交。`18d4a43` 属旧口径历史形态，不追溯、不作范例 |
 | must | 版本号 `v0.17.xx` 逐次 +1；README 顶部版本号与版本记录同步更新 | [README.md](file:///e:/codebase/GitHub/private-agent-poc/README.md#L3) |
 | must | README 版本记录只写**实现的功能与用户可感知行为**，不写技术细节；其他章节随功能迭代同步 | [README.md](file:///e:/codebase/GitHub/private-agent-poc/README.md#L7-L40)（用户既定偏好） |
 | must | docs/ 下文档随功能迭代同步更新，与交付状态保持一致 | 项目既定约定 |
@@ -248,7 +248,7 @@
 
 | 级别 | 规则 | 实例 |
 |---|---|---|
-| must | spec 确认后先出页面原型（trae-design:solo-design）经人工审核 → TDD；实现完成全量回归 → 页面功能展示与人工测试 → 用户确认后才代码评审 → 提交。纯后端/CLI/工具跳过这两关 | spec-first SKILL.md 步骤 5/8（用户 2026-10-22 约定）；commit `51b980c` |
+| must | spec 确认后先出页面原型（trae-design:solo-design）经人工审核 → TDD；实现完成全量回归 → 页面功能展示与人工测试 → 用户确认后才代码评审 → 提交。纯后端/CLI/工具跳过这两关 | spec-first SKILL.md「页面原型」「页面功能展示与人工测试」步骤（用户 2026-10-22 约定）；commit `51b980c` |
 
 ---
 
