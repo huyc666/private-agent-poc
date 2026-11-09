@@ -1,6 +1,6 @@
 # 安全加固 v0.17.38：删除与在途 chat 并发的终局语义（代际 fencing，spec）
 
-状态：待确认（基线 96acbc0，651 passed / 18 skipped；本轮为 11-01 提交后
+状态：已交付（v0.17.38；基线 96acbc0，651 passed / 18 skipped；本轮为 11-01 提交后
 复核报告 `docs/reviews/2026-11-01-v0.17.37-commit-rereview.md` §1 P0
 整改——用户已裁决优先于 SSO 身份一致性）。
 
