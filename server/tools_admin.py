@@ -381,6 +381,45 @@ def list_workflow_instances(definition_name: str = "", limit: int = 20) -> str:
         definition_name=definition_name, limit=limit)
 
 
+# ---------------------------------------------------------------- 4.3 文档生成流程草稿
+
+
+async def draft_orchestration_from_doc(doc_path: str,
+                                       requirements: str = "") -> str:
+    """从已上传文档生成流程草稿（v0.17.51，PLAN 4.3）。doc_path 用
+    「uploads/<域>/<文件名>」形式的相对路径（本人文件域内，不得跨域）；
+    requirements 可选，补充业务要求。生成结果只落草稿目录、不启用：
+    角色工具限白名单内（本地读写/检索类），文档要求但清单外的能力只在
+    生成说明里列为工具缺口，不生成任何代码。确认为可用定义需本人确认
+    （全局域走审批）。文档上限 20000 字符，超出请拆分。"""
+    from . import orchestration
+    return await orchestration.draft_orchestration_from_doc(
+        doc_path, requirements)
+
+
+def list_orchestration_drafts() -> str:
+    """列举当前身份可见的流程草稿（草稿 ID/定义名/状态/归属/域，
+    v0.17.51，PLAN 4.3）。只读。普通用户仅见本人草稿，approver/admin 全部。
+    草稿尚未启用，确认后才会写入可用定义。"""
+    from . import orchestration
+    return orchestration.list_orchestration_drafts()
+
+
+async def confirm_orchestration_draft(draft_id: str) -> str:
+    """登记确认一份流程草稿（v0.17.51，PLAN 4.3）。个人域返回待确认提示，
+    必须由本人在对话页确认卡点击「确认启用」（模型不能代替确认）；
+    global 域发起审批，不直接启用。"""
+    from . import orchestration
+    return await orchestration.confirm_orchestration_draft(draft_id)
+
+
+def discard_orchestration_draft(draft_id: str) -> str:
+    """丢弃一份流程草稿（v0.17.51，PLAN 4.3）。仅本人可丢弃；pending
+    直接置 discarded；已确认草稿只清理草稿资产，已启用定义不受影响。"""
+    from . import orchestration
+    return orchestration.discard_orchestration_draft(draft_id)
+
+
 # ---------------------------------------------------------------- 4.2 调度管理
 
 
@@ -448,7 +487,9 @@ BUILTIN_TOOLS = [read_text_file, list_uploaded_docs, save_output_file,
                  run_orchestration, create_orchestration,
                  list_orchestrations, list_workflow_instances,
                  create_schedule, list_schedules, delete_schedule,
-                 list_trigger_attempts]
+                 list_trigger_attempts,
+                 draft_orchestration_from_doc, list_orchestration_drafts,
+                 confirm_orchestration_draft, discard_orchestration_draft]
 
 
 def builtin_langchain_tools() -> list:
@@ -539,4 +580,19 @@ def builtin_langchain_tools() -> list:
         StructuredTool.from_function(
             func=list_trigger_attempts, name="list_trigger_attempts",
             description=list_trigger_attempts.__doc__),
+        StructuredTool.from_function(
+            coroutine=draft_orchestration_from_doc,
+            name="draft_orchestration_from_doc",
+            description=draft_orchestration_from_doc.__doc__),
+        StructuredTool.from_function(
+            func=list_orchestration_drafts, name="list_orchestration_drafts",
+            description=list_orchestration_drafts.__doc__),
+        StructuredTool.from_function(
+            coroutine=confirm_orchestration_draft,
+            name="confirm_orchestration_draft",
+            description=confirm_orchestration_draft.__doc__),
+        StructuredTool.from_function(
+            func=discard_orchestration_draft,
+            name="discard_orchestration_draft",
+            description=discard_orchestration_draft.__doc__),
     ]

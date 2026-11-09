@@ -132,6 +132,10 @@ def add_user(username: str, role: str = "user", days: int = 0,
     department = (department or "").strip()[:64]
     if not username or len(username) > 64 or role not in ROLES:
         return None
+    # 4.3 安全复审 L1：anonymous 是开放模式/未登录的保留身份；允许注册会让
+    # _write_scope 把它当作无身份（None→global 域），草稿归属与可见域错位。
+    if username.lower() == "anonymous":
+        return None
     # 全项目评审问题7：拦截清洗后落入保留域 shared 的用户名——shared/ 承载开放
     # 模式遗留文件（全局可见），同名用户会与之合并、越权读取遗留内容；
     # scope_clean 的回退值就是 shared（含全非法字符用户名），一并拦截

@@ -59,13 +59,16 @@ def _is_sensitive_file(target) -> bool:
 
 def _cross_scope_denied(rel_parts: tuple) -> str | None:
     """user 角色越域访问他人私有目录时返回资源类别（用于拒绝文案），放行返回
-    None（v0.17.9）。覆盖四类按身份分域的目录：skills_personal/<域>/（专属技能）、
+    None（v0.17.9）。覆盖六类按身份分域的目录：skills_personal/<域>/（专属技能）、
     custom_tools_personal/<域>/（专属自定义工具，v0.17.12）、uploads/<域>/ 与
     outputs/<域>/（v0.17.8 分域此前只在清单/端点层生效，直拼路径可读他人文档
-    ——同一提示词注入/路径猜测面，一并收口）。
+    ——同一提示词注入/路径猜测面，一并收口）；v0.17.51（4.3 P1-1）把
+    orchestration_drafts/<域>/（过程草稿）与 orchestrations_personal/<域>/
+    （个人编排定义）也纳入，读与删同口径。
     approver/admin/开放模式（current_role != "user"）全局可见，一律放行。"""
     if not rel_parts or rel_parts[0] not in (
-            "skills_personal", "custom_tools_personal", "uploads", "outputs"):
+            "skills_personal", "custom_tools_personal", "uploads", "outputs",
+            "orchestration_drafts", "orchestrations_personal"):
         return None
     if auth.current_role() != "user":
         return None
@@ -75,6 +78,10 @@ def _cross_scope_denied(rel_parts: tuple) -> str | None:
         return "专属技能"
     if rel_parts[0] == "custom_tools_personal":
         return "专属自定义工具"
+    if rel_parts[0] == "orchestration_drafts":
+        return "流程草稿"
+    if rel_parts[0] == "orchestrations_personal":
+        return "个人编排定义"
     return "上传/产出文件"
 
 

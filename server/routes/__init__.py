@@ -5,7 +5,8 @@
 def register(app) -> None:
     """集中挂载各资源域路由。函数内延迟 import：规避脚本启动
     （python server/main.py）时 routes ↔ server.main 的循环导入。"""
-    from . import (admin_users, approvals, auth, chat, files, kb, sessions,
-                   usage)
-    for m in (auth, admin_users, usage, files, sessions, kb, approvals, chat):
+    from . import (admin_users, approvals, auth, chat, files, kb,
+                   orchestration_drafts, sessions, usage)
+    for m in (auth, admin_users, usage, files, sessions, kb, approvals, chat,
+              orchestration_drafts):
         app.include_router(m.router)

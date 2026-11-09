@@ -1,0 +1,963 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>4.3 流程草稿确认 · 交互原型（假数据）</title>
+<!--
+  4.3 流程草稿确认交互原型（仅前端展示，未连接后端）。
+  - 视觉基准：web/index.html 的审批卡（.approval-card / addApprovalCard）
+  - token 与 web/tokens.css 同值；全部内联，无任何 CDN、无构建
+  - 所有 draft_id、路径、哈希、时间、校验结果均为本地假数据
+  - YAML 一律通过 textContent 写入，不使用 innerHTML
+-->
+<style>
+  :root {
+    --bg: #f3f5fa; --panel: #ffffff; --border: #e4e8f1;
+    --text: #2b3040; --dim: #636b7e; --accent: #4f7cff; --accent-2: #6c5cff;
+    --tool: #7c5cd6; --shadow: 0 2px 10px rgba(47, 60, 110, .07);
+    --success: #0f7a4d; --success-bg: #effaf4; --success-border: #bfe8d2;
+    --warning: #9a6200; --warning-bg: #fdf6e8; --warning-border: #f2dfb8; --warning-strong: #e8b64c;
+    --danger: #c93a3a; --danger-bg: #fdf1f1; --danger-border: #f3c6c6;
+    --radius-s: 8px; --radius-m: 12px; --radius-l: 16px;
+    --focus-ring: 0 0 0 3px rgba(79, 124, 255, .25);
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: linear-gradient(180deg, #eef1f9 0%, var(--bg) 260px);
+    color: var(--text); min-height: 100vh; font-size: 14px; line-height: 1.6;
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .app-header {
+    position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 10px;
+    padding: 12px 24px; border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,.86); backdrop-filter: blur(8px);
+  }
+  .brand { display: flex; align-items: center; gap: 8px; font-size: 16.5px; font-weight: 700; letter-spacing: .3px; }
+  .logo-mark {
+    display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #fff; font-size: 11px; font-weight: 800; letter-spacing: .5px;
+  }
+  .h1-text { background: linear-gradient(100deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .badge {
+    font-size: 12px; padding: 3px 10px; border-radius: 999px; white-space: nowrap;
+    border: 1px solid var(--border); color: var(--dim); background: #fff;
+  }
+  .badge.mock { color: var(--warning); border-color: var(--warning-border); background: var(--warning-bg); }
+  .badge.fake { font-size: 11px; padding: 1px 8px; }
+  .proto-banner {
+    padding: 9px 24px; background: var(--warning-bg); border-bottom: 1px solid var(--warning-border);
+    color: var(--warning); font-size: 12.5px;
+  }
+
+  .layout {
+    display: grid; grid-template-columns: 224px minmax(0, 1fr); gap: 24px;
+    max-width: 1200px; margin: 0 auto; padding: 22px 24px 60px;
+  }
+  .rail {
+    position: sticky; top: 78px; align-self: start; padding: 12px 10px;
+    background: rgba(255,255,255,.72); border: 1px solid var(--border); border-radius: var(--radius-m);
+    font-size: 13px;
+  }
+  .rail-title {
+    font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--dim); padding: 2px 8px 8px;
+  }
+  .rail a {
+    display: flex; gap: 8px; align-items: center; padding: 6px 8px;
+    border-radius: 7px; color: var(--dim); text-decoration: none;
+  }
+  .rail a:hover { background: #f2f6ff; color: var(--accent); }
+  .rail .n { font-family: var(--mono); font-size: 10.5px; color: #99a1b3; min-width: 22px; }
+  .rail-note { margin-top: 8px; padding: 8px; border-top: 1px dashed var(--border); color: var(--dim); font-size: 11.5px; line-height: 1.6; }
+  .rail-reset {
+    width: 100%; margin-top: 8px; padding: 6px 8px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--border); background: #fff; color: var(--dim); font-size: 12px;
+  }
+  .rail-reset:hover { color: var(--accent); border-color: var(--accent); }
+
+  .stage { min-width: 0; display: flex; flex-direction: column; gap: 20px; }
+  .intro {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-l);
+    padding: 20px 22px; box-shadow: var(--shadow);
+  }
+  .intro h1 { font-size: 20px; line-height: 1.35; margin-bottom: 6px; }
+  .intro p { color: var(--dim); font-size: 13.5px; }
+  .intro-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; }
+  .intro-grid div {
+    background: #f8f9fd; border: 1px solid var(--border); border-radius: 10px;
+    padding: 9px 11px; font-size: 12.5px; color: var(--dim);
+  }
+  .intro-grid b { display: block; color: var(--text); font-size: 12px; margin-bottom: 2px; }
+
+  .state-block {
+    background: rgba(255,255,255,.72); border: 1px solid var(--border);
+    border-radius: var(--radius-l); padding: 18px 20px 20px; scroll-margin-top: 8px;
+  }
+  .state-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  .state-id {
+    font-family: var(--mono); font-size: 11px; color: var(--accent);
+    background: #f2f6ff; border: 1px solid #d9e4ff; border-radius: 6px; padding: 2px 7px;
+  }
+  .state-head h2 { font-size: 15.5px; font-weight: 700; }
+  .state-desc { color: var(--dim); font-size: 12.5px; margin-bottom: 14px; max-width: 900px; }
+  .state-desc code, .fake-list code {
+    font-family: var(--mono); font-size: 11.5px; background: #f2f4f9;
+    border-radius: 5px; padding: 1px 5px; color: var(--text);
+  }
+  .chat-col { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+  .msg {
+    max-width: 76%; padding: 11px 16px; border-radius: 16px; line-height: 1.7; font-size: 14px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-bottom-left-radius: 5px; box-shadow: var(--shadow);
+  }
+  .msg.user {
+    align-self: flex-end; color: #fff; border: none; border-bottom-right-radius: 5px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: 0 3px 10px rgba(90, 105, 255, .28);
+  }
+
+  /* 草稿卡：沿用审批卡的边框/圆角/阴影/详情排版，按状态换左侧色条 */
+  .draft-card {
+    align-self: flex-start; width: min(100%, 780px); background: var(--panel);
+    border: 1px solid var(--border); border-left: 4px solid var(--warning-strong);
+    border-radius: var(--radius-m); padding: 14px 16px; box-shadow: var(--shadow);
+    font-size: 13.5px; transition: opacity .18s, border-color .18s, background .18s;
+  }
+  .draft-card.is-confirmed { border-left-color: var(--success); }
+  .draft-card.is-discarded { border-left-color: #c8cedb; background: #fbfcfe; color: var(--dim); opacity: .78; }
+  .draft-card.is-error { border-left-color: var(--danger); background: #fffdfd; }
+  .draft-card.is-global { border-left-color: var(--accent); }
+  .draft-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+  .draft-title { font-weight: 700; font-size: 14.5px; }
+  .chip {
+    font-size: 11.5px; line-height: 1.5; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid var(--border); background: #fff; color: var(--dim); white-space: nowrap;
+  }
+  .chip.warn { color: var(--warning); border-color: var(--warning-border); background: var(--warning-bg); }
+  .chip.ok { color: var(--success); border-color: var(--success-border); background: var(--success-bg); }
+  .chip.err { color: var(--danger); border-color: var(--danger-border); background: var(--danger-bg); }
+  .chip.info { color: var(--accent); border-color: #d9e4ff; background: #f2f6ff; }
+  .detail { color: var(--dim); margin: 3px 0; word-break: break-all; font-size: 12.8px; }
+  .detail code {
+    color: var(--text); background: #f2f4f9; padding: 1px 6px;
+    border-radius: 5px; font-family: var(--mono); font-size: 11.8px;
+  }
+  .summary-row { display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0 2px; }
+  .stat {
+    border: 1px solid var(--border); background: #f8f9fd; border-radius: 8px;
+    padding: 4px 9px; font-size: 12px; color: var(--dim);
+  }
+  .stat b { color: var(--text); font-size: 12.5px; }
+
+  .yaml-box { margin-top: 10px; border: 1px solid var(--border); border-radius: 8px; background: #f2f4f9; overflow: hidden; }
+  .yaml-box summary {
+    cursor: pointer; list-style: none; padding: 7px 11px; color: var(--dim); font-size: 12.3px;
+    display: flex; align-items: center; gap: 6px; user-select: none;
+  }
+  .yaml-box summary::-webkit-details-marker { display: none; }
+  .yaml-box summary::before { content: "▸"; font-size: 10px; color: #99a1b3; transition: transform .15s; }
+  .yaml-box[open] summary::before { transform: rotate(90deg); }
+  .yaml-box pre {
+    margin: 0; padding: 10px 12px; border-top: 1px solid var(--border);
+    font-family: var(--mono); font-size: 11.8px; line-height: 1.65; white-space: pre-wrap;
+    color: #39405a; max-height: 300px; overflow: auto; background: #f7f8fc;
+  }
+  .yaml-note { padding: 6px 11px; border-top: 1px dashed var(--border); color: var(--warning); font-size: 11.5px; background: #fffdf6; }
+
+  .btns { margin-top: 12px; display: flex; gap: 9px; align-items: center; flex-wrap: wrap; }
+  .approve-btn {
+    background: var(--success); color: #fff; border: none; border-radius: var(--radius-s);
+    padding: 6px 18px; cursor: pointer; font-size: 13px;
+  }
+  .reject-btn {
+    background: var(--danger); color: #fff; border: none; border-radius: var(--radius-s);
+    padding: 6px 18px; cursor: pointer; font-size: 13px;
+  }
+  .ghost-btn {
+    background: #fff; color: var(--dim); border: 1px solid var(--border);
+    border-radius: var(--radius-s); padding: 6px 14px; cursor: pointer; font-size: 13px;
+  }
+  .approve-btn:hover, .reject-btn:hover { filter: brightness(1.06); }
+  .ghost-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .approve-btn:disabled, .reject-btn:disabled, .ghost-btn:disabled { opacity: .42; cursor: not-allowed; filter: none; }
+  .btn-locked {
+    background: #eef0f5; color: #98a0b0; border: 1px solid var(--border);
+    border-radius: var(--radius-s); padding: 6px 16px; cursor: not-allowed; font-size: 13px;
+  }
+  .btn-loading {
+    display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,.45);
+    border-top-color: #fff; border-radius: 50%; margin-right: 7px; vertical-align: -1px;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .status-line { margin-top: 9px; font-size: 12.5px; color: var(--dim); min-height: 19px; }
+  .status-line.ok { color: var(--success); }
+  .status-line.err { color: var(--danger); }
+  .status-line.warn { color: var(--warning); }
+  .result-line {
+    margin-top: 8px; padding: 8px 10px; border-radius: 8px; font-size: 12.5px;
+    background: var(--success-bg); border: 1px solid var(--success-border); color: var(--success);
+  }
+  .result-line.neutral { background: #f6f7fb; border-color: var(--border); color: var(--dim); }
+  .error-banner {
+    margin: 9px 0 3px; padding: 9px 11px; border-radius: 8px; font-size: 12.8px;
+    background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger);
+  }
+  .error-banner code { font-family: var(--mono); font-size: 11.5px; background: #fff; border-radius: 4px; padding: 1px 5px; }
+  .endpoint-note { margin-top: 9px; font-family: var(--mono); font-size: 11px; color: #99a1b3; word-break: break-all; }
+
+  /* 标准审批卡对照：与 web/index.html 的 .approval-card 同口径 */
+  .approval-card {
+    align-self: flex-start; background: var(--warning-bg); border: 1px solid var(--warning-border);
+    border-left: 4px solid var(--warning-strong); border-radius: var(--radius-m);
+    padding: 13px 16px; font-size: 13.5px; max-width: 76%; box-shadow: var(--shadow);
+  }
+  .approval-card .title {
+    color: var(--warning); font-weight: 600; margin-bottom: 6px;
+    display: flex; align-items: center; gap: 7px;
+  }
+  .warn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warning-strong); display: inline-block; }
+  .approval-card .detail { color: var(--dim); margin: 3px 0; word-break: break-all; }
+  .approval-card .detail code { color: var(--text); background: #f2f4f9; padding: 1px 6px; border-radius: 5px; }
+  .approval-card .btns { margin-top: 10px; display: flex; gap: 10px; align-items: center; }
+  .approval-status { color: var(--dim); font-size: 12.5px; }
+
+  .global-compare { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); gap: 14px; align-items: start; width: 100%; }
+  .compare-label { font-size: 11.5px; color: var(--dim); margin-bottom: 6px; letter-spacing: .03em; }
+  .explain-note {
+    margin-top: 10px; padding: 9px 11px; border-radius: 8px; font-size: 12.5px;
+    background: #f2f6ff; border: 1px solid #d9e4ff; color: #3c5aa6;
+  }
+  [hidden] { display: none !important; }
+
+  /* 详情视图 */
+  .detail-panel {
+    width: 100%; background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius-m); box-shadow: var(--shadow); overflow: hidden;
+  }
+  .detail-head {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 12px 16px; border-bottom: 1px solid var(--border); background: #fbfcff;
+  }
+  .detail-head h3 { font-size: 14.5px; }
+  .detail-body { padding: 14px 16px; }
+  .detail-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr); gap: 16px; }
+  .detail-block h4 {
+    font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase;
+    color: #99a1b3; margin-bottom: 6px;
+  }
+  .detail-pre {
+    margin: 0; background: #f2f4f9; border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; font-family: var(--mono); font-size: 11.5px; line-height: 1.6;
+    white-space: pre-wrap; max-height: 430px; overflow: auto; color: #39405a;
+  }
+  .matrix {
+    width: 100%; border-collapse: collapse; font-size: 12px; background: #fff;
+    border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  }
+  .matrix th, .matrix td { padding: 7px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+  .matrix th { background: #f7f9fe; color: var(--dim); font-weight: 600; font-size: 11.5px; }
+  .matrix tr:last-child td { border-bottom: none; }
+  .matrix .yes { color: var(--success); font-weight: 700; }
+  .matrix .no { color: #c3c8d4; }
+  .kv { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 5px 10px; font-size: 12px; }
+  .kv dt { color: var(--dim); }
+  .kv dd { font-family: var(--mono); font-size: 11.5px; word-break: break-all; color: var(--text); }
+  .check-list { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
+  .check { display: flex; gap: 7px; align-items: flex-start; font-size: 12.3px; color: var(--dim); }
+  .check .tick { color: var(--success); font-weight: 700; }
+  .detail-actions { margin-top: 12px; display: flex; gap: 9px; flex-wrap: wrap; }
+
+  /* 空态 */
+  .panel-empty {
+    width: 100%; background: #fff; border: 1px dashed var(--border); border-radius: var(--radius-m);
+    padding: 34px 18px; text-align: center; color: var(--dim); font-size: 13px;
+  }
+  .panel-empty b { display: block; color: var(--text); font-size: 14px; margin-bottom: 5px; }
+  .panel-empty .ghost-btn { margin-top: 12px; }
+
+  .fake-list {
+    background: #fff; border: 1px solid var(--border); border-radius: var(--radius-m);
+    padding: 16px 18px; font-size: 12.5px; color: var(--dim);
+  }
+  .fake-list h2 { font-size: 13.5px; color: var(--text); margin-bottom: 6px; }
+  .fake-list ul { margin: 0; padding-left: 18px; display: grid; gap: 3px; }
+  .foot { padding: 22px 24px 30px; text-align: center; color: #99a1b3; font-size: 11.5px; }
+
+  @media (max-width: 940px) {
+    .layout { grid-template-columns: 1fr; padding: 16px; }
+    .rail { display: none; }
+    .global-compare, .detail-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 760px) {
+    .intro-grid { grid-template-columns: 1fr; }
+    .msg { max-width: 92%; }
+    .draft-card { padding: 12px 13px; }
+    .approval-card { max-width: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<header class="app-header">
+  <div class="brand">
+    <span class="logo-mark">PA</span>
+    <span class="h1-text">Private Agent POC</span>
+    <span class="badge">4.3 流程草稿确认</span>
+  </div>
+  <span class="badge mock fake">假数据 · 未接后端</span>
+</header>
+
+<div class="proto-banner">
+  原型标注：本页所有草稿、文档路径、哈希、时间与校验结果均为本地虚构数据；按钮只在浏览器内演示状态切换，不发送任何请求。
+</div>
+
+<div class="layout">
+  <aside class="rail" aria-label="状态目录">
+    <div class="rail-title">状态目录</div>
+    <a href="#s1"><span class="n">S1</span>pending 待确认</a>
+    <a href="#s2"><span class="n">S2</span>确认中 loading</a>
+    <a href="#s3"><span class="n">S3</span>confirmed 已启用</a>
+    <a href="#s4"><span class="n">S4</span>discarded 已丢弃</a>
+    <a href="#s5"><span class="n">S5</span>404 他人/跨域</a>
+    <a href="#s6"><span class="n">S6</span>409 非 pending</a>
+    <a href="#s7"><span class="n">S7</span>409 目标定义缺失</a>
+    <a href="#s8"><span class="n">S8</span>global 草稿</a>
+    <a href="#s9"><span class="n">S9</span>草稿详情</a>
+    <a href="#s10"><span class="n">S10</span>空态</a>
+    <a href="#s11"><span class="n">S11</span>YAML 超限</a>
+    <div class="rail-note">S1 的「确认启用 / 丢弃」可直接点击，演示前端状态切换。S8 的确认按钮置灰，点击给出审批说明。</div>
+    <button class="rail-reset" id="reset-demo" type="button">重置所有演示状态</button>
+  </aside>
+
+  <main class="stage">
+
+    <section class="intro">
+      <h1>4.3 从文档生成流程 · 草稿确认交互</h1>
+      <p>覆盖个人域草稿的完整生命周期、三类失败态、global 草稿与标准审批卡的对照，以及只读详情、空态与 YAML 超限态。视觉基准为现有聊天页的审批卡。</p>
+      <div class="intro-grid">
+        <div><b>视觉基准</b>web/index.html 的 .approval-card 与 addApprovalCard；token 值与 web/tokens.css 一致。</div>
+        <div><b>实现约束</b>零 CDN、无构建、样式全内联；YAML 与说明一律 textContent 渲染，不使用 innerHTML。</div>
+        <div><b>假数据</b>卡片右上角均有「假数据」标记；本页不连接 /api，也不写任何文件。</div>
+      </div>
+    </section>
+
+    <!-- S1 pending -->
+    <section class="state-block" id="s1">
+      <div class="state-head">
+        <span class="state-id">S1</span>
+        <h2>草稿生成后的确认卡 · pending</h2>
+        <span class="chip warn">待确认</span>
+        <span class="badge fake">假数据</span>
+      </div>
+      <p class="state-desc">默认状态：标题、来源文档、规模摘要、校验结果、draft_id 短码与生成说明；YAML 预览默认收起。按钮为「确认启用 / 丢弃 / 查看详情」。同屏另给一个校验「越界」变体。</p>
+      <div class="chat-col">
+        <div class="msg user">根据刚上传的入职流程说明，生成一个流程草稿。</div>
+        <div class="msg">我已阅读《入职流程说明.docx》，生成了流程草稿（尚未启用）。确认前可以先展开 YAML，或点「查看详情」核对角色与工具。</div>
+
+        <article class="draft-card" id="card-pending" data-state="pending">
+          <div class="draft-head">
+            <span class="draft-title">入职流程草稿</span>
+            <span class="chip warn" data-role="status-chip">待确认</span>
+            <span class="badge fake">假数据</span>
+          </div>
+          <div class="detail">来源文档：<code>uploads/u-8f3a/入职流程说明.docx.md</code></div>
+          <div class="detail">draft_id：<code>drf-a1b2…e5f6</code>（短码；完整值见详情）</div>
+          <div class="summary-row">
+            <span class="stat"><b>3</b> 角色</span>
+            <span class="stat"><b>4</b> 个工具引用</span>
+            <span class="stat"><b>3</b> 步骤</span>
+            <span class="stat">校验：<b style="color:var(--success)">通过</b></span>
+          </div>
+          <div class="detail">生成说明：按文档识别出入职协调、资料审核、归档登记 3 个角色；工具缺口「合同归档连接器」仅记录为文本，未生成任何代码。</div>
+
+          <details class="yaml-box">
+            <summary>查看 YAML（默认收起，纯文本渲染）</summary>
+            <pre data-yaml="main"></pre>
+          </details>
+
+          <div class="btns">
+            <button class="approve-btn" type="button" data-action="confirm">确认启用</button>
+            <button class="reject-btn" type="button" data-action="discard">丢弃</button>
+            <button class="ghost-btn" type="button" data-action="detail">查看详情</button>
+          </div>
+          <div class="status-line" data-role="status"></div>
+          <div class="endpoint-note">POST /api/orchestration-drafts/drf-a1b2c3d4e5f6/confirm · POST …/discard · GET …/{draft_id}</div>
+        </article>
+
+        <article class="draft-card is-error" data-state="validation-fail">
+          <div class="draft-head">
+            <span class="draft-title">供应商准入流程草稿</span>
+            <span class="chip err">校验未通过</span>
+            <span class="badge fake">假数据</span>
+          </div>
+          <div class="detail">来源文档：<code>uploads/u-8f3a/供应商准入管理办法.md</code></div>
+          <div class="summary-row">
+            <span class="stat">校验：<b style="color:var(--danger)">越界</b></span>
+            <span class="stat">修复调用：<b>1 / 1</b></span>
+          </div>
+          <div class="error-banner">工具 <code>get_current_weather</code> 不在生成白名单内，越界拒绝；修复后仍越界，草稿未落盘（不静默裁剪）。</div>
+          <div class="btns">
+            <button class="ghost-btn" type="button" data-action="noop">重新生成（演示）</button>
+          </div>
+          <div class="endpoint-note">draft_orchestration_from_doc → 白名单强制验收失败</div>
+        </article>
+      </div>
+    </section>
+
+    <!-- S2 确认中 -->
+    <section class="state-block" id="s2">
+      <div class="state-head">
+        <span class="state-id">S2</span>
+        <h2>确认中 · loading</h2>
+        <span class="chip warn">提交中</span>
+        <span class="badge fake">假数据</span>
+      </div>
+      <p class="state-desc">点击确认后立即进入：按钮显示 loading 并禁用，防止重复点击；状态行提示已提交，等待服务端处理。</p>
+      <div class="chat-col">
+        <div class="msg user">确认启用这份草稿。</div>
+        <article class="draft-card" data-state="loading">
+          <div class="draft-head">
+            <span class="draft-title">入职流程草稿</span>
+            <span class="chip warn">确认中</span>
+            <span class="badge fake">假数据</span>
+          </div>
+          <div class="detail">来源文档：<code>uploads/u-8f3a/入职流程说明.docx.md</code></div>
+          <div class="detail">draft_id：<code>drf-a1b2…e5f6</code></div>
+          <div class="btns">
+            <button class="approve-btn" type="button" disabled><span class="btn-loading"></span>确认中…</button>
+            <button class="ghost-btn" type="button" disabled>丢弃</button>
+          </div>
+          <div class="status-line warn">已提交确认请求，等待服务端处理；重复点击已禁用。</div>
+          <div class="endpoint-note">POST /api/orchestration-drafts/drf-a1b2c3d4e5f6/confirm</div>
+        </article>
+      </div>
+    </section>
+
+    <!-- S3 confirmed -->
+    <section class="state-block" id="s3">
+      <div class="state-head">
+        <span class="state-id">S3</span>
+        <h2>confirmed · 已启用</h2>
+        <span class="chip ok">已启用</span>
+        <span class="badge fake">假数据</span>
+      </div>
+      <p class="state-desc">确认成功后按钮消失，显示目标定义名与确认人；草稿仍保留在详情中，供追溯来源。</p>
+      <div class="chat-col">
+        <article class="draft-card is-confirmed" data-state="confirmed">
+          <div class="draft-head">
+            <span class="draft-title">入职流程草稿</span>
+            <span class="chip ok">已启用</span>
+            <span class="badge fake">假数据</span>
+          </div>
+          <div class="detail">目标定义：<code>hr-onboarding-flow</code>（个人域）</div>
+          <div class="detail">来源文档：<code>uploads/u-8f3a/入职流程说明.docx.md</code></div>
+          <div class="detail">确认人：<code>u-8f3a</code> · 确认时间：2026-11-08 14:32（假）</div>
+          <div class="detail">draft_id：<code>drf-a1b2…e5f6</code></div>
+          <div class="result-line">已启用：现在可以通过「运行入职流程」触发；草稿确认不再提供按钮。</div>
+        </article>
+      </div>
+    </section>
+
+    <!-- S4 discarded -->
+    <section class="state-block" id="s4">
+      <div class="state-head">
+        <span class="state-id">S4</span>
+        <h2>discarded · 已丢弃</h2>
+        <span class="chip">已丢弃</span>
+        <span class="badge fake">假数据</span>
+      </div>
+      <p class="state-desc">丢弃后卡片灰化、按钮消失；草稿 YAML 已清理，未产生可用定义。</p>
+      <div class="chat-col">
+        <div class="msg user">这份草稿先不用了，丢弃。</div>
+        <article class="draft-card is-discarded" data-state="discarded">
+          <div class="draft-head">
+            <span class="draft-title">入职流程草稿</span>
+            <span class="chip">已丢弃</span>
+            <span class="badge fake">假数据</span>
+          </div>
+          <div class="detail">来源文档：<code>uploads/u-8f3a/入职流程说明.docx.md</code></div>
+          <div class="detail">draft_id：<code>drf-a1b2…e5f6</code></div>
+          <div class="result-line neutral">草稿资产已清理；可用定义目录未发生变化（本地模拟）。</div>
+        </article>
+      </div>
+    </section>
+
+    <!-- S5 404 -->
+    <section class="state-block" id="s5">
+      <div class="state-head">
+        <span class="state-id">S5</span>
+        <h2>失败态 · 他人草稿 / 跨域 404</h2>
+        <span class="chip err">HTTP 404</span>
+        <span class="badge fake">假数据</span>
+      </div>
+      <p class="state-desc">他人草稿与跨域访问使用同一条文案，不回显草稿是否存在，避免枚举。</p>
+      <div class="chat-col">
+        <article class="draft-card is-error" data-state="error-404">
+          <div class="draft-head">
+            <span class="draft-title">草稿不可用</span>
+            <span class="chip err">404</span>
+            <span class="badge fake">假数据</span>
+          </div>
+          <div class="error-banner">草稿不存在或无权访问。请确认链接来自你自己的草稿。</div>
+          <div class="detail">请求身份：<code>u-2c91</code> · 草稿归属：<code>u-8f3a</code>（跨域，统一 404）</div>
+          <div class="btns">
+            <button class="ghost-btn" type="button" data-action="back-top">返回对话</button>
+          </div>
+          <div class="endpoint-note">GET /api/orchestration-drafts/drf-a1b2c3d4e5f6 → 404（不回显存在性）</div>
+        </article>
+      </div>
+    </section>
+
+    <!-- S6 409 non-pending -->
+    <section class="state-block" id="s6">
+      <div class="state-head">
+        <span class="state-id">S6</span>
+        <h2>失败态 · 非 pending 409</h2>
+        <span class="chip err">HTTP 409</span>
+        <span class="badge fake">假数据</span>
+      </div>
+      <p class="state-desc">草稿已被丢弃时再次确认：返回 <code>409 draft_discarded</code>，不落任何定义。confirmed 的重复确认则是 200 幂等，见 S7。</p>
+      <div class="chat-col">
+        <article class="draft-card is-error" data-state="error-409">
+          <div class="draft-head">
+            <span class="draft-title">入职流程草稿</span>
+            <span class="chip err">409</span>
+            <span class="badge fake">假数据</span>
+          </div>
+          <div class="error-banner">草稿已丢弃，无法确认。错误码：<code>draft_discarded</code>。</div>
+          <div class="detail">当前状态：<code>discarded</code> · 请求动作：<code>confirm</code></div>
+          <div class="btns">
+            <button class="ghost-btn" type="button" data-action="back-top">重新生成草稿</button>
+          </div>
+          <div class="endpoint-note">POST /api/orchestration-drafts/drf-a1b2c3d4e5f6/confirm → 409 draft_discarded</div>
+        </article>
+      </div>
+    </section>
+
+    <!-- S7 409 target definition missing -->
+    <section class="state-block" id="s7">
+      <div class="state-head">
+        <span class="state-id">S7</span>
+        <h2>失败态 · 目标定义已删除 409</h2>
+        <span class="chip err">HTTP 409</span>
+        <span class="badge fake">假数据</span>
+      </div>
+      <p class="state-desc">confirmed 的幂等确认会核对目标定义是否仍存在；已被删除时返回 <code>409 target_definition_missing</code>，不自动重建。</p>
+      <div class="chat-col">
+        <article class="draft-card is-error" data-state="error-target-missing">
+          <div class="draft-head">
+            <span class="draft-title">入职流程草稿</span>
+            <span class="chip err">409</span>
+            <span class="badge fake">假数据</span>
+          </div>
+          <div class="error-banner">目标定义 <code>hr-onboarding-flow</code> 已被删除，无法完成幂等确认。请重新生成草稿，或使用 create_orchestration 重新创建。</div>
+          <div class="detail">当前状态：<code>confirmed</code> · 目标定义：<code>hr-onboarding-flow</code>（不存在）</div>
+          <div class="btns">
+            <button class="ghost-btn" type="button" data-action="back-top">返回对话</button>
+          </div>
+          <div class="endpoint-note">POST …/confirm → 200 already_confirmed 后核对目标 → 409 target_definition_missing</div>
+        </article>
+      </div>
+    </section>
+
+    <!-- S8 global -->
+    <section class="state-block" id="s8">
+      <div class="state-head">
+        <span class="state-id">S8</span>
+        <h2>global 草稿 · 确认按钮置灰，走标准审批卡</h2>
+        <span class="chip info">global</span>
+        <span class="badge fake">假数据</span>
+      </div>
+      <p class="state-desc">global 草稿不能在草稿卡内直批：按钮置灰并标注「需提交审批」，点击给出说明；实际由模型调用 <code>confirm_orchestration_draft</code> 触发右侧标准审批卡。global 需两名决议角色（SECURITY.md §8.4）。</p>
+      <div class="chat-col">
+        <div class="global-compare">
+          <div>
+            <div class="compare-label">草稿卡（本人视图）</div>
+            <article class="draft-card is-global" data-state="global">
+              <div class="draft-head">
+                <span class="draft-title">季度合规检查草稿</span>
+                <span class="chip info">global · 待审批</span>
+                <span class="badge fake">假数据</span>
+              </div>
+              <div class="detail">来源文档：<code>uploads/shared/季度合规检查说明.md</code></div>
+              <div class="detail">draft_id：<code>drf-77c0…b2e4</code> · 目标域：<code>global</code></div>
+              <div class="summary-row">
+                <span class="stat"><b>2</b> 角色</span>
+                <span class="stat"><b>3</b> 个工具引用</span>
+                <span class="stat">校验：<b style="color:var(--success)">通过</b></span>
+              </div>
+              <div class="btns">
+                <button class="btn-locked" type="button" data-action="global-explain" aria-disabled="true">需提交审批</button>
+                <button class="ghost-btn" type="button" data-action="detail">查看详情</button>
+              </div>
+              <div class="explain-note" id="global-explain" hidden>global 草稿不能由本人在草稿卡内确认。请让模型调用 confirm_orchestration_draft 提交审批，由至少两名 admin/approver 在标准审批卡中决议；发起者不得自批。</div>
+              <div class="endpoint-note">confirm_orchestration_draft → approval.require_approval("confirm_orchestration_draft", …)</div>
+            </article>
+          </div>
+          <div>
+            <div class="compare-label">实际走这张标准审批卡</div>
+            <div class="approval-card" data-demo="approval">
+              <div class="title"><span class="warn-dot"></span>危险操作审批</div>
+              <div class="detail">工具：<code>confirm_orchestration_draft</code></div>
+              <div class="detail">参数：<code>{"draft_id":"drf-77c0aa91b2e4","scope":"global"}</code></div>
+              <div class="btns">
+                <button class="approve-btn" type="button" data-approval="approve">批准</button>
+                <button class="reject-btn" type="button" data-approval="reject">拒绝</button>
+                <span class="approval-status" data-role="approval-status"></span>
+              </div>
+            </div>
+            <div class="detail" style="margin-top:8px">部署前提：AUTH 模式至少配置两名 admin/approver；单决议人部署下 global 草稿无人可批，属 fail-closed 的可用性代价（docs/SECURITY.md §8.4）。</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- S9 detail -->
+    <section class="state-block" id="s9">
+      <div class="state-head">
+        <span class="state-id">S9</span>
+        <h2>草稿详情视图 · 只读端点</h2>
+        <span class="chip info">GET</span>
+        <span class="badge fake">假数据</span>
+      </div>
+      <p class="state-desc">详情数据来自 <code>GET /api/orchestration-drafts/{draft_id}</code>：owner 或 approver/admin 可见，他人与跨域 404。完整 YAML、角色×工具矩阵、来源与哈希、校验明细均在此展示；YAML 用 textContent 写入。</p>
+      <div class="detail-panel">
+        <div class="detail-head">
+          <h3>草稿详情 · 入职流程草稿</h3>
+          <span class="chip warn">pending</span>
+          <span class="chip">owner 可见</span>
+          <span class="badge fake">假数据</span>
+        </div>
+        <div class="detail-body">
+          <div class="detail-grid">
+            <div class="detail-block">
+              <h4>完整 YAML（textContent）</h4>
+              <pre class="detail-pre" data-yaml="full"></pre>
+            </div>
+            <div>
+              <div class="detail-block" style="margin-bottom:14px">
+                <h4>角色 × 工具矩阵</h4>
+                <table class="matrix">
+                  <thead>
+                    <tr>
+                      <th>角色</th>
+                      <th>read_text_file</th>
+                      <th>list_uploaded_docs</th>
+                      <th>search_hr_knowledge</th>
+                      <th>save_output_file</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr><td>coordinator</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">·</td></tr>
+                    <tr><td>reviewer</td><td class="yes">✓</td><td class="no">·</td><td class="no">·</td><td class="yes">✓</td></tr>
+                    <tr><td>archivist</td><td class="no">·</td><td class="yes">✓</td><td class="no">·</td><td class="yes">✓</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="detail-block" style="margin-bottom:14px">
+                <h4>来源与哈希（磁盘字节）</h4>
+                <dl class="kv">
+                  <dt>source_path</dt><dd>uploads/u-8f3a/入职流程说明.docx.md</dd>
+                  <dt>source_chars</dt><dd>7,842</dd>
+                  <dt>source_sha256</dt><dd>9f2c4a7e1b8d3c5f0a6e7d9b2c4f8a1e3d5c7b9f0a2e4c6d8b1f3a5e7c9d0b2f</dd>
+                  <dt>definition_hash</dt><dd>4c1e8a2f6b9d0c3e5a7f1b4d8c2e6a9f0b3d5c7e1a4f8b2d6c0e9a3f5b7d1c4e</dd>
+                  <dt>created_at</dt><dd>2026-11-08 14:28:06</dd>
+                </dl>
+              </div>
+              <div class="detail-block">
+                <h4>校验明细</h4>
+                <div class="check-list">
+                  <div class="check"><span class="tick">✓</span><span>structure schema 校验通过（5.1 定义契约）</span></div>
+                  <div class="check"><span class="tick">✓</span><span>工具白名单通过：role.tools ⊆ 候选清单</span></div>
+                  <div class="check"><span class="tick">✓</span><span>角色 3 / 8，步骤 3 / 8，prompt 均未超限</span></div>
+                  <div class="check"><span class="tick">✓</span><span>未生成任何 .py 文件，也未调用 create_custom_tool</span></div>
+                  <div class="check"><span class="tick">✓</span><span>来源文档哈希与元数据一致</span></div>
+                </div>
+                <div class="detail-actions">
+                  <button class="approve-btn" type="button" data-action="confirm-detail">确认启用</button>
+                  <button class="reject-btn" type="button" data-action="discard-detail">丢弃</button>
+                  <button class="ghost-btn" type="button" data-action="back-top">返回顶部</button>
+                </div>
+                <div class="status-line" data-role="detail-status"></div>
+                <div class="detail" style="margin-top:6px">approver/admin 查看他人个人草稿时为只读，不渲染确认/丢弃按钮。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- S10 empty -->
+    <section class="state-block" id="s10">
+      <div class="state-head">
+        <span class="state-id">S10</span>
+        <h2>空态 · 没有草稿</h2>
+        <span class="badge fake">假数据</span>
+      </div>
+      <p class="state-desc">用户提出列举草稿但当前域没有 pending 草稿时展示；不渲染空卡片，也不伪造条目。</p>
+      <div class="panel-empty">
+        <b>当前没有流程草稿</b>
+        上传一份制度或接口文档后，让我生成流程草稿；生成成功后会在对话里出现确认卡。
+        <div><button class="ghost-btn" type="button" data-action="noop">上传文档（演示）</button></div>
+      </div>
+    </section>
+
+    <!-- S11 overlimit -->
+    <section class="state-block" id="s11">
+      <div class="state-head">
+        <span class="state-id">S11</span>
+        <h2>超限态 · YAML 超过展示上限</h2>
+        <span class="chip warn">已截断展示</span>
+        <span class="badge fake">假数据</span>
+      </div>
+      <p class="state-desc">卡片内 YAML 预览只展示前 40 行并折叠，提示「完整内容见详情」；展示上限不影响校验与落盘。</p>
+      <div class="chat-col">
+        <article class="draft-card" data-state="overlimit">
+          <div class="draft-head">
+            <span class="draft-title">供应商准入流程草稿</span>
+            <span class="chip warn">待确认</span>
+            <span class="badge fake">假数据</span>
+          </div>
+          <div class="detail">来源文档：<code>uploads/u-8f3a/供应商准入管理办法.md</code></div>
+          <div class="detail">draft_id：<code>drf-3e9d…71ac</code></div>
+          <div class="summary-row">
+            <span class="stat"><b>6</b> 角色</span>
+            <span class="stat"><b>9</b> 个工具引用</span>
+            <span class="stat"><b>7</b> 步骤</span>
+            <span class="stat">校验：<b style="color:var(--success)">通过</b></span>
+          </div>
+          <details class="yaml-box" open>
+            <summary>YAML 预览（仅前 40 行）</summary>
+            <pre data-yaml="overlimit"></pre>
+            <div class="yaml-note">YAML 超过展示上限（仅显示前 40 行）· 完整内容见详情</div>
+          </details>
+          <div class="btns">
+            <button class="approve-btn" type="button" data-action="confirm">确认启用</button>
+            <button class="reject-btn" type="button" data-action="discard">丢弃</button>
+            <button class="ghost-btn" type="button" data-action="detail">查看详情</button>
+          </div>
+          <div class="status-line" data-role="status"></div>
+          <div class="endpoint-note">GET /api/orchestration-drafts/drf-3e9d5c2a9f71ac/… → 完整 YAML</div>
+        </article>
+      </div>
+    </section>
+
+    <section class="fake-list">
+      <h2>假数据清单（本页全部为虚构）</h2>
+      <ul>
+        <li>draft_id：<code>drf-a1b2c3d4e5f6</code>、<code>drf-77c0aa91b2e4</code>、<code>drf-3e9d5c2a9f71ac</code>。</li>
+        <li>来源路径：<code>uploads/u-8f3a/入职流程说明.docx.md</code>、<code>uploads/shared/季度合规检查说明.md</code>、<code>uploads/u-8f3a/供应商准入管理办法.md</code>。</li>
+        <li>哈希值、字符数、创建/确认时间、确认人 <code>u-8f3a</code>、请求身份 <code>u-2c91</code> 均为示例。</li>
+        <li>YAML、角色/工具矩阵、校验明细与目标定义名均为示例流程，不对应真实业务。</li>
+        <li>所有按钮仅在本地切换样式与文案，不发送网络请求；404 / 409 文案为静态演示。</li>
+        <li>视觉 token 与 <code>web/tokens.css</code> 同值；页面无外部样式、脚本、字体或图片依赖，可直接双击打开。</li>
+      </ul>
+    </section>
+
+  </main>
+</div>
+
+<div class="foot">4.3 流程草稿确认 · 前端交互原型 · 仅用于评审，不包含实现</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---- 假数据：YAML 正文（全部通过 textContent 写入） ----
+  var YAML_MAIN = [
+    'name: hr-onboarding-flow',
+    'version: 1',
+    'description: 新员工入职流程（由《入职流程说明.docx》生成）',
+    'max_parallel: 2',
+    'on_error: stop',
+    'params:',
+    '  - name: employee_name',
+    '    type: string',
+    '    description: 新员工姓名',
+    '    required: true',
+    'roles:',
+    '  - id: coordinator',
+    '    name: 入职协调',
+    '    prompt: 汇总入职材料，分派办理任务，跟踪各环节状态。',
+    '    tools:',
+    '      - list_uploaded_docs',
+    '      - read_text_file',
+    '      - search_hr_knowledge',
+    '  - id: reviewer',
+    '    name: 资料审核',
+    '    prompt: 核对身份证、学历与合同信息，输出审核结论。',
+    '    tools:',
+    '      - read_text_file',
+    '      - save_output_file',
+    '  - id: archivist',
+    '    name: 归档登记',
+    '    prompt: 将审核通过的资料归档并登记台账。',
+    '    tools:',
+    '      - list_uploaded_docs',
+    '      - save_output_file',
+    'steps:',
+    '  - id: collect',
+    '    role: coordinator',
+    '    mode: single',
+    '  - id: review',
+    '    role: reviewer',
+    '    mode: single',
+    '    inputs:',
+    '      - collect',
+    '  - id: archive',
+    '    role: archivist',
+    '    mode: single',
+    '    inputs:',
+    '      - review',
+    'aggregate:',
+    '  role: coordinator',
+    '  inputs:',
+    '    - archive',
+    'task_template: 为 {{employee_name}} 执行入职流程'
+  ].join('\n');
+
+  var OVERLIMIT_FILLER = [];
+  for (var i = 1; i <= 24; i++) {
+    OVERLIMIT_FILLER.push('# filler_line_' + String(i).padStart(2, '0') + ': 仅用于演示展示上限，不是定义字段');
+  }
+  var YAML_OVERLIMIT = YAML_MAIN + '\n' + OVERLIMIT_FILLER.join('\n');
+
+  function fillYaml(selector, text) {
+    document.querySelectorAll(selector).forEach(function (el) {
+      el.textContent = text;   // 始终纯文本，禁止 innerHTML
+    });
+  }
+  fillYaml('[data-yaml="main"]', YAML_MAIN);
+  fillYaml('[data-yaml="full"]', YAML_MAIN);
+  fillYaml('[data-yaml="overlimit"]', YAML_OVERLIMIT.split('\n').slice(0, 40).join('\n'));
+
+  function setStatus(card, text, tone) {
+    var el = card.querySelector('[data-role="status"]');
+    if (!el) return;
+    el.className = 'status-line' + (tone ? ' ' + tone : '');
+    el.textContent = text;
+  }
+
+  function lockCard(card) {
+    card.querySelectorAll('button').forEach(function (btn) {
+      btn.disabled = true;
+    });
+  }
+
+  function addResult(card, text, neutral) {
+    var div = document.createElement('div');
+    div.className = 'result-line' + (neutral ? ' neutral' : '');
+    div.textContent = text;
+    card.appendChild(div);
+  }
+
+  function confirmCard(card) {
+    if (card.dataset.busy === '1') return;
+    card.dataset.busy = '1';
+    lockCard(card);
+    var confirmBtn = card.querySelector('[data-action="confirm"]');
+    if (confirmBtn) {
+      confirmBtn.textContent = '';
+      var spinner = document.createElement('span');
+      spinner.className = 'btn-loading';
+      confirmBtn.appendChild(spinner);
+      confirmBtn.appendChild(document.createTextNode('确认中…'));
+    }
+    setStatus(card, '已提交确认请求，等待服务端处理…', 'warn');
+    window.setTimeout(function () {
+      card.classList.add('is-confirmed');
+      var chip = card.querySelector('[data-role="status-chip"]');
+      if (chip) { chip.className = 'chip ok'; chip.textContent = '已启用'; }
+      var btns = card.querySelector('.btns');
+      if (btns) btns.remove();
+      setStatus(card, '');
+      addResult(card, '已启用：目标定义 hr-onboarding-flow（本地模拟，未发请求）');
+    }, 900);
+  }
+
+  function discardCard(card) {
+    if (card.dataset.busy === '1') return;
+    card.dataset.busy = '1';
+    lockCard(card);
+    setStatus(card, '正在丢弃草稿…', 'warn');
+    window.setTimeout(function () {
+      card.classList.add('is-discarded');
+      var chip = card.querySelector('[data-role="status-chip"]');
+      if (chip) { chip.className = 'chip'; chip.textContent = '已丢弃'; }
+      var btns = card.querySelector('.btns');
+      if (btns) btns.remove();
+      setStatus(card, '');
+      addResult(card, '草稿资产已清理；可用定义目录未发生变化（本地模拟）', true);
+    }, 700);
+  }
+
+  document.querySelectorAll('.draft-card').forEach(function (card) {
+    var confirmBtn = card.querySelector('[data-action="confirm"]');
+    var discardBtn = card.querySelector('[data-action="discard"]');
+    if (confirmBtn) confirmBtn.addEventListener('click', function () { confirmCard(card); });
+    if (discardBtn) discardBtn.addEventListener('click', function () { discardCard(card); });
+  });
+
+  document.querySelectorAll('[data-action="detail"]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.getElementById('s9').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+
+  document.querySelectorAll('[data-action="back-top"]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  });
+
+  document.querySelectorAll('[data-action="noop"]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      btn.textContent = '演示：未发起请求';
+      btn.disabled = true;
+    });
+  });
+
+  var explainBtn = document.querySelector('[data-action="global-explain"]');
+  if (explainBtn) {
+    explainBtn.addEventListener('click', function () {
+      var note = document.getElementById('global-explain');
+      if (note) note.hidden = false;
+    });
+  }
+
+  document.querySelectorAll('[data-demo="approval"]').forEach(function (card) {
+    var status = card.querySelector('[data-role="approval-status"]');
+    card.querySelectorAll('[data-approval]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        card.querySelectorAll('button').forEach(function (b) { b.disabled = true; });
+        status.textContent = btn.dataset.approval === 'approve'
+          ? '已批准（演示），流程继续…'
+          : '已拒绝（演示），草稿保持 pending';
+      });
+    });
+  });
+
+  var detailStatus = document.querySelector('[data-role="detail-status"]');
+  document.querySelectorAll('[data-action="confirm-detail"], [data-action="discard-detail"]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var isConfirm = btn.dataset.action === 'confirm-detail';
+      detailStatus.className = 'status-line ' + (isConfirm ? 'ok' : 'warn');
+      detailStatus.textContent = isConfirm
+        ? '演示：已调用确认端点，草稿将转为 confirmed（未发请求）'
+        : '演示：已调用丢弃端点，草稿将转为 discarded（未发请求）';
+    });
+  });
+
+  var reset = document.getElementById('reset-demo');
+  if (reset) reset.addEventListener('click', function () { window.location.reload(); });
+})();
+</script>
+</body>
+</html>

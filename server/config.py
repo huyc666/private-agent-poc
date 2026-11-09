@@ -141,6 +141,11 @@ ORCHESTRATIONS_DIR = Path(os.environ.get(
     "ORCHESTRATIONS_DIR", str(PROJECT_ROOT / "orchestrations"))).resolve()
 PERSONAL_ORCHESTRATIONS_DIR = Path(os.environ.get(
     "PERSONAL_ORCHESTRATIONS_DIR", str(PROJECT_ROOT / "orchestrations_personal"))).resolve()
+# 4.3 流程草稿（惰性区）：与可用定义物理分离，执行链路不可见。
+# 目录按写入域再分一层：user 角色为 user_scope，approver/admin/开放模式为 global。
+ORCHESTRATION_DRAFTS_DIR = Path(os.environ.get(
+    "ORCHESTRATION_DRAFTS_DIR",
+    str(TOOL_WORKSPACE / "orchestration_drafts"))).resolve()
 
 
 # ---- 运行时数据目录（v0.17.19：SQLite 运行库归位 data/，根目录只放工程文件）----

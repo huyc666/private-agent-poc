@@ -228,6 +228,20 @@ def resolve(aid: str, approve: bool, username: str = "", role: str = "admin") ->
     return "ok" if n > 0 else "not_found"
 
 
+def decided_by_for(tool: str, args: dict) -> str:
+    """按工具 + 审批参数查最近一次批准决议的决议人。
+
+    4.3 global 确认留痕用：审批回调在发起者会话里执行，但真正确认的人是
+    决议人；参数序列化口径与 create_approval 一致（截断 2000 字）。
+    """
+    import json
+    rec = _query_one(
+        "SELECT decided_by FROM approvals WHERE tool = ? AND args = ?"
+        " AND status = 'approved' ORDER BY decided DESC LIMIT 1",
+        (tool, json.dumps(args, ensure_ascii=False)[:2000]))
+    return (rec or {}).get("decided_by") or ""
+
+
 def pending_count() -> int:
     rec = _query_one(
         "SELECT COUNT(*) AS n FROM approvals WHERE status = 'pending'")

@@ -33,13 +33,31 @@ _ENV_DEFAULTS = {
     "PACKS_DIR": str(_TMP / "packs"),
     "ORCHESTRATIONS_DIR": str(_TMP / "orchestrations"),
     "PERSONAL_ORCHESTRATIONS_DIR": str(_TMP / "orchestrations_personal"),
+    "ORCHESTRATION_DRAFTS_DIR": str(_TMP / "orchestration_drafts"),
     "LANGFUSE_ENABLED": "false",   # 观测默认关闭
     "SANDBOX_URL": "",              # 沙箱不可达 → auto 模式回退 local / fail-closed
     "PACK_SIGNING_KEY": "",
     "AUTH_BOOTSTRAP_ADMIN": "",
 }
-for _k, _v in _ENV_DEFAULTS.items():
-    os.environ[_k] = _v
+
+
+def _apply_env_defaults(environ) -> None:
+    """把隔离默认值写入 environ（纯函数，便于单测覆盖保留分支）。
+
+    门控真实模型运行（RUN_LLM_TESTS）时保留外部 MOCK_LLM 与 SANDBOX_URL；
+    非门控运行一律强制回隔离默认值——否则同一 shell 里先跑门控再跑默认
+    套件会真连沙箱（安全复审 M2）。
+    """
+    gated = bool(environ.get("RUN_LLM_TESTS"))
+    for key, value in _ENV_DEFAULTS.items():
+        if key == "MOCK_LLM" and gated:
+            continue
+        if key == "SANDBOX_URL" and gated and environ.get("SANDBOX_URL"):
+            continue
+        environ[key] = value
+
+
+_apply_env_defaults(os.environ)
 
 import pytest  # noqa: E402  （须在 sys.path/env 设置之后）
 
@@ -64,6 +82,9 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "PACKS_DIR", tmp_path / "packs")
     monkeypatch.setattr(config, "ORCHESTRATIONS_DIR", tmp_path / "orchestrations")
     monkeypatch.setattr(config, "PERSONAL_ORCHESTRATIONS_DIR", tmp_path / "orchestrations_personal")
+    # 4.3 草稿目录（实现前该常量尚不存在，raising=False 保证可先收集测试）
+    monkeypatch.setattr(config, "ORCHESTRATION_DRAFTS_DIR",
+                        tmp_path / "orchestration_drafts", raising=False)
     # 模块级缓存 / 内存态复位
     packs.invalidate_scan_cache()
     packs._disabled.clear()
