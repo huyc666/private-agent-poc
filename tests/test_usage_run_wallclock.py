@@ -686,3 +686,47 @@ def test_ac12b_record_run_empty_run_id_skips_insert():
     usage.record_run("r-ctrl", "alice", "s-empty", 100.0, 100.5, 500, "ok")
     rows = _rows("r-ctrl")
     assert len(rows) == 1, "对照组：非空 run_id 应正常落 1 行"
+
+
+# ------------------------------------------- v0.17.53：run 墙钟的视图与展示
+
+
+def test_v053_summary_exposes_run_status_and_wall_runs():
+    """by_run 增列 run 终态；wall_runs 覆盖零模型调用的取消 run；未观测保持 NULL。"""
+    usage.record_run("r-ok", "alice", "s-1", 1000.0, 1003.0, 3000, "ok")
+    usage.record_run("r-cancel", "alice", "s-1", 1001.0, 1002.0, 1000, "cancelled")
+    # 有模型调用但无 run_records（历史/触发式 run）：墙钟必须是 None，不是 0
+    usage.current_user.set("alice")
+    usage.current_session.set("s-1")
+    usage.current_run.set("r-old")
+    try:
+        usage.record("m", {"prompt_tokens": 3, "completion_tokens": 2})
+    finally:
+        usage.current_run.set("")
+
+    d = usage.summary(user_id="alice", session_id="s-1")
+    runs = {r["run_id"]: r for r in d["wall_runs"]}
+    assert runs["r-ok"]["status"] == "ok"
+    assert runs["r-ok"]["wall_ms"] == 3000
+    assert runs["r-cancel"]["status"] == "cancelled", "取消 run 必须可区分"
+    assert runs["r-cancel"]["wall_ms"] == 1000
+    assert "r-old" not in runs, "无墙钟的历史 run 不应伪造 run_records 行"
+
+    by_run = {r["run_id"]: r for r in d["by_run"]}
+    assert set(by_run) == {"r-old"}, "by_run 只覆盖有模型调用的 run"
+    assert by_run["r-old"]["wall_ms"] is None, "未观测必须是 NULL，不能写 0"
+    assert by_run["r-old"]["status"] is None
+
+
+def test_v053_usage_views_render_wall_without_inner_html():
+    """前端展示：等待时长与模型耗时并列；未观测/取消文案存在；一律 textContent。"""
+    html = (Path(__file__).resolve().parent.parent
+            / "web" / "index.html").read_text(encoding="utf-8")
+    assert "端到端等待未观测" in html
+    assert "等待时长未观测" in html
+    assert "已取消" in html
+    assert "wall_runs" in html
+    note = html.split("function addUsageNote")[1].split("let serverOnline")[0]
+    assert "innerHTML" not in note
+    panel = html.split("const usageRuns")[1].split("} catch (e)")[0]
+    assert "innerHTML" not in panel

@@ -451,14 +451,26 @@ document.getElementById('umSwitch').onclick = () => {
 };
 document.getElementById('umLogout').onclick = () => dropCredential('已注销，请重新登录');
 
+// 毫秒口径统一展示（6.8 墙钟/模型耗时）：≥1 秒用秒，保留 1 位
+function fmtDur(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return '—';
+  return n >= 1000 ? (n / 1000).toFixed(1) + ' 秒' : Math.round(n) + ' 毫秒';
+}
+
 function addUsageNote(usage) {
   const run = (usage && usage.run) || {};
   const sess = (usage && usage.session) || {};
   if (!run.total_tokens) return;  // 提供方未返回 usage 时不展示
+  // 6.8：模型耗时（各次调用之和）与端到端等待并列；墙钟未记录时如实写
+  // 「未观测」，绝不写 0 冒充瞬时完成
+  const wall = (run.wall_ms === null || run.wall_ms === undefined)
+    ? '端到端等待未观测' : `端到端等待 ${fmtDur(run.wall_ms)}`;
   const div = document.createElement('div');
   div.className = 'usage-note';
   div.textContent = `🔢 本次 ${run.total_tokens.toLocaleString()} tokens`
     + `（输入 ${run.prompt_tokens.toLocaleString()} / 输出 ${run.completion_tokens.toLocaleString()}）`
+    + ` · 模型耗时 ${fmtDur(run.duration_ms)} · ${wall}`
     + (sess.total_tokens ? ` · 本会话累计 ${sess.total_tokens.toLocaleString()}` : '');
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
@@ -1442,11 +1454,36 @@ async function renderPanel() {
         panelHint('按会话');
         for (const s of d.by_session) row(s.session_id, `${s.user_id || 'anonymous'} · ${s.calls} 次调用 · ${fmtN(s.total_tokens)} tokens`);
       }
-      const runs = (d.by_run || []).filter(x => x.worker_tokens > 0);
+      // 6.8：run 级视图以 run_records 为准（含零模型调用的取消/失败 run），
+      // 合并 by_run 的 token 与模型耗时；差集（历史未观测、触发式 run 等）也
+      // 列出并标注「等待时长未观测」——不用 0 冒充，取消/失败不混进完成
+      const usageRuns = new Map((d.by_run || []).map(x => [x.run_id, x]));
+      const runs = (d.wall_runs || []).map(w => Object.assign({}, usageRuns.get(w.run_id) || {}, w));
+      for (const x of usageRuns.values()) {
+        if (!runs.some(r => r.run_id === x.run_id)) runs.push(x);
+      }
       if (runs.length) {
-        panelHint('多 Agent 任务（worker 子图消耗单独计量）');
-        for (const x of runs) row(`${x.date} ${String(x.run_id).slice(0, 8)}`,
-          `${x.user_id || 'anonymous'} · 主图 ${fmtN(x.total_tokens - x.worker_tokens)} + worker ${fmtN(x.worker_tokens)} tokens`);
+        panelHint('按运行（最近 50 次，含取消）');
+        const dayOf = sec => {
+          const dt = new Date(sec * 1000);
+          return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+        };
+        for (const x of runs) {
+          const st = x.status === 'cancelled' ? '已取消'
+            : x.status === 'error' ? '失败'
+            : x.status === 'ok' ? '完成'
+            : (x.failed_calls ? '有失败调用' : '状态未记录');
+          const wall = (x.wall_ms === null || x.wall_ms === undefined)
+            ? '等待时长未观测' : `端到端等待 ${fmtDur(x.wall_ms)}`;
+          const model = (x.calls === undefined)
+            ? '无模型调用' : `模型耗时 ${fmtDur(x.duration_ms || 0)}`;
+          const tokens = (x.calls === undefined) ? '0 tokens'
+            : (x.worker_tokens > 0
+              ? `主图 ${fmtN(x.total_tokens - x.worker_tokens)} + worker ${fmtN(x.worker_tokens)} tokens`
+              : `${fmtN(x.total_tokens)} tokens`);
+          row(`${x.date || dayOf(x.started_at)} ${String(x.run_id).slice(0, 8)} · ${st}`,
+            `${x.user_id || 'anonymous'} · ${model} · ${wall} · ${tokens}`);
+        }
       }
     } catch (e) {
       panelHint('用量加载失败: ' + e.message);

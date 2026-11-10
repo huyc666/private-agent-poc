@@ -404,23 +404,29 @@ def session_usage(session_id: str) -> dict:
 
 def summary(user_id: str = "", session_id: str = "", days: int = 0) -> dict:
     """聚合视图：总量 + 按用户 / 按会话 / 按任务（run）分组（含金额字段）。
-    days>0 时只统计最近 N 天。total_cost 只含已折算部分（缺单价模型 cost=0）。"""
+    另返回 wall_runs（最近 50 个 run 级墙钟记录，含零模型调用的取消/失败 run，
+    v0.17.53 展示用）。days>0 时只统计最近 N 天。total_cost 只含已折算部分。"""
     where, params = [], []
     where_u = []          # by_run 走别名 JOIN，条件必须带 u. 前缀（防歧义）
+    where_r = []          # wall_runs 直查 run_records（无别名）
     if user_id:
         where.append("user_id = ?")
         where_u.append("u.user_id = ?")
+        where_r.append("user_id = ?")
         params.append(user_id)
     if session_id:
         where.append("session_id = ?")
         where_u.append("u.session_id = ?")
+        where_r.append("session_id = ?")
         params.append(session_id)
     if days > 0:
         where.append("ts >= ?")
         where_u.append("u.ts >= ?")
+        where_r.append("started_at >= ?")
         params.append(time.time() - days * 86400)
     cond = (" WHERE " + " AND ".join(where)) if where else ""
     cond_u = (" WHERE " + " AND ".join(where_u)) if where_u else ""
+    cond_r = (" WHERE " + " AND ".join(where_r)) if where_r else ""
     group_cols = ("prompt_tokens", "completion_tokens", "total_tokens")
 
     total = _query(
@@ -449,15 +455,23 @@ def summary(user_id: str = "", session_id: str = "", days: int = 0) -> dict:
         " SUM(CASE WHEN u.status='error' THEN 1 ELSE 0 END) AS failed_calls,"
         " COALESCE(SUM(u.prompt_cost),0) AS prompt_cost,"
         " COALESCE(SUM(u.completion_cost),0) AS completion_cost,"
-        " MAX(r.wall_ms) AS wall_ms"
+        " MAX(r.wall_ms) AS wall_ms, MAX(r.status) AS status"
         " FROM usage_records AS u"
         " LEFT JOIN run_records AS r ON r.run_id = u.run_id"
         f"{cond_u} GROUP BY u.run_id ORDER BY MAX(u.ts) DESC LIMIT 50",
         tuple(params))
+    # run 级真实记录（v0.17.53 展示）：run_records 覆盖零模型调用的 run（首 token
+    # 前取消/首次调用前报错），by_run 只有「有模型调用」的 run；前端合并二者，
+    # 差集按「等待时长未观测」展示，不用 0 冒充（PLAN 6.8）。
+    wall_runs = _query(
+        "SELECT run_id, user_id, session_id, started_at, finished_at,"
+        " wall_ms, status FROM run_records"
+        f"{cond_r} ORDER BY started_at DESC LIMIT 50", tuple(params))
     return {"total": _attach_total_cost(total[0]) if total else {},
             "by_user": [_attach_total_cost(r) for r in by_user],
             "by_session": [_attach_total_cost(r) for r in by_session],
-            "by_run": [_attach_total_cost(r) for r in by_run]}
+            "by_run": [_attach_total_cost(r) for r in by_run],
+            "wall_runs": wall_runs}
 
 
 # 未设置部门/映射外用户的聚合分组名（v0.17.21 部门报表）
