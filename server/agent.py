@@ -17,7 +17,10 @@ import logging
 import re
 import sys
 import threading
+import time
 from typing import Any, AsyncIterator, Callable
+
+import anyio
 
 from . import (approval, config, custom_tools, packs, sessions, skills,
                telemetry, usage, tools_admin)
@@ -587,123 +590,169 @@ async def stream_reply(messages: list[dict], session_id: str = "default",
 
     from langgraph.types import Command
 
-    # 自定义工具有变化时免重启热加载；探测含同步网络 IO，放到线程执行避免阻塞事件循环
-    await asyncio.to_thread(maybe_reload_custom_tools)
+    # 6.8 口径 B：run 墙钟起点——Mock 分支之后、任何真实模型工作之前，
+    # 覆盖热加载、压缩、审批等待与全部终态路径（spec §2.1/§2.4）。
+    started_at = time.time()
+    started_mono = usage._mono()
+    recorded = False
 
-    run_config = {
-        "configurable": {"thread_id": session_id},
-        "callbacks": telemetry.langchain_callbacks(),
-    }
-    payload = {"messages": messages}
-    # 上下文压缩（v0.17.7）：轮前检查历史是否超阈值，超则滚动摘要（独立调用，
-    # 不进主流事件流）；模型视野由 _pre_model_hook 在每次模型调用前裁剪
-    await prepare_compaction(session_id)
-    # 上一轮带批准决议 resume 的 aid：本轮跑完（未抛错）后标记 executed_at，
-    # 供审计区分「已批准已执行」与「已批准但执行丢失」（后者由启动/周期扫描转 abandoned）
-    resuming_aid = ""
-
-    for _round in range(5):  # 一次对话最多 5 轮审批，防死循环
-        if _fenced_off():
-            # 每轮模型调用前校验（spec 3.4.1）：已删除/代际过期不再烧模型调用，
-            # checkpoint 层 FencedCheckpointer 兜底
-            yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+    async def _record_run(finished_mono: float, status: str) -> None:
+        """终态落账：ok/error 在 yield 终态事件之前 await；内存标志保证一个 run
+        只尝试写一次（finally 不重试）。异常只记类型名，绝不外泄、不阻塞主链路。"""
+        nonlocal recorded
+        if recorded:
+            return
+        recorded = True
+        if not run_id:
             return
         try:
-            async for event in STATE.agent.astream_events(payload, config=run_config, version="v2"):
-                kind = event["event"]
-                if kind == "on_chat_model_stream":
-                    # 多 Agent 子图（tag ma_worker）的中间 token 不进入用户可见流；
-                    # 其工具调用事件仍然透出，界面上可观察并行执行过程
-                    if any(t == "ma_worker" for t in event.get("tags", [])):
-                        continue
-                    chunk = event["data"]["chunk"]
-                    # 推理模型的思维链（deepseek-reasoner/v4 类返回
-                    # reasoning_content）：透出为 reasoning 事件供前端展示
-                    # 参考；不落库正文（落库仍只收 token）
-                    rc = (chunk.additional_kwargs or {}).get("reasoning_content")
-                    if rc:
-                        yield {"type": "reasoning", "content": rc}
-                    if chunk.content:
-                        yield {"type": "token", "content": chunk.content}
-                elif kind == "on_tool_start":
-                    yield {"type": "tool", "status": "start",
-                           "name": event.get("name", "?")}
-                elif kind == "on_tool_end":
-                    output = event["data"].get("output")
-                    text = getattr(output, "content", output)
-                    # 知识库检索工具输出尾部的机器可读出处块：剥离后以独立
-                    # citations 事件直推前端（v0.17.25），工具文本不含标签；
-                    # 截断在剥离之后进行，出处行保持完整
-                    clean, cites = parse_citations(str(text))
-                    if cites:
-                        yield {"type": "citations", "citations": cites}
-                    yield {"type": "tool", "status": "end",
-                           "name": event.get("name", "?"),
-                           "result": clean[:2000]}
-                elif kind == "on_custom_event":
-                    # 工作流进度（v0.17.46，PLAN 4.1）：仅透传 wf_progress，
-                    # 且只保留白名单字段；其余 custom event 一律忽略（防注入）
-                    if event.get("name") != _WF_PROGRESS_NAME:
-                        continue
-                    data = event.get("data") or {}
-                    if not isinstance(data, dict):
-                        continue
-                    progress = {k: data[k] for k in _WF_PROGRESS_FIELDS if k in data}
-                    if progress:
-                        yield {"type": "progress", **progress}
-        except sessions.SessionDeletedError:
-            # 评审 C4（v0.17.38）：checkpoint 栅栏异常（FencedCheckpointer 抛出，
-            # 在途图执行在写点死亡）须以删除中止文案收尾——落入通用分支会被
-            # 误报为「模型调用失败」，与三处栅栏点口径不一致
-            yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
-            return
+            # 客户端断连时此协程处于 anyio 取消域，取消会被逐轮重投，取消域内
+            # 的 await 会立即中止（to_thread 的写因此丢失）；shield 让落账跑完，
+            # 之后取消照常向上传播。
+            with anyio.CancelScope(shield=True):
+                await asyncio.to_thread(
+                    usage.record_run, run_id, user_id, session_id, started_at,
+                    time.time(),
+                    max(0, int((finished_mono - started_mono) * 1000)), status)
         except Exception as e:
-            # resume 轮抛错：executed_at 不标记，记录保持「已批准但未执行」
-            # （审计可见，绝不让失败被误报为已执行）
-            # 全项目评审问题1：SSE 直达用户，不回显原始异常文本（P1-3 约定：
-            # 可能携带绝对路径/DATABASE_URL 等部署细节），细节仅进服务端日志
-            logger.error(f"[agent] 模型调用失败: {e}")
-            yield {"type": "error",
-                   "content": f"模型调用失败（{type(e).__name__}），请稍后重试或联系管理员"}
-            return
-        if resuming_aid:
-            await asyncio.to_thread(approval.mark_executed, resuming_aid)
-            resuming_aid = ""
+            logger.warning("[agent] run 墙钟落账失败: %s", type(e).__name__)
 
-        # 检查是否因危险操作审批而中断
-        try:
-            state = await STATE.agent.aget_state(run_config)
-            intr = _extract_interrupt(state)
-        except Exception:
-            intr = None
-        if intr is None:
-            break
+    try:
+        # 自定义工具有变化时免重启热加载；探测含同步网络 IO，放到线程执行避免阻塞事件循环
+        await asyncio.to_thread(maybe_reload_custom_tools)
 
-        tool = intr.get("tool", "?")
-        args = intr.get("args", {})
-        # 审批创建点校验（spec 3.4.2，报告验收 2）：会话已删/代际过期 →
-        # 不创建 pending（fail-closed），本轮中止
-        if generation is not None:
-            aid = approval.create_approval_fenced(session_id, generation, tool, args)
-            if aid is None:
+        run_config = {
+            "configurable": {"thread_id": session_id},
+            "callbacks": telemetry.langchain_callbacks(),
+        }
+        payload = {"messages": messages}
+        # 上下文压缩（v0.17.7）：轮前检查历史是否超阈值，超则滚动摘要（独立调用，
+        # 不进主流事件流）；模型视野由 _pre_model_hook 在每次模型调用前裁剪
+        await prepare_compaction(session_id)
+        # 上一轮带批准决议 resume 的 aid：本轮跑完（未抛错）后标记 executed_at，
+        # 供审计区分「已批准已执行」与「已批准但执行丢失」（后者由启动/周期扫描转 abandoned）
+        resuming_aid = ""
+
+        for _round in range(5):  # 一次对话最多 5 轮审批，防死循环
+            if _fenced_off():
+                # 每轮模型调用前校验（spec 3.4.1）：已删除/代际过期不再烧模型调用，
+                # checkpoint 层 FencedCheckpointer 兜底
+                await _record_run(usage._mono(), "error")
                 yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
                 return
-        else:
-            aid = approval.create_approval(tool, args)
-        yield {"type": "approval_required", "approval_id": aid,
-               "tool": tool, "args": args}
-        decision = await approval.wait_decision(aid)
-        # 决议落库后再校验（spec 3.4.3，报告验收 3）：批准与删除竞争时绝不把
-        # 危险操作恢复执行——无 resume 轮；拒绝/超时决议同样中止（图不推进）
-        if _fenced_off():
-            yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
-            return
-        payload = Command(resume={"approve": decision is True})
-        if decision is True:
-            resuming_aid = aid  # 批准：下一轮 resume 跑完即标记已执行
+            try:
+                async for event in STATE.agent.astream_events(payload, config=run_config, version="v2"):
+                    kind = event["event"]
+                    if kind == "on_chat_model_stream":
+                        # 多 Agent 子图（tag ma_worker）的中间 token 不进入用户可见流；
+                        # 其工具调用事件仍然透出，界面上可观察并行执行过程
+                        if any(t == "ma_worker" for t in event.get("tags", [])):
+                            continue
+                        chunk = event["data"]["chunk"]
+                        # 推理模型的思维链（deepseek-reasoner/v4 类返回
+                        # reasoning_content）：透出为 reasoning 事件供前端展示
+                        # 参考；不落库正文（落库仍只收 token）
+                        rc = (chunk.additional_kwargs or {}).get("reasoning_content")
+                        if rc:
+                            yield {"type": "reasoning", "content": rc}
+                        if chunk.content:
+                            yield {"type": "token", "content": chunk.content}
+                    elif kind == "on_tool_start":
+                        yield {"type": "tool", "status": "start",
+                               "name": event.get("name", "?")}
+                    elif kind == "on_tool_end":
+                        output = event["data"].get("output")
+                        text = getattr(output, "content", output)
+                        # 知识库检索工具输出尾部的机器可读出处块：剥离后以独立
+                        # citations 事件直推前端（v0.17.25），工具文本不含标签；
+                        # 截断在剥离之后进行，出处行保持完整
+                        clean, cites = parse_citations(str(text))
+                        if cites:
+                            yield {"type": "citations", "citations": cites}
+                        yield {"type": "tool", "status": "end",
+                               "name": event.get("name", "?"),
+                               "result": clean[:2000]}
+                    elif kind == "on_custom_event":
+                        # 工作流进度（v0.17.46，PLAN 4.1）：仅透传 wf_progress，
+                        # 且只保留白名单字段；其余 custom event 一律忽略（防注入）
+                        if event.get("name") != _WF_PROGRESS_NAME:
+                            continue
+                        data = event.get("data") or {}
+                        if not isinstance(data, dict):
+                            continue
+                        progress = {k: data[k] for k in _WF_PROGRESS_FIELDS if k in data}
+                        if progress:
+                            yield {"type": "progress", **progress}
+            except sessions.SessionDeletedError:
+                # 评审 C4（v0.17.38）：checkpoint 栅栏异常（FencedCheckpointer 抛出，
+                # 在途图执行在写点死亡）须以删除中止文案收尾——落入通用分支会被
+                # 误报为「模型调用失败」，与三处栅栏点口径不一致
+                await _record_run(usage._mono(), "error")
+                yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+                return
+            except Exception as e:
+                # resume 轮抛错：executed_at 不标记，记录保持「已批准但未执行」
+                # （审计可见，绝不让失败被误报为已执行）
+                # 全项目评审问题1：SSE 直达用户，不回显原始异常文本（P1-3 约定：
+                # 可能携带绝对路径/DATABASE_URL 等部署细节），细节仅进服务端日志
+                logger.error(f"[agent] 模型调用失败: {e}")
+                await _record_run(usage._mono(), "error")
+                yield {"type": "error",
+                       "content": f"模型调用失败（{type(e).__name__}），请稍后重试或联系管理员"}
+                return
+            if resuming_aid:
+                await asyncio.to_thread(approval.mark_executed, resuming_aid)
+                resuming_aid = ""
 
-    # done 事件携带本次任务与本会话的 token 消耗（前端展示 + 调用方可自行累计）
-    yield {"type": "done", "usage": {
-        "run": usage.run_usage(run_id) if run_id else {},
-        "session": usage.session_usage(session_id),
-    }}
+            # 检查是否因危险操作审批而中断
+            try:
+                state = await STATE.agent.aget_state(run_config)
+                intr = _extract_interrupt(state)
+            except Exception:
+                intr = None
+            if intr is None:
+                break
+
+            tool = intr.get("tool", "?")
+            args = intr.get("args", {})
+            # 审批创建点校验（spec 3.4.2，报告验收 2）：会话已删/代际过期 →
+            # 不创建 pending（fail-closed），本轮中止
+            if generation is not None:
+                aid = approval.create_approval_fenced(session_id, generation, tool, args)
+                if aid is None:
+                    await _record_run(usage._mono(), "error")
+                    yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+                    return
+            else:
+                aid = approval.create_approval(tool, args)
+            yield {"type": "approval_required", "approval_id": aid,
+                   "tool": tool, "args": args}
+            decision = await approval.wait_decision(aid)
+            # 决议落库后再校验（spec 3.4.3，报告验收 3）：批准与删除竞争时绝不把
+            # 危险操作恢复执行——无 resume 轮；拒绝/超时决议同样中止（图不推进）
+            if _fenced_off():
+                await _record_run(usage._mono(), "error")
+                yield {"type": "error", "content": "会话已被删除，本轮回复已中止"}
+                return
+            payload = Command(resume={"approve": decision is True})
+            if decision is True:
+                resuming_aid = aid  # 批准：下一轮 resume 跑完即标记已执行
+
+        # done 事件携带本次任务与本会话的 token 消耗（前端展示 + 调用方可自行累计）
+        # 6.8：先落 run 墙钟再 yield，保证 done 内的 usage.run.wall_ms 与数据行同源。
+        await _record_run(usage._mono(), "ok")
+        # P2-1（评审 2026-11-10）：done 前的两次同步查库合并到一次 to_thread，
+        # 不在事件循环线程执行；顺序仍是「先落账、后查询」，AC1 不受影响。
+        run_usage, session_usage = await asyncio.to_thread(
+            lambda: (usage.run_usage(run_id) if run_id else {},
+                     usage.session_usage(session_id)))
+        yield {"type": "done", "usage": {
+            "run": run_usage, "session": session_usage}}
+    except (GeneratorExit, asyncio.CancelledError):
+        # 生成器被显式 aclose()（客户端断连/租约接管）→ 取消终态
+        await _record_run(usage._mono(), "cancelled")
+        raise
+    except BaseException:
+        # 未走终态捕获点的异常退出 → error 终态
+        await _record_run(usage._mono(), "error")
+        raise

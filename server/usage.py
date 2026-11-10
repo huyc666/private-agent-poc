@@ -79,6 +79,12 @@ current_identity = contextvars.ContextVar("usage_identity", default=None)
 
 _lock = threading.Lock()
 
+# schema 初始化（P2-2，评审 2026-11-10）：DDL 每进程、每个库路径只跑一次，且
+# 不在 _lock 内执行；热路径（record/record_run/_query）不再重复建表，避免跨进程
+# 写锁竞争时把「建表 + 写事务」一起拖到 busy_timeout 上限。
+_schema_lock = threading.Lock()
+_schema_ready_path: str | None = None
+
 # 时钟挂点（单次模型调用计时，monotonic 不受系统跳变影响；测试可替换）
 _mono = time.monotonic
 
@@ -167,10 +173,42 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE usage_records ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
     if cols and "status" not in cols:
         conn.execute("ALTER TABLE usage_records ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'")
+    # run 级墙钟（6.8，口径 B）：一行一 run；与 usage_records 同库便于按 run_id
+    # join。历史库自动补建（幂等），老 run 无行 = 未观测（NULL），不写 0 冒充。
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS run_records (
+            run_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            started_at REAL NOT NULL,
+            finished_at REAL NOT NULL,
+            wall_ms INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            created_at REAL NOT NULL DEFAULT 0
+        )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_records(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_run ON usage_records(run_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_date ON usage_records(date)")
+
+
+def _init_schema() -> None:
+    """进程内幂等初始化：首次使用（或切换 USAGE_DB）时建表/补列，之后热路径直接跳过。
+    DDL 在 _lock 之外执行，且不与写事务同锁；老库仍走惰性升级（首个写入/查询前补齐）。"""
+    global _schema_ready_path
+    path = str(_db_path())
+    if _schema_ready_path == path:
+        return
+    with _schema_lock:
+        if _schema_ready_path == path:
+            return
+        conn = _connect()
+        try:
+            _ensure_schema(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        _schema_ready_path = path
 
 
 def record(model: str, usage: dict, source: str = "main",
@@ -193,15 +231,42 @@ def record(model: str, usage: dict, source: str = "main",
            current_user.get(), current_session.get(), current_run.get(),
            resolved_model, source, pt, ct, tt, prompt_cost, completion_cost,
            max(0, int(duration_ms or 0)), "error" if status == "error" else "ok")
+    _init_schema()          # 锁外幂等建表（每进程一次），热路径不重复 DDL
     with _lock:
         conn = _connect()
         try:
-            _ensure_schema(conn)
             conn.execute(
                 "INSERT INTO usage_records (ts, date, user_id, session_id, run_id,"
                 " model, source, prompt_tokens, completion_tokens, total_tokens,"
                 " prompt_cost, completion_cost, duration_ms, status)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def record_run(run_id: str, user_id: str, session_id: str, started_at: float,
+               finished_at: float, wall_ms: int, status: str) -> None:
+    """记录一次 run 的端到端墙钟（6.8，口径 B）：一个 run 一行。
+
+    归属全部走显式参数（取消发生在请求收尾阶段时 ContextVar 不可靠）；
+    空 run_id 直接跳过（stream_reply 默认值，测试/回放会触发），既不报错也
+    不落行。连接与锁沿用 record() 约定：_lock 内新建连接、INSERT、commit、
+    close，不跨线程复用连接；建表由 _init_schema 在锁外每进程只做一次，热路径
+    不重复 DDL（P2-2，评审 2026-11-10）；内部不得调用 _query()（非重入锁会自锁）。
+    写失败由调用方吞掉（旁路不阻塞主链路），本函数不自行降级。"""
+    if not run_id:
+        return
+    row = (run_id, user_id, session_id, float(started_at), float(finished_at),
+           max(0, int(wall_ms or 0)), status, time.time())
+    _init_schema()          # 锁外幂等建表（每进程一次），热路径不重复 DDL
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT INTO run_records (run_id, user_id, session_id,"
+                " started_at, finished_at, wall_ms, status, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?)", row)
             conn.commit()
         finally:
             conn.close()
@@ -272,11 +337,11 @@ class UsageCallback:
 
 
 def _query(sql: str, params: tuple = ()) -> list[dict]:
+    _init_schema()          # 锁外幂等建表（每进程一次），热路径不重复 DDL
     with _lock:
         conn = _connect()
         conn.row_factory = sqlite3.Row
         try:
-            _ensure_schema(conn)
             cur = conn.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
         finally:
@@ -295,7 +360,10 @@ def _attach_total_cost(row: dict) -> dict:
 
 
 def run_usage(run_id: str) -> dict:
-    """单次任务（一次 /api/chat 运行）的消耗合计（含金额与健康度）。"""
+    """单次任务（一次 /api/chat 运行）的消耗合计（含金额、健康度与 run 墙钟）。
+    墙钟字段来自独立第二次查询 run_records：零模型调用的 run（_StreamAgent、
+    首 token 前取消、首次调用前报错）在 usage_records 无行，若 LEFT JOIN 会把
+    wall_ms 恒置 NULL（spec 6.8 §2.2 R6）。键固定存在，无记录时值为 None。"""
     rows = _query(
         "SELECT COUNT(*) AS calls, COALESCE(SUM(prompt_tokens),0) AS prompt_tokens,"
         " COALESCE(SUM(completion_tokens),0) AS completion_tokens,"
@@ -308,6 +376,15 @@ def run_usage(run_id: str) -> dict:
                                 "completion_tokens": 0, "total_tokens": 0,
                                 "duration_ms": 0, "failed_calls": 0,
                                 "prompt_cost": 0.0, "completion_cost": 0.0}
+    wall = _query(
+        "SELECT wall_ms, started_at, finished_at, status"
+        " FROM run_records WHERE run_id = ?", (run_id,))
+    if wall:
+        row.update({k: wall[0][k] for k in
+                    ("wall_ms", "started_at", "finished_at", "status")})
+    else:
+        row.update({"wall_ms": None, "started_at": None,
+                    "finished_at": None, "status": None})
     return _attach_total_cost(row)
 
 
@@ -329,16 +406,21 @@ def summary(user_id: str = "", session_id: str = "", days: int = 0) -> dict:
     """聚合视图：总量 + 按用户 / 按会话 / 按任务（run）分组（含金额字段）。
     days>0 时只统计最近 N 天。total_cost 只含已折算部分（缺单价模型 cost=0）。"""
     where, params = [], []
+    where_u = []          # by_run 走别名 JOIN，条件必须带 u. 前缀（防歧义）
     if user_id:
         where.append("user_id = ?")
+        where_u.append("u.user_id = ?")
         params.append(user_id)
     if session_id:
         where.append("session_id = ?")
+        where_u.append("u.session_id = ?")
         params.append(session_id)
     if days > 0:
         where.append("ts >= ?")
+        where_u.append("u.ts >= ?")
         params.append(time.time() - days * 86400)
     cond = (" WHERE " + " AND ".join(where)) if where else ""
+    cond_u = (" WHERE " + " AND ".join(where_u)) if where_u else ""
     group_cols = ("prompt_tokens", "completion_tokens", "total_tokens")
 
     total = _query(
@@ -359,13 +441,18 @@ def summary(user_id: str = "", session_id: str = "", days: int = 0) -> dict:
         f" FROM usage_records{cond} GROUP BY session_id ORDER BY total_tokens DESC LIMIT 50",
         tuple(params))
     by_run = _query(
-        "SELECT run_id, session_id, user_id, date, COUNT(*) AS calls,"
-        " SUM(total_tokens) AS total_tokens,"
-        " SUM(CASE WHEN source='worker' THEN total_tokens ELSE 0 END) AS worker_tokens,"
-        " SUM(duration_ms) AS duration_ms,"
-        " SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS failed_calls,"
-        f" {_COST_COLS}"
-        f" FROM usage_records{cond} GROUP BY run_id ORDER BY MAX(ts) DESC LIMIT 50",
+        "SELECT u.run_id AS run_id, u.session_id AS session_id,"
+        " u.user_id AS user_id, u.date AS date, COUNT(*) AS calls,"
+        " SUM(u.total_tokens) AS total_tokens,"
+        " SUM(CASE WHEN u.source='worker' THEN u.total_tokens ELSE 0 END) AS worker_tokens,"
+        " SUM(u.duration_ms) AS duration_ms,"
+        " SUM(CASE WHEN u.status='error' THEN 1 ELSE 0 END) AS failed_calls,"
+        " COALESCE(SUM(u.prompt_cost),0) AS prompt_cost,"
+        " COALESCE(SUM(u.completion_cost),0) AS completion_cost,"
+        " MAX(r.wall_ms) AS wall_ms"
+        " FROM usage_records AS u"
+        " LEFT JOIN run_records AS r ON r.run_id = u.run_id"
+        f"{cond_u} GROUP BY u.run_id ORDER BY MAX(u.ts) DESC LIMIT 50",
         tuple(params))
     return {"total": _attach_total_cost(total[0]) if total else {},
             "by_user": [_attach_total_cost(r) for r in by_user],

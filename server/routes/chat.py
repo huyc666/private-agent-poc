@@ -1,6 +1,7 @@
 """SSE 流式聊天端点与会话归属双判（锁外快查 + 锁内终判）。
 自 server/main.py 原样搬迁。"""
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -150,24 +151,29 @@ async def chat(req: ChatRequest, request: Request) -> Any:
                 try:
                     yield f"data: {json.dumps({'type': 'session', 'session_id': session_id, 'run_id': run_id}, ensure_ascii=False)}\n\n"
                     citations: list[dict] = []  # 本轮 run 的出处（多工具合并）
-                    async for ev in agent.stream_reply(new_message, session_id=session_id,
-                                                       user_id=user_id, run_id=run_id,
-                                                       generation=gen, identity=identity):
-                        if lease.lost:
-                            # 租约被其他进程接管（心跳续租失败）：继续推进
-                            # 等于两进程同时写同一会话，互斥已失效——立即中止
-                            # 本轮并让已产出部分按「不完整」落库（架构评审 P2）
-                            yield f"data: {json.dumps({'type': 'error', 'content': '会话租约已被其他进程接管，本轮回复已中止，请重新发送消息'}, ensure_ascii=False)}\n\n"
-                            break
-                        if ev["type"] == "token":
-                            collected.append(ev["content"])
-                        elif ev["type"] == "citations":
-                            # 出处卡片数据（v0.17.25）：随 assistant 消息持久化，
-                            # 历史回放可重渲染；同轮多次工具调用由前端去重
-                            citations.extend(ev.get("citations") or [])
-                        yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
-                    else:
-                        finished = True
+                    # 6.8 口径 B：显式关闭内层 stream_reply——async for 的 break
+                    # 与客户端断连只结束本生成器，不保证内层进入 finally，不显式
+                    # aclose 就无法稳定落 cancelled 终态（spec §2.1/§2.8）。
+                    async with contextlib.aclosing(agent.stream_reply(
+                            new_message, session_id=session_id,
+                            user_id=user_id, run_id=run_id,
+                            generation=gen, identity=identity)) as agen:
+                        async for ev in agen:
+                            if lease.lost:
+                                # 租约被其他进程接管（心跳续租失败）：继续推进
+                                # 等于两进程同时写同一会话，互斥已失效——立即中止
+                                # 本轮并让已产出部分按「不完整」落库（架构评审 P2）
+                                yield f"data: {json.dumps({'type': 'error', 'content': '会话租约已被其他进程接管，本轮回复已中止，请重新发送消息'}, ensure_ascii=False)}\n\n"
+                                break
+                            if ev["type"] == "token":
+                                collected.append(ev["content"])
+                            elif ev["type"] == "citations":
+                                # 出处卡片数据（v0.17.25）：随 assistant 消息持久化，
+                                # 历史回放可重渲染；同轮多次工具调用由前端去重
+                                citations.extend(ev.get("citations") or [])
+                            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                        else:
+                            finished = True
                 finally:
                     # 客户端中途断连时生成器被 aclose()：已产出的部分回复也要落库，
                     # 保证对话记录成对（user 消息已先于流写入），并标注不完整供审计识别

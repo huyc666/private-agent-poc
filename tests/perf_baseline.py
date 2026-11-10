@@ -9,6 +9,7 @@ TestClient（进程内测量，不含网络与模型推理），对 5 个基础�
 """
 
 import os
+import sqlite3
 import statistics
 import sys
 import tempfile
@@ -38,10 +39,43 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from server import auth  # noqa: E402
+from server import auth, config  # noqa: E402
 from server.main import app  # noqa: E402
 
 ROUNDS = 50
+
+
+def _seed_usage_runs(full: int = 40, null_only: int = 10) -> None:
+    """AC11：用脚本自身的临时 USAGE_DB 预置 ≥50 个 run，让 by_run 的
+    LEFT JOIN run_records 有区分度。full 个 run 两表都写；null_only 个只写
+    usage_records（模拟历史未观测/写失败，覆盖 wall_ms 为 NULL 的分支）。"""
+    from server import usage
+    now = time.time()
+    date = time.strftime("%Y-%m-%d", time.localtime(now))
+    conn = sqlite3.connect(config.USAGE_DB)
+    try:
+        usage._ensure_schema(conn)
+        for i in range(full + null_only):
+            run_id = f"perf-run-{i:03d}"
+            conn.execute(
+                "INSERT INTO usage_records (ts, date, user_id, session_id,"
+                " run_id, model, source, prompt_tokens, completion_tokens,"
+                " total_tokens, duration_ms, status)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (now, date, "perfuser", "perf-session", run_id, "perf-model",
+                 "main", 100, 50, 150, 20, "ok"))
+            if i < full:
+                conn.execute(
+                    "INSERT INTO run_records (run_id, user_id, session_id,"
+                    " started_at, finished_at, wall_ms, status, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (run_id, "perfuser", "perf-session",
+                     now - 2.0, now, 2000, "ok", now))
+        conn.commit()
+    finally:
+        conn.close()
+    print(f"[seed] usage.db 预置 {full + null_only} 个 run"
+          f"（{full} 个两表都有 / {null_only} 个仅 usage_records）")
 
 
 def bench(name, fn):
@@ -63,6 +97,7 @@ def bench(name, fn):
 def main():
     assert auth.add_user("perfuser", role="user"), "建用户失败"
     assert auth.set_password("perfuser", "perf-pass-123"), "设密码失败"
+    _seed_usage_runs()          # 6.8 AC11：/api/usage 的 by_run 需真实样本
 
     results = {}
     with TestClient(app) as client:

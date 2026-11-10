@@ -1,5 +1,8 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
+# 6.8：取消终态落账用 CancelScope(shield=True)（agent.py），显式声明直接依赖；
+# 版本与 starlette 实际安装的约束一致（starlette 1.7.0: anyio<5,>=4.0.0）
+anyio>=4.0,<5
 openai>=1.40
 langchain-core>=0.3
 langchain-openai>=0.2
