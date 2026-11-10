@@ -227,9 +227,11 @@
 | 级别 | 规则 | 实例 |
 |---|---|---|
 | must | 提交前必须过一次代码评审（TRAE-code-review）；命中复审条件时按 spec-first「代码评审（含触发式复审）」执行；未评审不提交 | spec-first 流程「代码评审（含触发式复审）」（project 约定） |
-| must | 编码前 spec 独立评审（触发条件见 spec-first「任务档位与裁剪」）报告命名 `YYYY-MM-DD-plan-<任务号>-spec-review.md`；结论分 P0/P1/P2 并含「不成立/误报」区；P0/P1 修复或书面拒绝后才可请求用户确认 | [2026-11-06-plan-4.2-spec-review.md](file:///e:/codebase/GitHub/private-agent-poc/docs/reviews/2026-11-06-plan-4.2-spec-review.md) |
+| must | 编码前 spec 独立评审（触发条件见 spec-first「任务档位与裁剪」）报告命名 `YYYY-MM-DD-plan-<任务号>-spec-review.md`；结论分 P0/P1/P2 并含「不成立/误报」区；P0/P1 修复或书面拒绝后才可请求用户确认；存量缺 `plan-` 前缀的报告不追溯改名（改名会使 spec 引用变死链），仅新报告遵守；版本边界：v0.17.52 及更早的报告沿用旧文件名，新命名规则自 v0.17.53 起适用，历史文件不改名 | [2026-11-06-plan-4.2-spec-review.md](file:///e:/codebase/GitHub/private-agent-poc/docs/reviews/2026-11-06-plan-4.2-spec-review.md) |
 | must | 修复后复审报告命名 `YYYY-MM-DD-v0.17.xx-<修复后短hash>-rereview.md`；只查上轮问题关闭与本轮新改动，最多 2 轮，每轮须「上轮问题全部关闭且本轮新增 P0/P1 不高于上轮新增」 | [2026-11-07-v0.17.49-a8198ef-rereview.md](file:///e:/codebase/GitHub/private-agent-poc/docs/reviews/2026-11-07-v0.17.49-a8198ef-rereview.md) |
 | must | 评审报告命名 `YYYY-MM-DD-v0.17.xx-<短hash>-review.md`；整改回执 `-review-response.md`；结论按「确认缺陷已修复 / 误报证伪（附证据）/ 有意保留（附理由）」分类 | docs/reviews/ 目录；[2026-11-02-v0.17.39-8bba994-review-response.md](file:///e:/codebase/GitHub/private-agent-poc/docs/reviews/2026-11-02-v0.17.39-8bba994-review-response.md#L8-L18) 逐条处置表 |
+| must | **报告不存在等于关卡未做**：任何声称做过的 spec 评审、代码评审或复审，必须在 `docs/reviews/` 有对应文件且被 spec 引用其路径；无产物的不得在 spec/汇报中写成已完成，也不得提交（可机械核对：报告文件存在 + spec 内可搜到路径） | 2026-11-10 流程审计裁决；spec-first「4a」「代码评审」 |
+| must | **未清零缺口不得进评审/提交，唯一例外是用户显式裁决**：豁免须在 spec §7 缺口处写成带裁决日期、理由、影响范围、补做条件的记录，提交 message 注明存在经裁决的缺口；无记录按违规处理 | [4.3-doc-to-workflow.md](file:///e:/codebase/GitHub/private-agent-poc/docs/specs/4.3-doc-to-workflow.md#L636)（页面人工验收豁免） |
 
 ### 5.3 PLAN.md 待办
 
@@ -253,6 +255,7 @@
 | 级别 | 规则 | 实例 |
 |---|---|---|
 | must | spec 确认后先出页面原型（trae-design:solo-design）经人工审核 → TDD；实现完成全量回归 → 页面功能展示与人工测试 → 用户确认后才代码评审 → 提交。纯后端/CLI/工具及按三分口径判定为免的页面调整跳过这两关 | spec-first SKILL.md「页面原型」「页面功能展示与人工测试」步骤（用户 2026-10-22 约定）；commit `51b980c` |
+| must | 按三分口径③（纯文案/颜色/间距/图标等不动语义）豁免页面关卡时，不得默默跳过：在 spec 头部档位/裁剪声明写明豁免依据与范围（谁裁决、豁免「原型 + 人工测试」两关、为何判为小改动）；这是关卡裁剪，与「缺口经用户裁决后交付」（§5.2）区分 | spec-first「任务档位与裁剪」；2026-11-10 流程审计裁决 |
 
 ---
 
@@ -278,14 +281,17 @@
 - [ ] 对外三通道（HTTP 响应/SSE/页面、工具返回模型文本、审计记录）无 `{e}` 拼接、无明文凭据/token、无服务器绝对路径（本机日志允许保留原始异常，不得外发）
 - [ ] 权限相关改动在提示层/执行层/端点层复用同一判定函数，无内联重写
 - [ ] 变更触及端点/中间件/认证时跑过 `python tests\perf_baseline.py`，各端点 P95 ≤ 500ms（ENGINEERING-METRICS U2）
-- [ ] requirements 变更时跑过 `pip-audit --vulnerability-service osv --timeout 60`，直接依赖命中为 0；离线环境改为有网环境定期扫描并把清单带回（ENGINEERING-METRICS S5）
+- [ ] requirements 变更时跑过 `pip-audit --vulnerability-service osv --timeout 60`，直接依赖命中为 0，**且扫描时间与直接依赖命中数已写入 spec 或提交正文**；缺失即不得提交；离线环境改为有网环境定期扫描并把清单带回（ENGINEERING-METRICS S5）
 - [ ] 新增配置集中在 config.py 读取（含默认值与类型归一），业务代码按 `config.X` 调用时引用
 - [ ] async 代码中无裸同步阻塞调用（DB/文件/锁均 `asyncio.to_thread`）；代理类透传基类返回值
 - [ ] 新 ContextVar 已在 conftest 的 `isolated_env` 中 set+reset
 - [ ] 全量回归通过，passed 数增加、skipped 语义不变（基线随提交演进，v0.17.40 时点为 677/18，以最新全量结果为准）
 - [ ] 前端改动：无 CDN 引入、颜色走 tokens.css、动态内容用 textContent、无 localStorage 凭据
 - [ ] 代码评审（TRAE-code-review）已执行；确认缺陷已修复并重跑回归；误报/有意保留已写入 spec 或评审回执
-- [ ] 带页面功能：原型人工审核 + 页面人工测试两道关卡已过
+- [ ] 声称做过的 spec 评审/代码评审/复审均在 `docs/reviews/` 有对应文件且被 spec 引用（无产物按未做处理）
+- [ ] 未清零缺口已全部清零，或已有用户显式裁决的豁免记录（日期/理由/影响范围/补做条件）并在 commit message 注明
+- [ ] requirements.txt 有增删改时，pip-audit 扫描时间与直接依赖命中数已写入 spec 或提交正文
+- [ ] 带页面功能：原型人工审核 + 页面人工测试两道关卡已过（按三分口径③或用户裁决豁免的，已在档位声明/缺口记录写明依据与范围）
 - [ ] README 版本号与版本记录（只写功能）、docs/ 相关文档、PLAN.md 待办标记已同步
 - [ ] commit message 符合 §5.4 格式并引用 spec 路径；用户生成内容（uploads/、outputs/、data/）未被误入暂存
 
