@@ -121,11 +121,11 @@
 
 **S5 · 依赖供应链**
 指标：直接依赖数量受控、已知漏洞扫描（pip-audit）。
-基线：21 个直接依赖；pip-audit 2.10.1 已入 requirements-dev.txt，固定 OSV 后端。2026-11-03 首次扫描命中 **119 条 / 10 个包**（直接依赖 3 个：pypdf 11 条、fastmcp 1 条、langgraph-checkpoint-postgres 1 条）；同日升级后复扫 **107 条 / 8 个包**，直接依赖命中 **3 → 1**：pypdf（6.21.4）与 langgraph-checkpoint-postgres（3.2.0）清零，**fastmcp 1 条（GHSA-7xgj-8392-5q4r）仍存在**——4.x 需先验证与 mcp 1.x 锁定行兼容，本轮不动，不隐藏（requirements.txt 已留注记）。
-环境说明：本机访问 pip-audit 默认的 PyPI JSON 服务超时，固定改用 OSV 批量接口；OSV 输出无 CVSS 分级，故不按「高危=0」判定而按「直接依赖命中=0」判定。
+基线：21 个直接依赖；pip-audit 2.10.1 已入 requirements-dev.txt，固定 OSV 后端。2026-11-03 首次扫描命中 **119 条 / 10 个包**（直接依赖 3 个：pypdf 11 条、fastmcp 1 条、langgraph-checkpoint-postgres 1 条）；同日升级后复扫 **107 条 / 8 个包**，直接依赖命中 **3 → 1**：pypdf（6.21.4）与 langgraph-checkpoint-postgres（3.2.0）清零，**fastmcp 1 条（GHSA-7xgj-8392-5q4r）仍存在**——4.x 需先验证与 mcp 1.x 锁定行兼容，本轮不动，不隐藏（requirements.txt 已留注记）。2026-11-11 升级 **fastmcp 3.4.10**（3.x 线首个修复版）后按 OSV 后端复扫 **105 条 / 6 个包**（扫描时间 2026-11-11 07:23:35 +08:00；OSV 把同一公告的 PYSEC/CVE 别名各算一行，按 ID 去重后 74 条），**直接依赖命中 1 → 0**；同一环境用默认 PyPI JSON 后端复扫为 **79 条 / 6 个包**，两后端 fastmcp 均已消失、直接依赖命中均为 0。未采用 4.1.2：fastmcp 4.x 要求 mcp>=2.3，与项目 `mcp<2` 锁定（langchain-mcp-adapters 0.3.2 要求 mcp<2.0.0）硬冲突（spec：docs/specs/security-hardening-fastmcp-3.4.10.md）。
+环境说明：正式口径固定为 OSV 批量接口；默认 PyPI JSON 后端只作对照（本机在不同时段出现过超时），不作为正式记录。OSV 输出无 CVSS 分级，故不按「高危=0」判定而按「直接依赖命中=0」判定。
 阈值：**直接依赖命中 = 0**（阻断线）；传递依赖命中数只减不增；直接依赖数量（21）只减不增（新增需 spec 说明理由）。
 测法：`.venv\Scripts\pip-audit.exe --vulnerability-service osv --timeout 60`（依赖变更必跑 + 每月定期 1 次）。离线替代路径：在有网环境定期跑扫描、把升级清单带回内网执行；不可用扫描结果造假充数。
-失败动作：直接依赖命中 > 0 时**阻断依赖变更类提交**，并登记升级清单（当前剩：fastmcp→≥4.1.2——需先验证与 mcp 1.x 锁定行的兼容性，见 requirements.txt 注释；该条为已知例外，不隐藏）；非依赖类提交不受存量阻断，但升级清单列入**一期补齐**。
+失败动作：直接依赖命中 > 0 时**阻断依赖变更类提交**，并登记升级清单（当前直接依赖命中 0，升级清单已清空；2026-11-11 fastmcp 以 3.4.10 收口）；非依赖类提交不受存量阻断，但升级清单列入**一期补齐**。
 
 **S6 · fail-closed 与鉴权一致性（流程判定）**
 指标：新增安全防线默认拒绝、权限判定三处（提示层/执行层/端点层）同口径。
@@ -183,7 +183,7 @@
 1. ✅ **S2 覆盖率**（已完成）：skills 84%→99%、custom_tools 82%→100%、sandbox/server 81%→100%，整体 89%→92%；12 个文件全部 ≥90%。
 2. ✅ **S3 映射表**（已完成）：`docs/reviews/endpoint-deny-mapping.md` 35 行齐全，4 公开 / 31 覆盖 / 0 缺口；引用用例均真实存在且全绿。
 3. ✅ **S4(b) 5 处对外通道 `{e}`**（已完成，commit 303352a）：改为固定/归类文案，异常细节落本机日志；每处配「不含绝对路径/异常原文」断言。
-4. ⏳ **S5 漏洞升级清单**（部分完成）：pypdf→6.21.4、langgraph-checkpoint-postgres→3.2.0 已升，直接依赖命中 3→1；**fastmcp 1 条仍存**（跨大版本兼容待验证，见 requirements.txt 注记），不达成「直接依赖命中 = 0」暂不结项。
+4. ✅ **S5 漏洞升级清单**（已完成）：pypdf→6.21.4、langgraph-checkpoint-postgres→3.2.0 已升，直接依赖命中 3→1；**fastmcp→3.4.10**（2026-11-11，3.x 线首个修复版；4.1.2 因要求 mcp>=2.3 与 mcp 1.x 锁定冲突未采用），OSV 口径复扫 **105/6**（PyPI 后端对照 79/6），直接依赖命中 **1→0**，达成「直接依赖命中 = 0」结项。传递依赖存量（authlib/certifi/filelock/joserfc/pillow/pip）另册跟踪。
 
 **长期跟踪级**（量但不当门禁）：模型首 token 时延；回归墙钟（基线 143s，逼近 300s 时启动拆分）；E2E 自动化可行性（与 PLAN #5 裁决联动）；直接依赖数量趋势（当前 21）；pip 自身升级（25.0.1→25.3+）与传递依赖收敛进度。
 
