@@ -25,7 +25,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import config
+from . import config, db
 
 logger = logging.getLogger(__name__)
 
@@ -69,13 +69,17 @@ def _db_path() -> Path:
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(_db_path()))
+    conn = db.connect("state")
+    if db.is_postgres(conn):
+        return conn
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=3000")
     return conn
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    if db.is_postgres(conn):
+        return
     conn.execute("""
         CREATE TABLE IF NOT EXISTS api_users (
             username TEXT PRIMARY KEY,
@@ -290,6 +294,10 @@ def login(username: str, password: str) -> dict | None:
         conn.row_factory = sqlite3.Row
         try:
             _ensure_schema(conn)
+            if db.is_postgres(conn):
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (f"login:{username}",))
             # 限流表容量控制（v0.17.3 语义不变，改在库上执行）：攻击者可用
             # 海量随机用户名刷失败记录，若无上限表会无限增长。先清已解锁的
             # 旧条目；极端情况（超上限且均为活跃条目）整体清空保底——限流

@@ -1,10 +1,12 @@
 # Private Agent POC — 私有化 Agent 开发运行框架
 
-**版本：v0.17.54**（2026-11-11）
+**版本：v0.18.0**（2026-11-15）
 
 最小可运行的私有化 Agent 框架：**vLLM（Qwen 27B）+ LangGraph（Agent 循环 + 多 Agent 编排）+ MCP（工具协议）+ Skills（技能系统）+ 对话式自定义工具 + 人工审批流 + 代码沙箱 + 知识库问答（RAG，五类文档入库 + 混合检索 + 出处标注与点击定位 + 部门专属库隔离与跨领域知识库共享）+ API 认证与多用户（部门/角色/专属域 + 管理控制台）+ 用量计量（token / 金额 / 健康度 / 部门报表）+ Langfuse 观测 + FastAPI（SSE 流式接口）+ 离线聊天前端**。
 
 ## 版本记录
+
+- **v0.18.0**：业务状态库 PostgreSQL 化（PLAN 6.4）——会话、审批、用户、审计、租约锁、流程实例、调度与用量共 14 张业务表支持 PostgreSQL 后端；默认 SQLite 部署不变，显式设置 `STATE_BACKEND`/`USAGE_BACKEND=postgres` 后不回退、连接失败即报错。提供一次性迁移 CLI，先备份 SQLite 再建幂等 PG schema、拒绝覆盖已有数据并分批复制全部表；金额/epoch 时间列使用 `double precision`，修复用量按运行聚合在 PG 下的裸列兼容问题。SQLite 全量回归通过；PostgreSQL 16 门控 12/12 通过，真实双进程会话/审批互通验收完成，可用于跨机多副本共享状态部署。
 
 - **v0.17.54**：依赖安全下限升级——把运行框架使用的 MCP 依赖下限抬到已发布的修复版，并锁在现有 MCP 1.x 兼容线内：低于修复版的依赖存在一处权限校验缺陷，升级后该风险消除；加上界后也不会被解析到需要另一条 MCP 主版本的版本线。工具注册与本地 MCP 工具调用行为不变（`get_city_weather` 的注册集合与返回内容与升级前一致）。新增 4 个依赖约束用例，全量 1202 个用例通过（20 skipped 语义不变）。
 
@@ -192,7 +194,7 @@ agent-poc/
 │       └── skills/        #   领域技能（weather-report）
 ├── custom_tools/          # 对话式创建的自定义工具（.py 即工具，免重启生效；user 角色的专属工具落 custom_tools_personal/<域>/，v0.17.12）
 ├── kb/                    # 知识库源文档（common/ + hr/，tools/build_kb.py 建索引；支持 md/txt/Word/PDF/Excel/PPT/网页，v0.17.24）
-├── data/                  # 运行时 SQLite（state.db/usage.db，旧版根目录遗留库启动时自动迁入）
+├── data/                  # 运行时 SQLite（默认；生产可用 STATE_BACKEND/USAGE_BACKEND 切 PostgreSQL）
 ├── tools/
 │   ├── local_tools_server.py  # 示例 MCP Server（stdio）：目录列举、字数统计、MCP 天气
 │   ├── build_kb.py        # 知识库建索引 CLI（BM25 + 向量混合，一条命令统一入库，v0.17.0/v0.17.24）
@@ -415,8 +417,10 @@ MODEL_NAME=deepseek-chat        # 或 deepseek-reasoner（R1 推理模型）
 | `PACK_SIGNING_KEY` | 空（开放模式） | 配置后进入强制模式：未签名/篡改整包不加载（v0.13.0） |
 | `SANDBOX_URL` | 空（拒绝执行） | 沙箱服务地址；未配置时 `run_python_code` fail-closed |
 | `SANDBOX_AUTH_TOKEN` | 空 | Agent↔沙箱共享令牌（`X-Sandbox-Token`，v0.17.1）；沙箱侧未配置令牌时默认拒绝执行，仅 `SANDBOX_OPEN_MODE=true` 显式放开（v0.17.4 F3） |
-| `STATE_DB` | `./data/state.db` | 会话/审批/租约锁 SQLite 库（v0.13.0；跨机多副本须换 Postgres） |
+| `STATE_DB` | `./data/state.db` | 会话/审批/租约锁默认 SQLite 库（v0.13.0）；`STATE_BACKEND=postgres` 时不再使用 |
 | `USAGE_DB` | `./data/usage.db` | 用量计量 SQLite 库（v0.11.0） |
+| `STATE_BACKEND` / `STATE_DATABASE_URL` | `sqlite` / 空 | 业务状态库后端与连接串；`postgres` 时空 URL 回退 `DATABASE_URL`，连接失败不回退 SQLite（v0.18.0） |
+| `USAGE_BACKEND` / `USAGE_DATABASE_URL` | `sqlite` / 空 | 用量库后端与连接串；`postgres` 时空 URL 回退 `DATABASE_URL`（v0.18.0） |
 | `MODEL_PRICES` | 空 | 模型单价 JSON（元/百万 tokens，`{"模型名": {"input": 2.0, "output": 8.0}}`，v0.17.20）；未配置的模型仅记 token |
 | `EMBED_BACKEND` | `local` | 知识库向量引擎（v0.17.24）：`local`=fastembed 进程内离线推理 / `openai`=外部 OpenAI 兼容服务；引擎不可用自动退化纯 BM25 |
 | `EMBED_API_BASE` / `EMBED_API_KEY` | 空 | `EMBED_BACKEND=openai` 时的 embeddings 服务地址与密钥（`EMBED_MODEL` / `EMBED_CACHE_DIR` 可调本地模型与缓存目录） |
@@ -520,7 +524,7 @@ Mock 模式可直接演示：「有哪些技能」/「创建一个技能」/「�
   未配置单价的模型仅展示 token 不受影响，自建模型可配 0 记内部核算
 - **健康度**（v0.17.22）：每次模型调用记录耗时与成败状态，调用失败也落明细可统计
   （token/金额记 0）；任务视图输出单次 run 的总时长（各次模型调用耗时之和）与失败次数
-- **存储**：SQLite（`USAGE_DB`，默认 `data/usage.db`），零额外组件；提供方未返回 usage 的调用跳过
+- **存储**：默认 SQLite（`USAGE_DB`）；跨机部署可用 `USAGE_BACKEND=postgres`，时间/金额列用 `double precision` 防精度退化；提供方未返回 usage 的调用跳过
 - **查询**：`GET /api/usage?user_id=&session_id=&days=7` 返回
   总量 + 按用户 / 按会话 / 按任务（run）/ 按部门 五组聚合（各视图含金额字段）；
   部门成本报表为管理视角（user 角色不可见，v0.17.21），支持 CSV 导出
@@ -596,7 +600,7 @@ docker compose -f docker/docker-compose.langfuse.yml up -d
 8. ~~包脚手架~~：第二期已交付 ✅（`create_pack`/`delete_pack` 对话式建删包，模型现场编写清单与工具代码，审批落盘免重启挂载；core_version 强制校验）
 9. ~~包级配置~~：第三期已交付 ✅（pack.yaml `env` 默认值注入 + `requires_modules` 依赖声明，fail-closed；沙箱模式 env 透传隔离子进程）
 10. ~~平台包~~：第四期已交付 ✅（能力分层：内核只留运行时管理工具，跨领域通用能力为 `platform: true` 平台包（始终启用、不可禁用、优先加载），领域包对话式插拔；时间/计算已迁为 `core-utils` 示范）
-11. ~~Token 计量~~：已交付 ✅（用户/任务/会话三维度，SQLite 存储 + `/api/usage` 聚合 + 前端展示）
+11. ~~Token 计量~~：已交付 ✅（用户/任务/会话三维度，默认 SQLite / 可切 PostgreSQL，`/api/usage` 聚合与前端展示）
 12. ~~API 认证与多用户~~：已交付 ✅（v0.14.0–v0.16.0：pak- API Key + pat- 登录令牌双轨凭据、三级角色 user/approver/admin、资源级 ACL、SSO 身份头 + 受信代理校验）
 13. ~~服务无状态化~~：已交付 ✅（v0.13.0 会话/审批迁 SQLite 重启不丢；v0.17.1 跨进程会话租约锁，多副本同会话真正串行化）
 14. ~~包签名/来源校验~~：已交付 ✅（v0.13.0 HMAC-SHA256 内容签名，`PACK_SIGNING_KEY` 强制模式下未签名/篡改整包 fail-closed 不加载）

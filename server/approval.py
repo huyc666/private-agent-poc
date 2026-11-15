@@ -28,7 +28,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import config
+from . import config, db
 from .usage import current_session, current_user
 
 APPROVAL_TIMEOUT = 120  # 秒，超时自动按拒绝处理（标记 expired）
@@ -51,13 +51,12 @@ def _db_path() -> Path:
 def _connect() -> sqlite3.Connection:
     """打开连接并设置同机多进程协作所需的 pragma：
     WAL 读写不互斥（同机多进程共享同一库文件的关键），busy_timeout 容忍短暂写锁竞争。"""
-    conn = sqlite3.connect(str(_db_path()))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=3000")
-    return conn
+    return db.connect("state")
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    if db.is_postgres(conn):
+        return
     conn.execute("""
         CREATE TABLE IF NOT EXISTS approvals (
             aid TEXT PRIMARY KEY,
@@ -138,12 +137,19 @@ def create_approval_fenced(session_id: str, generation: int,
         try:
             _ensure_schema(conn)
             conn.isolation_level = None     # 手动事务：BEGIN IMMEDIATE 原子栅栏
-            conn.execute("BEGIN IMMEDIATE")
+            db.execute(conn, "BEGIN IMMEDIATE")
             try:
-                row = conn.execute(
-                    "SELECT generation, deleted FROM session_meta"
-                    " WHERE session_id = ?", (session_id,)).fetchone()
-            except sqlite3.OperationalError:
+                if db.is_postgres(conn):
+                    row = conn.execute(
+                        "SELECT generation, deleted FROM session_meta"
+                        " WHERE session_id = ? FOR UPDATE",
+                        (session_id,)).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT generation, deleted FROM session_meta"
+                        " WHERE session_id = ?",
+                        (session_id,)).fetchone()
+            except (RuntimeError, sqlite3.OperationalError):
                 row = None   # session_meta 表尚未创建 = 无任何会话元数据
             ok = (row is None and generation == 0) or (
                 row is not None and row[1] is None and row[0] == generation)
@@ -301,7 +307,7 @@ def cleanup_stale(grace: float = 0.0) -> int:
 def list_recent(limit: int = 50, user_id: str = "") -> list[dict]:
     """最近审批记录（审计用）。user_id 非空时只返回该创建人的记录（资源级 ACL）。"""
     with _lock:
-        conn = sqlite3.connect(str(_db_path()))
+        conn = _connect()
         conn.row_factory = sqlite3.Row
         try:
             _ensure_schema(conn)

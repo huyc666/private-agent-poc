@@ -98,7 +98,8 @@ SANDBOX_URL=http://127.0.0.1:9001
 SANDBOX_AUTH_TOKEN=<沙箱令牌>       # v0.17.4 起必填，未配置沙箱拒绝执行
 CUSTOM_TOOLS_EXEC=sandbox        # 强制沙箱执行自定义代码（不可达则 fail-closed）
 PACK_SIGNING_KEY=<包签名密钥>     # 强制信任模式
-STATE_DB=./data/state.db         # 会话/审批持久化；同机多进程可共享，跨机须换 Postgres
+STATE_BACKEND=postgres           # 业务状态/用量共享 PostgreSQL（默认 sqlite 仅同机）
+USAGE_BACKEND=postgres           # 可与 STATE_DATABASE_URL/USAGE_DATABASE_URL 分别指定
 ENABLED_PACKS=                   # 留空=全部；生产可显式白名单
 ```
 
@@ -124,9 +125,13 @@ ENABLED_PACKS=                   # 留空=全部；生产可显式白名单
 - **备份**：`data/` 目录（state.db 会话/审批/审计、usage.db 用量计量含金额/健康度）、PostgreSQL 数据卷、知识库索引（`kb/` 源文档 + 各库索引，重建即恢复）
 - **密钥轮换**：更换 `PACK_SIGNING_KEY` 后必须 `tools/sign_pack.py --all` 重签全部包
 - **新增包流程**：代码审计 → 放入 `packs/` → `tools/sign_pack.py <包名>` → 对话中启用（挂审批）
-- **多副本扩展**（用户量增长时）：会话/审批/计量均已外置；checkpointer 已是 Postgres；
-  把 `STATE_DB`/`USAGE_DB` 换 Postgres（SQLite 的 WAL+busy_timeout 只支持同机多进程，
-  跨机共享存储不可用），前置负载均衡即可水平扩展
+- **多副本扩展**（用户量增长时）：设置 `STATE_BACKEND=postgres`、
+  `USAGE_BACKEND=postgres` 并配置对应 URL；SQLite 的 WAL+busy_timeout 只支持
+  同机多进程，PostgreSQL 才能跨机共享状态。切换前用
+  `tools/migrate_db.py --state-source data/state.db --usage-source data/usage.db
+  --target-url <PG_URL> --yes` 做一次性迁移；部署环境应在启动前运行
+  `RUN_PG_TESTS=1` 门控测试（v0.18.0 已在 PostgreSQL 16 完成双进程
+  会话/审批互通验收），通过后前置负载均衡水平扩展。
 - **故障排查**：见 DEPLOYMENT.md 第七节
 
 ## 七、回滚

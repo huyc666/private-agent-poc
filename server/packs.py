@@ -24,7 +24,7 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-from . import config, custom_tools, packsign, skills
+from . import config, custom_tools, db, packsign, skills
 
 logger = logging.getLogger(__name__)
 
@@ -446,7 +446,9 @@ CREATE TABLE IF NOT EXISTS disabled_packs (
 
 
 def _disabled_db_connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(config.STATE_DB, timeout=10)
+    conn = db.connect("state")
+    if db.is_postgres(conn):
+        return conn
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
@@ -458,7 +460,8 @@ def load_disabled_packs() -> None:
     try:
         conn = _disabled_db_connect()
         try:
-            conn.execute(_DISABLED_SCHEMA)
+            if not db.is_postgres(conn):
+                conn.execute(_DISABLED_SCHEMA)
             rows = conn.execute("SELECT name FROM disabled_packs").fetchall()
         finally:
             conn.close()
@@ -478,7 +481,8 @@ def _persist_disabled(name: str, disabled: bool) -> bool:
     try:
         conn = _disabled_db_connect()
         try:
-            conn.execute(_DISABLED_SCHEMA)
+            if not db.is_postgres(conn):
+                conn.execute(_DISABLED_SCHEMA)
             if disabled:
                 conn.execute(
                     "INSERT OR IGNORE INTO disabled_packs (name) VALUES (?)",

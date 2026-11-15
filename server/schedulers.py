@@ -28,7 +28,8 @@ import threading
 import time
 from pathlib import Path
 
-from . import audit, auth, config, custom_tools, orchestration as orch, usage
+from . import audit, auth, config, custom_tools, db
+from . import orchestration as orch, usage
 from .state import STATE
 
 logger = logging.getLogger(__name__)
@@ -43,8 +44,10 @@ _SCHED_LOCK = threading.Lock()  # 建表互斥（首次调用并发场景）
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(config.STATE_DB, timeout=3.0)
+    conn = db.connect("state")
     conn.row_factory = sqlite3.Row
+    if db.is_postgres(conn):
+        return conn
     conn.execute("PRAGMA busy_timeout=3000")
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
@@ -53,6 +56,8 @@ def _connect() -> sqlite3.Connection:
 def _ensure_columns(conn: sqlite3.Connection, table: str,
                     columns: tuple) -> None:
     """存量库幂等增列（沿 v0.17.22 ALTER 先例）。"""
+    if db.is_postgres(conn):
+        return
     existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
     for col, ddl in columns:
         if col not in existing:
@@ -60,6 +65,8 @@ def _ensure_columns(conn: sqlite3.Connection, table: str,
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    if db.is_postgres(conn):
+        return
     conn.execute("""
         CREATE TABLE IF NOT EXISTS workflow_schedules (
             schedule_id        TEXT PRIMARY KEY,
@@ -439,8 +446,7 @@ def _insert_attempt(conn: sqlite3.Connection, schedule: dict, trigger_id: str,
                     payload: dict, at: float) -> bool:
     """写触发尝试留痕；唯一键冲突（幂等重放）返回 False。"""
     attempt_id = "wft-" + secrets.token_hex(6)
-    before = conn.total_changes
-    conn.execute(
+    cursor = conn.execute(
         "INSERT OR IGNORE INTO workflow_trigger_attempts (attempt_id,"
         " schedule_id, trigger_id, trigger_source, definition_name, creator,"
         " result, reason, payload_json, created_at)"
@@ -448,7 +454,7 @@ def _insert_attempt(conn: sqlite3.Connection, schedule: dict, trigger_id: str,
         (attempt_id, schedule["schedule_id"], trigger_id, source,
          schedule["definition_name"], schedule["creator"], result, reason,
          json.dumps(payload, ensure_ascii=False, default=str), at))
-    inserted = conn.total_changes > before
+    inserted = cursor.rowcount > 0
     if inserted:
         _trim_attempts(conn)
     return inserted
@@ -460,10 +466,17 @@ def _trim_attempts(conn: sqlite3.Connection) -> None:
         "SELECT COUNT(*) FROM workflow_trigger_attempts").fetchone()
     if total > ATTEMPT_CAPACITY:
         keep = int(ATTEMPT_CAPACITY * ATTEMPT_TRIM_RATIO)
-        conn.execute(
-            "DELETE FROM workflow_trigger_attempts WHERE rowid IN"
-            " (SELECT rowid FROM workflow_trigger_attempts"
-            " ORDER BY rowid ASC LIMIT ?)", (total - keep,))
+        if db.is_postgres(conn):
+            conn.execute(
+                "DELETE FROM workflow_trigger_attempts WHERE attempt_id IN"
+                " (SELECT attempt_id FROM workflow_trigger_attempts"
+                " ORDER BY created_at, attempt_id LIMIT %s)",
+                (total - keep,))
+        else:
+            conn.execute(
+                "DELETE FROM workflow_trigger_attempts WHERE rowid IN"
+                " (SELECT rowid FROM workflow_trigger_attempts"
+                " ORDER BY rowid ASC LIMIT ?)", (total - keep,))
 
 
 def _claim_common(conn: sqlite3.Connection, schedule: dict, trigger_id: str,
@@ -516,11 +529,15 @@ def process_due(now: float | None = None) -> list[dict]:
         conn = _connect()
         try:
             _ensure_schema(conn)
-            conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
+            db.execute(conn, "BEGIN IMMEDIATE")
+            due_sql = (
                 "SELECT * FROM workflow_schedules WHERE status = 'active'"
                 " AND interval_seconds > 0 AND next_run IS NOT NULL"
-                " AND next_run <= ?", (now,)).fetchall()
+                " AND next_run <= ?"
+            )
+            if db.is_postgres(conn):
+                due_sql += " FOR UPDATE SKIP LOCKED"
+            rows = conn.execute(due_sql, (now,)).fetchall()
             for row in rows:
                 schedule = dict(row)
                 planned = schedule["next_run"]
@@ -560,11 +577,14 @@ def on_file_uploaded(*, event_id: str, rel_path: str, uploader: str,
         conn = _connect()
         try:
             _ensure_schema(conn)
-            conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
+            db.execute(conn, "BEGIN IMMEDIATE")
+            rows_sql = (
                 "SELECT * FROM workflow_schedules WHERE status = 'active'"
-                " AND event_scope != '' AND event_scope = ?",
-                (scope,)).fetchall()
+                " AND event_scope != '' AND event_scope = ?"
+            )
+            if db.is_postgres(conn):
+                rows_sql += " FOR UPDATE SKIP LOCKED"
+            rows = conn.execute(rows_sql, (scope,)).fetchall()
             fname = Path(rel_path).name
             for row in rows:
                 schedule = dict(row)
@@ -620,14 +640,26 @@ def _acquire_run(schedule_id: str, definition_name: str, trigger_id: str,
         conn = _connect()
         try:
             _ensure_schema(conn)
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT 1 FROM workflow_schedules WHERE definition_name = ?"
-                " AND running_trigger_id != '' LIMIT 1",
-                (definition_name,)).fetchone()
-            if row is not None:
-                conn.rollback()
-                return False
+            db.execute(conn, "BEGIN IMMEDIATE")
+            if db.is_postgres(conn):
+                conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
+                              (definition_name,))
+                row = conn.execute(
+                    "SELECT 1 FROM workflow_schedules"
+                    " WHERE definition_name = %s"
+                    " AND running_trigger_id != '' LIMIT 1",
+                    (definition_name,)).fetchone()
+                if row is not None:
+                    conn.rollback()
+                    return False
+            else:
+                row = conn.execute(
+                    "SELECT 1 FROM workflow_schedules WHERE definition_name = ?"
+                    " AND running_trigger_id != '' LIMIT 1",
+                    (definition_name,)).fetchone()
+                if row is not None:
+                    conn.rollback()
+                    return False
             cur = conn.execute(
                 "UPDATE workflow_schedules SET running_since = ?,"
                 " running_trigger_id = ? WHERE schedule_id = ?"

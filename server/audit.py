@@ -13,7 +13,7 @@ import sqlite3
 import threading
 import time
 
-from server import config
+from server import config, db
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +36,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(config.STATE_DB, timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    return db.connect("state")
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    if db.is_postgres(conn):
+        return
     conn.execute(_SCHEMA)
 
 

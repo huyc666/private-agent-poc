@@ -194,6 +194,8 @@ def _migrate_legacy_db(name: str) -> None:
 
 # ---- Token 计量（按用户/任务/会话，SQLite 零依赖存储）----
 USAGE_DB = os.environ.get("USAGE_DB", str(_DATA_DIR / "usage.db"))
+USAGE_BACKEND = os.environ.get("USAGE_BACKEND", "sqlite").lower()
+USAGE_DATABASE_URL = os.environ.get("USAGE_DATABASE_URL", "")
 # 模型单价（元/百万 tokens）：JSON {"模型名": {"input": 输入单价, "output": 输出单价}}。
 # 落账时按当时单价折算金额并固化；缺单价模型仅记 token 不折算；自建 vLLM 可配 0。
 MODEL_PRICES = os.environ.get("MODEL_PRICES", "")
@@ -215,6 +217,8 @@ PACK_SIGNING_KEY = os.environ.get("PACK_SIGNING_KEY", "")
 # WAL + busy_timeout 支持同机多进程共享同一库文件；跨机多副本须替换为 Postgres
 # （SQLite 不适合网络共享存储）。
 STATE_DB = os.environ.get("STATE_DB", str(_DATA_DIR / "state.db"))
+STATE_BACKEND = os.environ.get("STATE_BACKEND", "sqlite").lower()
+STATE_DATABASE_URL = os.environ.get("STATE_DATABASE_URL", "")
 if "USAGE_DB" not in os.environ:
     _migrate_legacy_db("usage.db")
 if "STATE_DB" not in os.environ:

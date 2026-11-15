@@ -20,7 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import config
+from . import config, db
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +42,12 @@ _lock = threading.Lock()
 def _connect() -> sqlite3.Connection:
     p = Path(config.STATE_DB)
     p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=3000")
-    return conn
+    return db.connect("state")
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    if db.is_postgres(conn):
+        return
     conn.execute("""
         CREATE TABLE IF NOT EXISTS session_locks (
             session_id TEXT PRIMARY KEY,
@@ -62,7 +61,7 @@ def _execute(sql: str, params: tuple = ()) -> int:
         conn = _connect()
         try:
             _ensure_schema(conn)
-            cur = conn.execute(sql, params)
+            cur = db.execute(conn, sql, params)
             conn.commit()
             return cur.rowcount
         finally:
@@ -73,6 +72,12 @@ def acquire(session_id: str, owner: str, ttl: float = LEASE_TTL) -> bool:
     """尝试获取租约。成功返回 True；租约仍被他人持有（且未过期）返回 False。
     三步全原子：先接管过期租约，再尝试插入，最后确认自己是否已是持有者。"""
     now = time.time()
+    if config.STATE_BACKEND == "postgres":
+        return _execute(
+            "INSERT INTO session_locks(session_id, owner, ts) VALUES (?,?,?)"
+            " ON CONFLICT (session_id) DO UPDATE SET owner = EXCLUDED.owner,"
+            " ts = EXCLUDED.ts WHERE session_locks.ts + ? < EXCLUDED.ts",
+            (session_id, owner, now, ttl)) > 0
     if _execute("UPDATE session_locks SET owner=?, ts=? WHERE session_id=? AND ts+? < ?",
                 (owner, now, session_id, ttl, now)):
         return True

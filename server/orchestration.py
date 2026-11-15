@@ -33,7 +33,7 @@ from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import StructuredTool
 
-from . import (audit, auth, config, custom_tools, packs, sessions, tools_builtin,
+from . import (audit, auth, config, custom_tools, db, packs, sessions, tools_builtin,
                usage)
 from .state import STATE
 
@@ -1082,15 +1082,19 @@ _WF_LOCK = threading.Lock()
 
 
 def _wf_connect() -> sqlite3.Connection:
+    conn = db.connect("state")
+    if db.is_postgres(conn):
+        return conn
     path = Path(config.STATE_DB)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=3000")
     return conn
 
 
 def _wf_ensure_schema(conn: sqlite3.Connection) -> None:
+    if db.is_postgres(conn):
+        return
     conn.execute("""
         CREATE TABLE IF NOT EXISTS workflow_instances (
             instance_id        TEXT PRIMARY KEY,

@@ -69,12 +69,13 @@ chat 在并发 50 时延迟仍随并发近线性增长，原因是 Mock 模式�
 | 层 | 扩展手段 | 现状 |
 |---|---|---|
 | 接入层 | Nginx/网关负载均衡到多个 Agent 副本 | 网关模式已支持（SSO 头、LiteLLM） |
-| Agent 进程 | uvicorn `--workers N` 或多副本容器 | ✅ 可叠加：会话/审批在 SQLite（可换 Postgres），上下文在 checkpointer（memory→postgres 已预留），用量在 usage.db（可换库） |
+| Agent 进程 | uvicorn `--workers N` 或多副本容器 | 会话/审批/用量可设置 `STATE_BACKEND`/`USAGE_BACKEND=postgres` 共享，上下文在 checkpointer（memory→postgres 已预留） |
 | 模型层 | vLLM 本身做 continuous batching；多副本走 LiteLLM 负载均衡 | ✅ LiteLLM 网关已支持 |
-| 共享状态 | SQLite → Postgres（DATABASE_URL 已预留） | ✅ 迁移路径已备好 |
+| 共享状态 | SQLite → PostgreSQL（v0.18.0 已交付适配与迁移 CLI） | PostgreSQL 16 门控与双进程会话/审批互通已验收；跨机部署前仍应在该环境复跑门控 |
 
-**待办（真正上量前）**：多副本验证（两个进程共用 STATE_DB 跑审批跨进程决议）；
-SQLite 在高写入并发下建议换 Postgres；生产务必 Linux（Windows 仅开发用）。
+**上线前复验**：在目标部署环境设置 `RUN_PG_TESTS=1` 运行
+`tests/test_state_db_postgres.py`；v0.18.0 已在 PostgreSQL 16 完成双进程
+同一会话/审批互通验收。
 
 ## 七、复现方法
 
@@ -95,7 +96,7 @@ python tools/load_test.py --scenario session  # 同会话并发（串行化验�
 
 | 层 | 实现 | 并发结论 |
 |---|---|---|
-| 展示层（会话记录） | SQLite `state.db`，每轮 2 次写 | 当前量级远未碰到单写者上限；上量后换 Postgres（`STATE_DB` 配置已留） |
+| 展示层（会话记录） | 默认 SQLite `state.db`；生产可 `STATE_BACKEND=postgres` | 单机低量级保持零组件；跨机多副本切换 PostgreSQL 共享状态 |
 | 上下文层（模型记忆） | LangGraph checkpointer（memory / postgres） | **memory 模式不是吞吐瓶颈，但锁死多副本扩展**（各副本记忆不共享、重启即丢）；生产必须切 postgres（清单已列），代价是每步检查点写放大，靠连接池调优与上下文截断消化 |
 
 同会话并发（API 调用方并行打同一 session_id）曾会导致 checkpointer
@@ -124,4 +125,5 @@ v0.17.1 落地**分布式租约锁**（`server/session_lock.py`，STATE_DB 后�
   长任务处于「approved 且未标记」的正常中间态，不再被误标 abandoned；
 
 注意：SQLite 的 WAL + busy_timeout 只保证**同机多进程**共享同一库文件；
-跨机多副本须把 STATE_DB/USAGE_DB 换 Postgres（见 PRODUCTION.md 第六节）。
+跨机多副本须设置 `STATE_BACKEND=postgres`、`USAGE_BACKEND=postgres`
+（见 PRODUCTION.md 第六节）。

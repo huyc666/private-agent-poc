@@ -18,7 +18,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import config
+from . import config, db
 
 _lock = threading.Lock()
 
@@ -31,13 +31,12 @@ def _db_path() -> Path:
 
 def _connect() -> sqlite3.Connection:
     """打开连接并设置多进程协作 pragma（WAL 读写不互斥 + busy_timeout 容忍写锁竞争）。"""
-    conn = sqlite3.connect(str(_db_path()))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=3000")
-    return conn
+    return db.connect("state")
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    if db.is_postgres(conn):
+        return
     conn.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -254,10 +253,15 @@ def append_fenced(session_id: str, generation: int, user_id: str, role: str,
         try:
             _ensure_schema(conn)
             conn.isolation_level = None     # 手动事务：BEGIN IMMEDIATE 原子栅栏
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT generation, deleted FROM session_meta WHERE session_id = ?",
-                (session_id,)).fetchone()
+            db.execute(conn, "BEGIN IMMEDIATE")
+            if db.is_postgres(conn):
+                row = conn.execute(
+                    "SELECT generation, deleted FROM session_meta"
+                    " WHERE session_id = ? FOR UPDATE", (session_id,)).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT generation, deleted FROM session_meta"
+                    " WHERE session_id = ?", (session_id,)).fetchone()
             ok = (row is None and generation == 0) or (
                 row is not None and row[1] is None and row[0] == generation)
             if not ok:
@@ -331,13 +335,24 @@ def mark_deleted(session_id: str) -> None:
         try:
             _ensure_schema(conn)
             now = time.time()
-            conn.execute(
-                "INSERT OR IGNORE INTO session_meta (session_id, owner_id, created)"
-                " VALUES (?,?,?)", (session_id, "anonymous", now))
-            conn.execute(
-                "UPDATE session_meta SET deleted = ?,"
-                " generation = generation + 1 WHERE session_id = ?",
-                (now, session_id))
+            if db.is_postgres(conn):
+                conn.execute(
+                    "INSERT INTO session_meta"
+                    " (session_id, owner_id, created, deleted, generation)"
+                    " VALUES (?,?,?,NULL,0)"
+                    " ON CONFLICT (session_id) DO UPDATE SET"
+                    " deleted = EXCLUDED.deleted,"
+                    " generation = session_meta.generation + 1"
+                    " RETURNING 1", (session_id, "anonymous", now, now))
+            else:
+                conn.execute(
+                    "INSERT OR IGNORE INTO session_meta"
+                    " (session_id, owner_id, created)"
+                    " VALUES (?,?,?)", (session_id, "anonymous", now))
+                conn.execute(
+                    "UPDATE session_meta SET deleted = ?,"
+                    " generation = generation + 1 WHERE session_id = ?",
+                    (now, session_id))
             conn.commit()
         finally:
             conn.close()

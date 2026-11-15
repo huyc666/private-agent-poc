@@ -30,7 +30,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import config
+from . import config, db
 
 logger = logging.getLogger(__name__)
 
@@ -137,13 +137,12 @@ def _connect() -> sqlite3.Connection:
     """打开连接并设置多进程协作 pragma（与 sessions/approval 同款：
     WAL 读写不互斥 + busy_timeout 容忍写锁竞争，避免高并发落账时
     database is locked 导致静默丢账）。"""
-    conn = sqlite3.connect(str(_db_path()))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=3000")
-    return conn
+    return db.connect("usage")
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    if db.is_postgres(conn):
+        return
     conn.execute("""
         CREATE TABLE IF NOT EXISTS usage_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -447,8 +446,8 @@ def summary(user_id: str = "", session_id: str = "", days: int = 0) -> dict:
         f" FROM usage_records{cond} GROUP BY session_id ORDER BY total_tokens DESC LIMIT 50",
         tuple(params))
     by_run = _query(
-        "SELECT u.run_id AS run_id, u.session_id AS session_id,"
-        " u.user_id AS user_id, u.date AS date, COUNT(*) AS calls,"
+        "SELECT u.run_id AS run_id, MAX(u.session_id) AS session_id,"
+        " MAX(u.user_id) AS user_id, MAX(u.date) AS date, COUNT(*) AS calls,"
         " SUM(u.total_tokens) AS total_tokens,"
         " SUM(CASE WHEN u.source='worker' THEN u.total_tokens ELSE 0 END) AS worker_tokens,"
         " SUM(u.duration_ms) AS duration_ms,"
