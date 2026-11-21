@@ -1295,12 +1295,16 @@ async def run_orchestration(name: str, task: str = "",
             logger.debug("[orchestration] 进度事件发送失败（%s），忽略",
                          type(e).__name__)
 
-    result = await execute(
-        definition, final_task, identity=identity,
-        session_id=usage.current_session.get(),
-        generation=usage.current_generation.get(),
-        run_id=usage.current_run.get(), llm=STATE.llm,
-        on_progress=_emit_progress)
+    task_token = usage.current_task.set(instance_id or "")
+    try:
+        result = await execute(
+            definition, final_task, identity=identity,
+            session_id=usage.current_session.get(),
+            generation=usage.current_generation.get(),
+            run_id=usage.current_run.get(), llm=STATE.llm,
+            on_progress=_emit_progress)
+    finally:
+        usage.current_task.reset(task_token)
     return _finish_from_result(result, instance_id)
 
 
@@ -1376,9 +1380,13 @@ async def run_triggered(name: str, params: dict, identity: usage.Identity, *,
         trigger_source=trigger_source, schedule_id=schedule_id,
         trigger_id=trigger_id, planned_at=planned_at,
         session_id="", run_id=rid)
-    result = await execute(definition, final_task, identity=identity,
-                           session_id="", generation=None, run_id=rid,
-                           llm=STATE.llm)
+    task_token = usage.current_task.set(instance_id or "")
+    try:
+        result = await execute(definition, final_task, identity=identity,
+                                session_id="", generation=None, run_id=rid,
+                                llm=STATE.llm)
+    finally:
+        usage.current_task.reset(task_token)
     return _finish_from_result(result, instance_id)
 
 

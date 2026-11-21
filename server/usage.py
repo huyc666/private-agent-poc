@@ -1,4 +1,4 @@
-"""Token 计量：按 用户 / 任务（单次运行）/ 会话 三个维度记录与聚合。
+"""Token 计量：按 用户 / 运行（run_id）/ 会话 / 流程实例（task_id）记录与聚合。
 
 采集原理：
 - ChatOpenAI 开启 stream_usage=True 后，每次模型调用的结束事件携带
@@ -16,8 +16,9 @@
 
 维度定义：
 - 用户 user_id：请求方标识（API 认证落地前由调用方传入，缺省 anonymous）
-- 任务 run_id：一次 /api/chat 请求的完整运行（可能含多轮模型调用与 worker 子调用）
+- 运行 run_id：一次 /api/chat 请求的完整运行（可能含多轮模型调用与 worker 子调用）
 - 会话 session_id：同一对话的多次运行累计
+- 流程实例 task_id：一次流程执行的业务对象 ID（多次 run 可归到同一实例）
 """
 import contextvars
 import csv
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 current_user = contextvars.ContextVar("usage_user", default="anonymous")
 current_session = contextvars.ContextVar("usage_session", default="")
 current_run = contextvars.ContextVar("usage_run", default="")
+current_task = contextvars.ContextVar("usage_task", default="")
 # 代际栅栏（v0.17.44）：编排引擎在每步开始前校验会话代际，防止用户删会话后
 # 后台编排继续写入。stream_reply 注入；非对话路径默认 None = 不做栅栏。
 current_generation = contextvars.ContextVar("usage_generation", default=None)
@@ -159,7 +161,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             prompt_cost REAL NOT NULL DEFAULT 0,
             completion_cost REAL NOT NULL DEFAULT 0,
             duration_ms INTEGER NOT NULL DEFAULT 0,
-            status TEXT NOT NULL DEFAULT 'ok'
+            status TEXT NOT NULL DEFAULT 'ok',
+            task_id TEXT NOT NULL DEFAULT ''
         )""")
     # 老库迁移：无金额列则补齐（幂等；历史行按默认 0 计入，token 数据不动）
     cols = {r[1] for r in conn.execute("PRAGMA table_info(usage_records)")}
@@ -172,6 +175,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE usage_records ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0")
     if cols and "status" not in cols:
         conn.execute("ALTER TABLE usage_records ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'")
+    if cols and "task_id" not in cols:
+        conn.execute("ALTER TABLE usage_records ADD COLUMN task_id TEXT NOT NULL DEFAULT ''")
     # run 级墙钟（6.8，口径 B）：一行一 run；与 usage_records 同库便于按 run_id
     # join。历史库自动补建（幂等），老 run 无行 = 未观测（NULL），不写 0 冒充。
     conn.execute("""
@@ -189,6 +194,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_run ON usage_records(run_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_date ON usage_records(date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_task ON usage_records(task_id)")
 
 
 def _init_schema() -> None:
@@ -229,7 +235,8 @@ def record(model: str, usage: dict, source: str = "main",
     row = (now, time.strftime("%Y-%m-%d", time.localtime(now)),
            current_user.get(), current_session.get(), current_run.get(),
            resolved_model, source, pt, ct, tt, prompt_cost, completion_cost,
-           max(0, int(duration_ms or 0)), "error" if status == "error" else "ok")
+           max(0, int(duration_ms or 0)), "error" if status == "error" else "ok",
+           current_task.get())
     _init_schema()          # 锁外幂等建表（每进程一次），热路径不重复 DDL
     with _lock:
         conn = _connect()
@@ -237,8 +244,8 @@ def record(model: str, usage: dict, source: str = "main",
             conn.execute(
                 "INSERT INTO usage_records (ts, date, user_id, session_id, run_id,"
                 " model, source, prompt_tokens, completion_tokens, total_tokens,"
-                " prompt_cost, completion_cost, duration_ms, status)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+                " prompt_cost, completion_cost, duration_ms, status, task_id)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
             conn.commit()
         finally:
             conn.close()
@@ -426,6 +433,8 @@ def summary(user_id: str = "", session_id: str = "", days: int = 0) -> dict:
     cond = (" WHERE " + " AND ".join(where)) if where else ""
     cond_u = (" WHERE " + " AND ".join(where_u)) if where_u else ""
     cond_r = (" WHERE " + " AND ".join(where_r)) if where_r else ""
+    where_t = ["u.task_id <> ''"] + where_u
+    cond_t = " WHERE " + " AND ".join(where_t)
     group_cols = ("prompt_tokens", "completion_tokens", "total_tokens")
 
     total = _query(
@@ -441,7 +450,8 @@ def summary(user_id: str = "", session_id: str = "", days: int = 0) -> dict:
         f" FROM usage_records{cond} GROUP BY user_id ORDER BY total_tokens DESC LIMIT 50",
         tuple(params))
     by_session = _query(
-        "SELECT session_id, user_id, COUNT(*) AS calls, SUM(total_tokens) AS total_tokens,"
+        "SELECT session_id, MAX(user_id) AS user_id, COUNT(*) AS calls,"
+        " SUM(total_tokens) AS total_tokens,"
         f" {_COST_COLS}"
         f" FROM usage_records{cond} GROUP BY session_id ORDER BY total_tokens DESC LIMIT 50",
         tuple(params))
@@ -459,6 +469,18 @@ def summary(user_id: str = "", session_id: str = "", days: int = 0) -> dict:
         " LEFT JOIN run_records AS r ON r.run_id = u.run_id"
         f"{cond_u} GROUP BY u.run_id ORDER BY MAX(u.ts) DESC LIMIT 50",
         tuple(params))
+    by_task = _query(
+        "SELECT u.task_id AS task_id, MAX(u.user_id) AS user_id,"
+        " MAX(u.session_id) AS session_id, COUNT(DISTINCT u.run_id) AS runs,"
+        " COUNT(*) AS calls, SUM(u.prompt_tokens) AS prompt_tokens,"
+        " SUM(u.completion_tokens) AS completion_tokens,"
+        " SUM(u.total_tokens) AS total_tokens, SUM(u.duration_ms) AS duration_ms,"
+        " SUM(CASE WHEN u.status='error' THEN 1 ELSE 0 END) AS failed_calls,"
+        " COALESCE(SUM(u.prompt_cost),0) AS prompt_cost,"
+        " COALESCE(SUM(u.completion_cost),0) AS completion_cost"
+        " FROM usage_records AS u"
+        f"{cond_t} GROUP BY u.task_id ORDER BY MAX(u.ts) DESC LIMIT 50",
+        tuple(params))
     # run 级真实记录（v0.17.53 展示）：run_records 覆盖零模型调用的 run（首 token
     # 前取消/首次调用前报错），by_run 只有「有模型调用」的 run；前端合并二者，
     # 差集按「等待时长未观测」展示，不用 0 冒充（PLAN 6.8）。
@@ -470,6 +492,7 @@ def summary(user_id: str = "", session_id: str = "", days: int = 0) -> dict:
             "by_user": [_attach_total_cost(r) for r in by_user],
             "by_session": [_attach_total_cost(r) for r in by_session],
             "by_run": [_attach_total_cost(r) for r in by_run],
+            "by_task": [_attach_total_cost(r) for r in by_task],
             "wall_runs": wall_runs}
 
 

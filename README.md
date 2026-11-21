@@ -1,10 +1,12 @@
 # Private Agent POC — 私有化 Agent 开发运行框架
 
-**版本：v0.18.0**（2026-11-15）
+**版本：v0.19.0**（2026-11-21）
 
 最小可运行的私有化 Agent 框架：**vLLM（Qwen 27B）+ LangGraph（Agent 循环 + 多 Agent 编排）+ MCP（工具协议）+ Skills（技能系统）+ 对话式自定义工具 + 人工审批流 + 代码沙箱 + 知识库问答（RAG，五类文档入库 + 混合检索 + 出处标注与点击定位 + 部门专属库隔离与跨领域知识库共享）+ API 认证与多用户（部门/角色/专属域 + 管理控制台）+ 用量计量（token / 金额 / 健康度 / 部门报表）+ Langfuse 观测 + FastAPI（SSE 流式接口）+ 离线聊天前端**。
 
 ## 版本记录
+
+- **v0.19.0**：run ↔ 业务对象归因（PLAN 6.7）——每次流程执行把 `workflow_instances.instance_id` 写入模型调用计量行的 `task_id`，手动与自动触发的同一次实例内多次模型调用、多个 run 都归到同一业务对象；用量接口在既有用户/会话/运行视图外新增按流程实例聚合的 `by_task` 视图，可回答「这件事花了多少 token 与金额」。历史记录与普通对话保持空 `task_id`，不参与实例聚合；实例留存失败时继续执行且不虚构归因；SQLite 老库与 PostgreSQL 6.4 schema 均幂等补列/索引。
 
 - **v0.18.0**：业务状态库 PostgreSQL 化（PLAN 6.4）——会话、审批、用户、审计、租约锁、流程实例、调度与用量共 14 张业务表支持 PostgreSQL 后端；默认 SQLite 部署不变，显式设置 `STATE_BACKEND`/`USAGE_BACKEND=postgres` 后不回退、连接失败即报错。提供一次性迁移 CLI，先备份 SQLite 再建幂等 PG schema、拒绝覆盖已有数据并分批复制全部表；金额/epoch 时间列使用 `double precision`，修复用量按运行聚合在 PG 下的裸列兼容问题。SQLite 全量回归通过；PostgreSQL 16 门控 12/12 通过，真实双进程会话/审批互通验收完成，可用于跨机多副本共享状态部署。
 
@@ -517,8 +519,9 @@ Mock 模式可直接演示：「有哪些技能」/「创建一个技能」/「�
 - **采集**：ChatOpenAI 开 `stream_usage=True`，LangChain 回调在每次 LLM 调用结束时
   提取 `usage_metadata`；回调挂在 LLM 对象上，主 Agent 与多 Agent worker 全覆盖
   （worker 消耗在 `worker_tokens` 字段单独标记）
-- **归属**：`/api/chat` 请求携带 `user_id`（缺省 `anonymous`），每次请求生成 `run_id`；
-  三个归属维度通过 contextvars 传给回调，嵌套调用同样生效
+- **归属**：`/api/chat` 请求携带 `user_id`（缺省 `anonymous`），每次请求生成
+  `run_id`，流程执行期再注入 `task_id`（流程实例 ID）；归属维度通过
+  contextvars 传给回调，嵌套调用同样生效
 - **金额**（v0.17.20）：`MODEL_PRICES` 配置各模型单价（元/百万 tokens，输入/输出分别
   计价），token 消耗按落账时单价折算金额并固化——价格调整只影响新记录，历史账可审计；
   未配置单价的模型仅展示 token 不受影响，自建模型可配 0 记内部核算
@@ -526,7 +529,8 @@ Mock 模式可直接演示：「有哪些技能」/「创建一个技能」/「�
   （token/金额记 0）；任务视图输出单次 run 的总时长（各次模型调用耗时之和）与失败次数
 - **存储**：默认 SQLite（`USAGE_DB`）；跨机部署可用 `USAGE_BACKEND=postgres`，时间/金额列用 `double precision` 防精度退化；提供方未返回 usage 的调用跳过
 - **查询**：`GET /api/usage?user_id=&session_id=&days=7` 返回
-  总量 + 按用户 / 按会话 / 按任务（run）/ 按部门 五组聚合（各视图含金额字段）；
+  总量 + 按用户 / 按会话 / 按运行（run_id）/ 按流程实例（task_id）/
+  按部门 聚合（各视图含金额字段）；
   部门成本报表为管理视角（user 角色不可见，v0.17.21），支持 CSV 导出
   （UTF-8 带 BOM，Excel 直接打开不乱码，已防公式注入，v0.17.23）
 - **展示**：前端每条回答下方显示「本次 X tokens（输入/输出）· 本会话累计 Y」；

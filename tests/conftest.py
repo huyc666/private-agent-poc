@@ -12,6 +12,7 @@ tmp_path，实现测试间零串扰。
 import os
 import sys
 import tempfile
+import contextvars
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -97,9 +98,13 @@ def isolated_env(tmp_path, monkeypatch):
     from server import orchestration
     orchestration._TOOL_CACHE.clear()
     # 对话上下文复位（多用户隔离用例依赖 usage.current_user）
+    current_task = getattr(
+        usage, "current_task",
+        contextvars.ContextVar("usage_task", default=""))
     tokens = [usage.current_user.set("anonymous"),
               usage.current_session.set(""),
               usage.current_run.set(""),
+              current_task.set(""),
               # 编排代际栅栏上下文（v0.17.44）逐测试复位
               usage.current_generation.set(None),
               # 请求级身份快照（v0.17.39）逐测试复位，防跨用例泄漏
@@ -108,8 +113,9 @@ def isolated_env(tmp_path, monkeypatch):
     usage.current_user.reset(tokens[0])
     usage.current_session.reset(tokens[1])
     usage.current_run.reset(tokens[2])
-    usage.current_generation.reset(tokens[3])
-    usage.current_identity.reset(tokens[4])
+    current_task.reset(tokens[3])
+    usage.current_generation.reset(tokens[4])
+    usage.current_identity.reset(tokens[5])
 
 
 @pytest.fixture

@@ -54,7 +54,8 @@ async def audit_export(request: Request, actor: str = "", action: str = "",
 
 @router.get("/api/usage")
 async def usage_stats(request: Request, user_id: str = "", session_id: str = "", days: int = 0) -> dict:
-    """Token 消耗聚合：总量 + 按用户 / 按会话 / 按任务（run）分组。
+    """Token 消耗聚合：总量 + 按用户 / 按会话 / 按运行（run_id）/
+    按流程实例（task_id）分组。
     days>0 时只统计最近 N 天。user 角色强制只统计本人（查询参数不可越权）。"""
     ident = _acl_identity(request)
     if ident and ident["role"] == "user":

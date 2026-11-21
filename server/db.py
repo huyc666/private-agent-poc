@@ -173,8 +173,10 @@ CREATE TABLE IF NOT EXISTS usage_records (
     prompt_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
     completion_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
     duration_ms INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'ok'
+    status TEXT NOT NULL DEFAULT 'ok',
+    task_id TEXT NOT NULL DEFAULT ''
 );
+ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS task_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_usage_user
     ON usage_records(user_id);
 CREATE INDEX IF NOT EXISTS idx_usage_session
@@ -183,6 +185,8 @@ CREATE INDEX IF NOT EXISTS idx_usage_run
     ON usage_records(run_id);
 CREATE INDEX IF NOT EXISTS idx_usage_date
     ON usage_records(date);
+CREATE INDEX IF NOT EXISTS idx_usage_task
+    ON usage_records(task_id);
 CREATE TABLE IF NOT EXISTS run_records (
     run_id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
