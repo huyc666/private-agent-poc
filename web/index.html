@@ -4,25 +4,22 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Private Agent POC</title>
+<link rel="icon" href="data:,">
 <!-- 样式 = 本地共享 token（/tokens.css，与控制台同源）+ 页面内联；脚本内联；无任何外部 CDN 依赖，可在断网内网环境运行 -->
 <link rel="stylesheet" href="/tokens.css">
 <style>
   body {
-    background: linear-gradient(180deg, #eef1f9 0%, var(--bg) 240px);
-    color: var(--text); font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-    height: 100vh; display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text); height: 100dvh; display: flex; flex-direction: column;
   }
   header {
     padding: 12px 24px; border-bottom: 1px solid var(--border);
-    background: rgba(255,255,255,.82); backdrop-filter: blur(8px);
+    background: rgba(255,255,255,.94);
     display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 5;
   }
   header h1 { font-size: 16.5px; font-weight: 700; letter-spacing: .3px;
     display: flex; align-items: center; gap: 7px; }
   header h1 .logo { font-weight: 400; }  /* 图标保持原色，不随文字渐变 */
-  header h1 .h1-text {
-    background: linear-gradient(100deg, var(--accent), var(--accent-2));
-    -webkit-background-clip: text; background-clip: text; color: transparent; }
+  header h1 .h1-text { color: var(--text); }
   .badge { font-size: 12px; padding: 3px 10px; border-radius: 999px;
     border: 1px solid var(--border); color: var(--dim); background: #fff; }
   .badge.live { color: var(--success); border-color: var(--success-border); background: var(--success-bg); }
@@ -34,11 +31,15 @@
   @keyframes pulse { 50% { opacity: .45; } }
   /* 技术细节徽章：非技术界面默认隐藏（保留元素，JS 照常写入，悬停记录入口仍可查） */
   #toolBadge, #obsBadge { display: none; }
-  #chat { flex: 1; overflow-y: auto; padding: 28px 24px 16px; display: flex; flex-direction: column; gap: 14px; }
-  .msg { max-width: 76%; padding: 11px 16px; border-radius: 16px; line-height: 1.7;
+  #chat { flex: 1; overflow-y: auto; padding: 32px 24px 20px; display: flex; flex-direction: column; gap: 18px;
+  }
+  #chat > .msg, #chat > .think, #chat > .tool-chip, #chat > .approval-card, #chat > .draft-card {
+    width: fit-content; margin-left: max(0px, calc((100% - 880px) / 2));
+    margin-right: max(0px, calc((100% - 880px) / 2)); }
+  .msg { max-width: min(76%, 760px); padding: 14px 18px; border-radius: 14px; line-height: 1.8;
     white-space: pre-wrap; word-break: break-word; font-size: 14.5px; }
   .msg.user { align-self: flex-end; color: #fff; border-bottom-right-radius: 5px;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 3px 10px rgba(90, 105, 255, .28); }
+    background: var(--accent); box-shadow: none; }
   .msg.assistant { align-self: flex-start; background: var(--panel);
     border: 1px solid var(--border); border-bottom-left-radius: 5px; box-shadow: var(--shadow); }
   .msg a { color: var(--accent); text-decoration: underline; cursor: pointer; font-weight: 500; }
@@ -154,21 +155,22 @@
   .check { display: flex; gap: 7px; align-items: flex-start; font-size: 12.3px; color: var(--dim); }
   .check .tick { color: var(--success); font-weight: 700; }
   @media (max-width: 760px) { .detail-grid { grid-template-columns: 1fr; } .draft-card { padding: 12px 13px; } }
-  #composer { display: flex; gap: 10px; padding: 14px 24px 18px; border-top: 1px solid var(--border);
-    background: rgba(255,255,255,.82); backdrop-filter: blur(8px); align-items: flex-end; }
+  #composer { display: flex; gap: 10px; padding: 14px max(24px, calc((100% - 928px) / 2)) 18px;
+    border-top: 1px solid var(--border); background: rgba(255,255,255,.94); align-items: flex-end; }
   #input { flex: 1; background: #fff; border: 1.5px solid var(--border); border-radius: 14px;
+    min-height: 48px;
     padding: 12px 16px; color: var(--text); font-size: 14.5px; outline: none;
     resize: none; font-family: inherit; box-shadow: var(--shadow); transition: border-color .15s, box-shadow .15s;
     overflow-y: auto; }
   #input::-webkit-scrollbar { width: 8px; }
   #input::-webkit-scrollbar-thumb { background: #dfe4ef; border-radius: 999px; }
   #input:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
-  #send { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; border: none;
-    border-radius: 14px; padding: 0 24px; font-size: 14.5px; cursor: pointer; box-shadow: 0 3px 10px rgba(90, 105, 255, .28); }
-  #send:hover { filter: brightness(1.06); }
+  #send { background: var(--accent); color: #fff; border: none; min-height: 48px;
+    border-radius: 12px; padding: 0 24px; font-size: 14.5px; cursor: pointer; }
+  #send:hover { background: var(--accent-2); }
   #send:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
   #attach { background: #fff; color: var(--dim); border: 1.5px solid var(--border); border-radius: 14px;
-    padding: 0 16px; font-size: 17px; cursor: pointer; box-shadow: var(--shadow); }
+    height: 48px; flex: none; padding: 0 16px; font-size: 17px; cursor: pointer; box-shadow: var(--shadow); }
   #attach:hover { color: var(--accent); border-color: var(--accent); }
   #attach:disabled { opacity: .45; cursor: not-allowed; }
   .hint { color: var(--dim); font-size: 12px; text-align: center; padding: 8px 24px; }
@@ -181,25 +183,30 @@
   .panel-empty { text-align: center; color: var(--dim); font-size: 12.5px;
     padding: 34px 10px; line-height: 1.7; }
   /* ---- 空会话欢迎卡（非技术用户引导）---- */
-  .welcome { align-self: center; max-width: 560px; width: 100%; margin: auto;
-    background: var(--panel); border: 1px solid var(--border); border-radius: 20px;
-    padding: 34px 30px 26px; text-align: center; box-shadow: var(--shadow); }
-  .welcome .w-icon { font-size: 44px; margin-bottom: 12px; }
-  .welcome h3 { font-size: 19px; font-weight: 700; margin-bottom: 8px; }
-  .welcome p { color: var(--dim); font-size: 13.5px; line-height: 1.7; margin-bottom: 18px; }
-  .welcome .w-grid { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
-  .welcome .w-try { border: 1.5px solid var(--border); background: #fafbfe; color: var(--text);
-    font-size: 13px; border-radius: 999px; padding: 8px 16px; cursor: pointer; transition: all .15s; }
-  .welcome .w-try:hover { border-color: var(--accent); color: var(--accent); background: #f2f6ff; }
+  .welcome { align-self: center; max-width: 780px; width: 100%; margin: auto;
+    padding: 24px 0; text-align: left; }
+  .welcome .w-eyebrow { color: var(--accent); font-size: 12px; font-weight: 600; letter-spacing: .1em;
+    text-transform: uppercase; margin-bottom: 12px; }
+  .welcome h3 { font-size: 28px; font-weight: 600; margin-bottom: 10px; letter-spacing: -.02em; }
+  .welcome p { color: var(--dim); font-size: 15px; line-height: 1.8; margin-bottom: 24px; max-width: 570px; }
+  .welcome .w-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .welcome .w-try { border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    font-size: 13.5px; border-radius: var(--radius-m); padding: 14px 16px; cursor: pointer; text-align: left; }
+  .w-try { justify-content: flex-start; }
+  .welcome .w-try:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
   .welcome .w-note { color: var(--dim); font-size: 12px; margin-top: 18px; }
-  #panel { position: fixed; top: 0; right: -370px; width: 350px; height: 100vh; background: var(--panel);
-    border-left: 1px solid var(--border); transition: right .2s; z-index: 10; display: flex; flex-direction: column;
+  #panel { visibility: hidden; position: fixed; top: 0; right: -370px; width: 350px; height: 100dvh; background: var(--panel);
+    border-left: 1px solid var(--border); transition: right .2s, visibility .2s; z-index: 10; display: flex; flex-direction: column;
     box-shadow: -6px 0 24px rgba(47, 60, 110, .10); }
-  #panel.open { right: 0; }
+  #panel.open { right: 0; visibility: visible; }
   #panel .panel-head { display: flex; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border); align-items: center; }
   #panel .tab { font-size: 13px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border); color: var(--dim); cursor: pointer; }
   #panel .tab.active { color: var(--accent); border-color: var(--accent); background: #f2f6ff; }
-  #panel .close { margin-left: auto; color: var(--dim); cursor: pointer; font-size: 16px; }
+  #panel .close { margin-left: auto; flex: none; width: 36px; height: 36px; padding: 0;
+    color: var(--dim); background: transparent; border: 1px solid transparent; border-radius: var(--radius-s);
+    cursor: pointer; font-family: Arial, sans-serif; font-size: 20px; font-weight: 400; line-height: 1; }
+  #panel .close:hover { color: var(--accent); background: var(--accent-bg); border-color: var(--border); }
+  #panel .close:active { background: #e1eee8; }
   #panel .panel-body { flex: 1; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; background: #f8f9fd; }
   .sess-item { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; cursor: pointer;
     font-size: 13px; background: #fff; }
@@ -226,9 +233,9 @@
   #loginBox input { width: 100%; background: #f8f9fd; border: 1.5px solid var(--border); border-radius: 10px;
     padding: 10px 12px; color: var(--text); font-size: 14px; outline: none; }
   #loginBox input:focus { border-color: var(--accent); background: #fff; }
-  #loginBox .login-btn { width: 100%; margin-top: 14px; background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  #loginBox .login-btn { width: 100%; margin-top: 14px; background: var(--accent);
     color: #fff; border: none; border-radius: 10px; padding: 10px; font-size: 14px; cursor: pointer; }
-  #loginBox .login-btn:hover { filter: brightness(1.06); }
+  #loginBox .login-btn:hover { background: var(--accent-2); }
   #loginBox .login-btn:disabled { opacity: .45; cursor: not-allowed; }
   #loginBox .divider-line { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: 12px; margin: 16px 0 4px; }
   #loginBox .divider-line::before, #loginBox .divider-line::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
@@ -258,27 +265,60 @@
     background: transparent; color: var(--text); font-size: 13px; padding: 8px 12px;
     border-radius: var(--radius-s); cursor: pointer; }
   #userMenu .um-item:hover { background: #f0f4ff; color: var(--accent); }
+  [role="button"] { user-select: none; }
+  #chat:focus-visible, #panel .panel-body:focus-visible { outline-offset: -3px; }
+  @media (min-width: 960px) {
+    body:has(#panel.open) header { padding-right: 374px; }
+    body:has(#panel.open) #chat { padding-right: 374px; }
+    body:has(#panel.open) #composer { padding-right: 374px; }
+  }
+  @media (max-width: 640px) {
+    header { padding: 10px 12px; gap: 6px; flex-wrap: wrap; }
+    header h1 { font-size: 15px; flex: 1; }
+    header .h1-text { white-space: nowrap; }
+    header .badge { white-space: nowrap; padding: 4px 8px; }
+    #userBadge { order: 2; max-width: 145px; overflow: hidden; text-overflow: ellipsis; }
+    #consoleBtn { order: 3; }
+    #panelBtn { order: 4; margin-left: auto; }
+    #chat { padding: 20px 16px 14px; }
+    #chat > .msg, #chat > .think, #chat > .tool-chip, #chat > .approval-card, #chat > .draft-card {
+      margin-left: 0; margin-right: 0; }
+    .msg { max-width: 92%; padding: 11px 14px; }
+    .welcome { padding: 16px 0; }
+    .welcome h3 { font-size: 24px; }
+    .welcome p { font-size: 14px; margin-bottom: 18px; }
+    .welcome .w-grid { grid-template-columns: 1fr; }
+    .welcome .w-try { padding: 12px 14px; }
+    #composer { padding: 10px 12px 12px; gap: 8px; }
+    #input { padding: 12px; min-width: 0; }
+    #send { padding: 0 16px; }
+    #attach { padding: 0 11px; }
+    .hint { padding: 7px 16px; font-size: 11px; line-height: 1.6; }
+    #panel { width: min(350px, 100vw); }
+    #loginBox { width: calc(100% - 32px); padding: 22px; }
+    #userMenu { right: 12px; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1><span class="logo">💠</span><span class="h1-text">智能助手</span></h1>
+  <h1><span class="logo">P</span><span class="h1-text">Private Agent</span></h1>
   <span class="badge" id="statusBadge">连接中…</span>
   <span class="badge" id="obsBadge"></span>
-  <span class="badge" id="userBadge" title="当前登录身份，点击可切换或注销"></span>
-  <span class="badge nav-btn" id="consoleBtn" style="display:none" title="用户与 Key 管理（仅管理员可见）">⚙ 控制台</span>
+  <span class="badge" id="userBadge" title="当前登录身份，点击可切换或注销" tabindex="0" role="button" aria-label="账号菜单"></span>
+  <span class="badge nav-btn" id="consoleBtn" style="display:none" title="用户与 Key 管理（仅管理员可见）" tabindex="0" role="button" aria-label="管理控制台">控制台</span>
   <span class="badge" id="toolBadge"></span>
-  <span class="badge nav-btn" id="panelBtn" title="历史会话、待确认操作与用量">☰ 记录</span>
+  <span class="badge nav-btn" id="panelBtn" title="历史会话、待确认操作与用量" tabindex="0" role="button" aria-label="会话记录" aria-expanded="false">记录</span>
 </header>
 
 <div id="panel">
   <div class="panel-head">
-    <span class="tab active" id="tabSessions">会话</span>
-    <span class="tab" id="tabApprovals">审批记录</span>
-    <span class="tab" id="tabUsage">用量</span>
-    <span class="close" id="panelClose">✕</span>
+    <span class="tab active" id="tabSessions" tabindex="0" role="button" aria-label="会话列表">会话</span>
+    <span class="tab" id="tabApprovals" tabindex="0" role="button" aria-label="审批记录">审批记录</span>
+    <span class="tab" id="tabUsage" tabindex="0" role="button" aria-label="用量统计">用量</span>
+    <button type="button" class="close" id="panelClose" aria-label="关闭记录面板">×</button>
   </div>
-  <div class="panel-body" id="panelBody"></div>
+  <div class="panel-body" id="panelBody" tabindex="0" aria-label="记录内容"></div>
 </div>
 
 <div id="userMenu">
@@ -289,13 +329,13 @@
 
 <div id="loginMask">
   <div id="loginBox">
-    <h2>🔐 欢迎使用智能助手</h2>
+    <h2>登录 Private Agent</h2>
     <div id="loginHint" style="display:none;color:var(--dim);font-size:12px;margin:-6px 0 10px">当前凭据仍然有效，点窗口外空白处或按 Esc 可取消切换</div>
     <label>用户名</label>
     <input id="loginUser" autocomplete="username">
     <label>密码</label>
     <input id="loginPass" type="password" autocomplete="current-password">
-    <button class="login-btn" id="loginBtn">登 录</button>
+    <button class="login-btn" id="loginBtn">登录</button>
     <div class="divider-line">开发者通道</div>
     <input id="loginKey" placeholder="pak- 开头的 API Key">
     <button class="login-btn" id="keyBtn">用 Key 进入</button>
@@ -304,10 +344,10 @@
   </div>
 </div>
 
-<div id="chat"></div>
-<div class="hint">上传文档（📎）可让助手阅读分析；涉及删除等敏感操作时，助手会先请求你的确认</div>
+<div id="chat" tabindex="0" aria-label="对话内容"></div>
+<div class="hint">可上传文档让助手阅读分析；涉及删除等敏感操作时，助手会先请求你的确认</div>
 <div id="composer">
-  <button id="attach" title="上传文档（分析/创建工具/技能/领域包）或技能包 zip（含 SKILL.md + 子目录）">📎</button>
+  <button id="attach" aria-label="上传文档" title="上传文档（分析/创建工具/技能/领域包）或技能包 zip（含 SKILL.md + 子目录）">＋</button>
   <input type="file" id="fileInput" style="display:none"
          accept=".md,.markdown,.txt,.csv,.tsv,.json,.yaml,.yml,.xml,.html,.htm,.py,.js,.ts,.java,.go,.rs,.sql,.sh,.bat,.ini,.cfg,.conf,.toml,.log,.rst,.docx,.zip">
   <textarea id="input" rows="1" placeholder="有什么可以帮你？"></textarea>
@@ -410,7 +450,7 @@ document.getElementById('logoutBtn').onclick = async () => {
   showLogin('已注销，请重新登录');
 };
 function renderUserBadge() {
-  userBadge.textContent = '👤 ' + userId + (authMode ? ' 🔏' : '');
+  userBadge.textContent = userId + (authMode ? ' · 已登录' : '');
 }
 renderUserBadge();
 // ---- 用户菜单（v0.17.29 修复问题1）：独立小卡片，不再复用登录遮罩——
@@ -418,7 +458,7 @@ renderUserBadge();
 const userMenu = document.getElementById('userMenu');
 userBadge.onclick = () => {
   if (authMode) {
-    document.getElementById('umIdentity').textContent = '👤 ' + userId;
+    document.getElementById('umIdentity').textContent = userId;
     userMenu.classList.toggle('open');
     return;
   }
@@ -484,11 +524,11 @@ function renderWelcome() {
   if (chat.children.length) return;
   const w = document.createElement('div');
   w.className = 'welcome'; w.id = 'welcome';
-  const icon = document.createElement('div');
-  icon.className = 'w-icon'; icon.textContent = '👋';
-  const h = document.createElement('h3'); h.textContent = '你好，我是你的智能助手';
+  const eyebrow = document.createElement('div');
+  eyebrow.className = 'w-eyebrow'; eyebrow.textContent = 'YOUR PRIVATE WORKSPACE';
+  const h = document.createElement('h3'); h.textContent = '今天想一起完成什么？';
   const p = document.createElement('p');
-  p.textContent = '可以问我问题、写材料、查资料、分析上传的文档。挑一个试试：';
+  p.textContent = '从一个问题、一份材料或一个想法开始。我可以帮你查找资料、分析文档，也能把想法整理成清晰的行动。';
   const grid = document.createElement('div');
   grid.className = 'w-grid';
   for (const s of SAMPLES) {
@@ -498,8 +538,8 @@ function renderWelcome() {
     grid.appendChild(b);
   }
   const note = document.createElement('div');
-  note.className = 'w-note'; note.textContent = '点右上角「☰ 记录」可查看历史会话与用量';
-  w.append(icon, h, p, grid, note);
+  note.className = 'w-note'; note.textContent = '打开「记录」，继续之前的会话，或查看待确认操作与用量。';
+  w.append(eyebrow, h, p, grid, note);
   chat.appendChild(w);
 }
 function removeWelcome() { const w = document.getElementById('welcome'); if (w) w.remove(); }
@@ -1297,14 +1337,36 @@ const panel = document.getElementById('panel');
 const panelBody = document.getElementById('panelBody');
 let panelTab = 'sessions';
 
+function setPanelOpen(open) {
+  panel.classList.toggle('open', open);
+  document.getElementById('panelBtn').setAttribute('aria-expanded', String(open));
+  if (open) renderPanel();
+}
+function bindKeyboardButton(element, action) {
+  element.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      action();
+    }
+  });
+}
 document.getElementById('panelBtn').onclick = () => {
-  panel.classList.toggle('open');
-  if (panel.classList.contains('open')) renderPanel();
+  setPanelOpen(!panel.classList.contains('open'));
 };
-document.getElementById('panelClose').onclick = () => panel.classList.remove('open');
+document.getElementById('panelClose').onclick = () => setPanelOpen(false);
 document.getElementById('tabSessions').onclick = () => { panelTab = 'sessions'; renderPanel(); };
 document.getElementById('tabApprovals').onclick = () => { panelTab = 'approvals'; renderPanel(); };
 document.getElementById('tabUsage').onclick = () => { panelTab = 'usage'; renderPanel(); };
+for (const id of ['panelBtn', 'panelClose', 'tabSessions', 'tabApprovals', 'tabUsage', 'consoleBtn', 'userBadge']) {
+  const element = document.getElementById(id);
+  bindKeyboardButton(element, () => element.click());
+}
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && panel.classList.contains('open')) {
+    setPanelOpen(false);
+    document.getElementById('panelBtn').focus();
+  }
+});
 
 function switchSession(id) {
   sessionId = id;
@@ -1336,6 +1398,8 @@ async function renderPanel() {
   for (const [id, name] of Object.entries(tabMap))
     document.getElementById(id).classList.toggle('active', panelTab === name);
   panelBody.innerHTML = '';
+  for (const [id, name] of Object.entries(tabMap))
+    document.getElementById(id).setAttribute('aria-pressed', String(panelTab === name));
   if (panelTab === 'sessions') {
     const btn = document.createElement('button');
     btn.id = 'newSessBtn';

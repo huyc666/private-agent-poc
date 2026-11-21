@@ -4,33 +4,31 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Private Agent 控制台</title>
+<link rel="icon" href="data:,">
 <!-- 样式 = 本地共享 token（/tokens.css，与聊天页同源）+ 页面内联；脚本内联；无任何外部 CDN 依赖 -->
 <link rel="stylesheet" href="/tokens.css">
 <style>
   body {
-    background: linear-gradient(180deg, #eef1f9 0%, var(--bg) 240px);
-    color: var(--text); font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text);
     min-height: 100vh;
   }
   header {
     padding: 12px 24px; border-bottom: 1px solid var(--border);
-    background: rgba(255,255,255,.82); backdrop-filter: blur(8px);
+    background: rgba(255,255,255,.94);
     display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 5;
   }
   header h1 { font-size: 16.5px; font-weight: 700; letter-spacing: .3px;
     display: flex; align-items: center; gap: 7px; }
   header h1 .logo {
     width: 26px; height: 26px; border-radius: var(--radius-s); flex: none;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    background: var(--accent);
     display: inline-flex; align-items: center; justify-content: center;
     color: #fff; font-size: 14px; font-weight: 400;
   }
-  header h1 .h1-text {
-    background: linear-gradient(100deg, var(--accent), var(--accent-2));
-    -webkit-background-clip: text; background-clip: text; color: transparent; }
+  header h1 .h1-text { color: var(--text); }
   .badge { font-size: 12px; padding: 3px 10px; border-radius: 999px;
     border: 1px solid var(--border); color: var(--dim); background: #fff; }
-  .badge.role-admin { color: var(--accent); border-color: #c9d8ff; background: #f0f4ff; }
+  .badge.role-admin { color: var(--accent); border-color: var(--border); background: var(--accent-bg); }
   .badge.online { color: var(--success); border-color: var(--success-border); background: var(--success-bg); }
   .badge.online::before { content: "● "; }
   .badge.offline { color: var(--danger); border-color: var(--danger-border); background: var(--danger-bg); animation: pulse 1.2s infinite; }
@@ -38,17 +36,17 @@
   @keyframes pulse { 50% { opacity: .45; } }
   .nav-btn { cursor: pointer; }
   .nav-btn:hover { color: var(--accent); border-color: var(--accent); }
-  main { max-width: 1200px; margin: 0 auto; padding: 26px 24px 40px; }
-  .page-head h2 { font-size: 20px; margin-bottom: 6px; }
+  main { max-width: 1280px; margin: 0 auto; padding: 32px 32px 48px; }
+  .page-head h2 { font-size: 22px; margin-bottom: 6px; font-weight: 600; }
   .page-head p { color: var(--dim); font-size: 13px; line-height: 1.7; }
-  .toolbar { display: flex; align-items: center; gap: 10px; margin: 18px 0 12px; }
+  .toolbar { display: flex; align-items: center; gap: 10px; margin: 24px 0 12px; }
   .btn { border: 1px solid var(--border); background: #fff; color: var(--text);
     border-radius: var(--radius-s); padding: 7px 14px; font-size: 13px; cursor: pointer;
     transition: all .15s; }
   .btn:hover { border-color: var(--accent); color: var(--accent); }
   .btn:focus-visible { box-shadow: var(--focus-ring); }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .btn.primary:hover { filter: brightness(1.06); color: #fff; }
+  .btn.primary:hover { background: var(--accent-2); color: #fff; }
   .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
   .btn.danger:hover { filter: brightness(1.06); color: #fff; }
   .btn:disabled { opacity: .45; cursor: not-allowed; filter: none; }
@@ -58,13 +56,13 @@
   .btn.ghost.danger-text { color: var(--danger); }
   .btn.ghost.danger-text:hover { background: var(--danger-bg); border-color: transparent; color: var(--danger); }
   .card { background: var(--panel); border: 1px solid var(--border);
-    border-radius: var(--radius-l); box-shadow: var(--shadow); overflow: hidden; }
+    border-radius: var(--radius-m); box-shadow: none; overflow: hidden; }
   .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 980px; }
   th { text-align: left; padding: 11px 14px; color: var(--dim); font-weight: 600;
     font-size: 12.5px; border-bottom: 1px solid var(--border); background: #fafbfe;
     white-space: nowrap; }
-  td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  td { padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: #fafbff; }
   td .uname { font-weight: 600; }
@@ -72,7 +70,7 @@
   .pill { display: inline-block; font-size: 12px; padding: 2px 10px;
     border-radius: 999px; border: 1px solid var(--border); background: #f6f7fb;
     color: var(--dim); white-space: nowrap; }
-  .pill.role-admin { color: var(--accent); border-color: #c9d8ff; background: #f0f4ff; }
+  .pill.role-admin { color: var(--accent); border-color: var(--border); background: var(--accent-bg); }
   .pill.st-ok { color: var(--success); border-color: var(--success-border); background: var(--success-bg); }
   .pill.st-expired { color: var(--warning); border-color: var(--warning-border); background: var(--warning-bg); }
   .pill.st-revoked { color: var(--danger); border-color: var(--danger-border); background: var(--danger-bg); }
@@ -136,9 +134,9 @@
   #denyBox h2 { margin-bottom: 10px; }
   #denyBox p { color: var(--dim); margin-bottom: 18px; }
   /* ---- 页签条（v0.17.30，PLAN 6.3：用户管理 / 审计日志 双视图）---- */
-  .ctabs { display: flex; gap: 6px; padding: 0 4px; margin-bottom: 14px;
+  .ctabs { display: flex; gap: 12px; padding: 0; margin-bottom: 24px;
     border-bottom: 1px solid var(--border); }
-  .ctab { padding: 9px 16px 10px; font-size: 13.5px; color: var(--dim); cursor: pointer;
+  .ctab { padding: 9px 4px 12px; font-size: 14px; color: var(--dim); cursor: pointer;
     border-bottom: 2px solid transparent; user-select: none; }
   .ctab:hover { color: var(--text); }
   .ctab.active { color: var(--accent); font-weight: 600; border-bottom-color: var(--accent); }
@@ -170,25 +168,46 @@
   .login-btn:hover { filter: brightness(1.06); }
   .login-btn.gray { background: #59606f; }
   #loginErr { color: var(--danger); font-size: 12.5px; min-height: 16px; margin-top: 8px; text-align: center; }
+  .table-wrap:focus-visible { outline-offset: -3px; }
+  [role="button"] { user-select: none; }
+  @media (max-width: 640px) {
+    header { padding: 10px 14px; flex-wrap: wrap; gap: 7px; }
+    header h1 { font-size: 15px; width: 100%; }
+    header .h1-text { white-space: nowrap; }
+    header > span[style] { display: none; }
+    #backBtn { margin-left: auto; }
+    main { padding: 20px 16px 36px; }
+    .ctabs { gap: 20px; overflow-x: auto; margin-bottom: 20px; }
+    .ctab { white-space: nowrap; padding: 8px 0 10px; }
+    .page-head h2 { font-size: 20px; }
+    .audit-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .audit-filters .af { min-width: 0; }
+    .audit-filters input, .audit-filters select { width: 100%; min-width: 0; }
+    .audit-count { grid-column: 1 / -1; margin-left: 0; }
+    .table-wrap { overscroll-behavior-x: contain; scrollbar-width: thin; }
+    .modal-mask { padding: 16px; }
+    .modal { padding: 20px; }
+    #loginBox { width: calc(100% - 32px); padding: 22px; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1><span class="logo">⚙</span><span class="h1-text">Private Agent 控制台</span></h1>
+  <h1><span class="logo">P</span><span class="h1-text">管理控制台</span></h1>
   <span class="badge role-admin" id="roleBadge" style="display:none">管理员</span>
   <span class="badge" id="statusBadge">连接中…</span>
   <span style="flex:1"></span>
   <span class="badge" id="userBadge"></span>
-  <span class="badge nav-btn" id="backBtn" title="返回对话页面">← 返回对话</span>
+  <span class="badge nav-btn" id="backBtn" title="返回对话页面" tabindex="0" role="button" aria-label="返回对话">返回对话</span>
 </header>
 
 <main>
   <div id="mainView" style="display:none">
     <div class="ctabs">
-      <span class="ctab active" data-view="view-users" data-admin-only="1">用户与 Key 管理</span>
-      <span class="ctab" data-view="view-audit" data-admin-only="1">审计日志</span>
-      <span class="ctab" data-view="view-packs" data-admin-only="1">包管理</span>
-      <span class="ctab" data-view="view-approvals">审批</span>
+      <span class="ctab active" data-view="view-users" data-admin-only="1" tabindex="0" role="button" aria-label="用户与 Key 管理">用户与 Key 管理</span>
+      <span class="ctab" data-view="view-audit" data-admin-only="1" tabindex="0" role="button" aria-label="审计日志">审计日志</span>
+      <span class="ctab" data-view="view-packs" data-admin-only="1" tabindex="0" role="button" aria-label="包管理">包管理</span>
+      <span class="ctab" data-view="view-approvals" tabindex="0" role="button" aria-label="审批">审批</span>
     </div>
     <div class="view active" id="view-users">
     <div class="page-head">
@@ -199,7 +218,7 @@
       <button class="btn primary" id="createBtn">＋ 新建用户</button>
     </div>
     <div class="card">
-      <div class="table-wrap">
+      <div class="table-wrap" tabindex="0" aria-label="用户列表，可横向滚动">
         <table id="console-table">
           <thead>
             <tr>
@@ -250,7 +269,7 @@
         <button class="btn" id="afExport">导出 CSV</button>
       </div>
       <div class="card">
-        <div class="table-wrap">
+        <div class="table-wrap" tabindex="0" aria-label="审计日志，可横向滚动">
           <table>
             <thead>
               <tr><th>时间</th><th>操作人</th><th>角色</th><th>动作</th><th>目标</th><th>详情</th></tr>
@@ -273,7 +292,7 @@
         <span class="audit-count" id="packCount"></span>
       </div>
       <div class="card">
-        <div class="table-wrap">
+        <div class="table-wrap" tabindex="0" aria-label="包列表，可横向滚动">
           <table>
             <thead>
               <tr>
@@ -298,7 +317,7 @@
         <span class="audit-count" id="approvalCount"></span>
       </div>
       <div class="card">
-        <div class="table-wrap">
+        <div class="table-wrap" tabindex="0" aria-label="审批列表，可横向滚动">
           <table>
             <thead>
               <tr>
@@ -390,7 +409,7 @@
 <!-- 吊销确认模态 -->
 <div class="modal-mask" id="revokeMask">
   <div class="modal">
-    <h3 id="revokeTitle">吊销账号 <button class="close" data-close="revokeMask">✕</button></h3>
+    <h3 id="revokeTitle">吊销账号 <button class="close" data-close="revokeMask" aria-label="关闭吊销确认">✕</button></h3>
     <div class="consequence" id="revokeUser"></div>
     <div class="consequence">吊销后立即生效：① 其 API Key 立即失效　② 其登录令牌立即失效　③ <strong style="color:var(--danger)">吊销不可恢复</strong>（误吊销需换用户名重建）</div>
     <div class="danger-strip">此操作不可撤销，请确认。</div>
@@ -472,10 +491,40 @@ function fmtTime(v) {
   const p = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
-function openModal(id) { $(id).classList.add('open'); }
-function closeModal(id) { $(id).classList.remove('open'); }
+let modalTrigger = null;
+function openModal(id) {
+  modalTrigger = document.activeElement;
+  $(id).classList.add('open');
+  $(id).setAttribute('role', 'dialog');
+  $(id).setAttribute('aria-modal', 'true');
+  const heading = $(id).querySelector('h3[id]');
+  if (heading) $(id).setAttribute('aria-labelledby', heading.id);
+  $(id).querySelector('button').focus();
+}
+function closeModal(id) {
+  $(id).classList.remove('open');
+  if (modalTrigger && modalTrigger.isConnected) modalTrigger.focus();
+}
 document.querySelectorAll('[data-close]').forEach(b =>
   b.onclick = () => closeModal(b.dataset.close));
+document.addEventListener('keydown', event => {
+  const mask = document.querySelector('.modal-mask.open');
+  if (event.key === 'Escape') {
+    if (mask) closeModal(mask.id);
+  } else if (event.key === 'Tab' && mask) {
+    const controls = [...mask.querySelectorAll('button, input, select, textarea, a[href]')]
+      .filter(element => !element.disabled && element.offsetParent !== null);
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+});
 
 // ---- 健康检查与身份判定（AC1：仅 admin 有控制台）----
 async function checkHealth() {
@@ -494,7 +543,7 @@ async function checkHealth() {
     }
     me = h.identity || { username: 'anonymous', role: 'admin', department: '' };
     $('loginMask').classList.remove('open');
-    $('userBadge').textContent = '👤 ' + me.username;
+    $('userBadge').textContent = me.username;
     if (me.role === 'user') {                   // user → 拒绝视图（口径不变）
       $('mainView').style.display = 'none';
       $('roleBadge').style.display = 'none';
@@ -576,8 +625,10 @@ async function loadUsers() {
 }
 // ---- 页签切换（懒加载与 view-audit 同构：首次进入才拉数据）----
 function switchTab(view) {
-  document.querySelectorAll('.ctab').forEach(x =>
-    x.classList.toggle('active', x.dataset.view === view));
+  document.querySelectorAll('.ctab').forEach(x => {
+    x.classList.toggle('active', x.dataset.view === view);
+    x.setAttribute('aria-pressed', String(x.dataset.view === view));
+  });
   document.querySelectorAll('.view').forEach(v =>
     v.classList.toggle('active', v.id === view));
   if (view === 'view-audit' && !$('auditRows').children.length) loadAudit();
@@ -585,6 +636,13 @@ function switchTab(view) {
   if (view === 'view-approvals' && !$('approvalRows').children.length) loadApprovals();
 }
 document.querySelectorAll('.ctab').forEach(t => t.onclick = () => switchTab(t.dataset.view));
+document.querySelectorAll('[role="button"]').forEach(element =>
+  element.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      element.click();
+    }
+  }));
 const AUDIT_PILL = {
   '登录成功': 'pill st-ok', '审批通过': 'pill st-ok',
   '登录失败': 'pill st-revoked', '吊销账号': 'pill st-revoked', '审批驳回': 'pill st-revoked',

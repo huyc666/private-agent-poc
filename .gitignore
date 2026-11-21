@@ -24,3 +24,5 @@ custom_tools_personal/
 .coverage
 # 运行/调试截图（前端验证临时产物，勿入库）
 .screenshots/
+# 独立运行数据库与本地验证密钥
+.runtime/
