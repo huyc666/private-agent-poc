@@ -519,7 +519,12 @@ function addUsageNote(usage) {
 let serverOnline = false;
 
 // ---- 空会话欢迎卡（非技术用户引导：示例问题点击即发送）----
-const SAMPLES = ['现在几点了？', '帮我写一段项目周报', '北京今天天气怎么样？', '调研对比北京、上海、成都的天气，给出出行建议'];
+const SAMPLES = [
+  '查一下公司知识库里的请假规定，回答并附上原文出处',
+  '用 research-demo 流程，让多个角色协同调研企业知识库的常见方案，并汇总分歧',
+  '运行 weekly-report 流程，week 填写 2026-W47，汇总我上传的材料并生成周报',
+  '读取我上传的业务说明文档，生成一份可复用的流程草稿，先不要启用'
+];
 function renderWelcome() {
   if (chat.children.length) return;
   const w = document.createElement('div');
@@ -528,7 +533,7 @@ function renderWelcome() {
   eyebrow.className = 'w-eyebrow'; eyebrow.textContent = 'YOUR PRIVATE WORKSPACE';
   const h = document.createElement('h3'); h.textContent = '今天想一起完成什么？';
   const p = document.createElement('p');
-  p.textContent = '从一个问题、一份材料或一个想法开始。我可以帮你查找资料、分析文档，也能把想法整理成清晰的行动。';
+  p.textContent = '从企业知识库查证，到多角色协同完成调研与写作。长对话会自动整理工作摘要，保留近期细节与完整记录，让持续任务不必反复交代背景。你还可以把重复工作沉淀为流程，或通过技能和工具扩展助手的能力。';
   const grid = document.createElement('div');
   grid.className = 'w-grid';
   for (const s of SAMPLES) {
@@ -538,7 +543,7 @@ function renderWelcome() {
     grid.appendChild(b);
   }
   const note = document.createElement('div');
-  note.className = 'w-note'; note.textContent = '打开「记录」，继续之前的会话，或查看待确认操作与用量。';
+  note.className = 'w-note'; note.textContent = '数据和文档留在你的私有环境中；使用、审批、管理按角色分工，文件按账号隔离，发起人不能自行批准敏感操作。打开「记录」可继续会话、处理审批或查看用量。';
   w.append(eyebrow, h, p, grid, note);
   chat.appendChild(w);
 }
