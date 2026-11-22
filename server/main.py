@@ -113,7 +113,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await agent.close_checkpointer()  # 关闭 PostgresSaver 连接（若启用）
 
 
-app = FastAPI(title="Private Agent POC", lifespan=lifespan)
+app = FastAPI(title="Private Agent Platform", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -364,5 +364,5 @@ if __name__ == "__main__":
     import uvicorn
 
     host, port = _parse_host_port()
-    logger.info(f"Private Agent POC 启动于 http://localhost:{port}  (模式: {'mock' if config.MOCK_LLM else 'live'})")
+    logger.info(f"Private Agent Platform 启动于 http://localhost:{port}  (模式: {'mock' if config.MOCK_LLM else 'live'})")
     uvicorn.run(app, host=host, port=port)
