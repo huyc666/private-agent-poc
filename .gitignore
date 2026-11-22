@@ -27,3 +27,9 @@ custom_tools_personal/
 # 独立运行数据库与本地验证密钥
 .runtime/
 cookies.txt
+# 首页截图脚本与调试临时产物（登录凭据/会话 Cookie 可能入内，勿入库）
+tools/_screenshot_home.py
+tools/_dbg_login.py
+tools/_login.json
+tools/_ck.txt
+tools/_home_*.png

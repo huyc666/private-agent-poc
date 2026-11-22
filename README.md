@@ -15,6 +15,12 @@
 
 技术栈（供研发参考）：vLLM + LangGraph（Agent 循环与多角色编排）+ MCP（工具协议）+ FastAPI（SSE 流式）+ SQLite/PostgreSQL 双后端 + 代码沙箱 + Langfuse 观测。
 
+## 界面预览
+
+| PC 端首页 | 移动端首页 |
+| --- | --- |
+| ![PC 端首页](docs/images/home-pc.png) | ![移动端首页](docs/images/home-mobile.png) |
+
 ## 版本记录
 
 - **v0.20.0**：用户记忆沉淀与召回（PLAN 8.1，spec：docs/specs/8.1-user-memory.md）——对话中显式「记住…」指令写入用户记忆（偏好/事实/项目/上下文四类），按用户隔离存储（SQLite/Postgres 双后端）；新会话开场自动召回启用记忆注入系统提示（注入量控制 ≤2000 tokens，可经 `MEMORY_MAX_TOKENS` 调整）；控制台新增「记忆管理」页签，支持查看/编辑/删除，普通用户仅见本人、管理员见全量；记忆支持过期机制（默认 90 天）与启用/禁用开关；创建/编辑/删除操作全部记入审计（不含内容明文）。新增 8 个验收用例（AC1-AC8），全量 1231 个用例通过（28 skipped 语义不变）。
