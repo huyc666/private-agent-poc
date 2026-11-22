@@ -25,7 +25,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from server import (agent, approval, audit, auth, config, custom_tools,
-                    packs, telemetry)
+                    memories, packs, telemetry)
 from server.webdeps import _bearer_token
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     "（pending→expired，approved 未执行→abandoned）")
     auth.bootstrap_admin()  # 认证模式首启：创建引导 admin 并打印一次性 Key
     audit.init()  # PLAN 6.3：审计表建表 + 存量容量裁剪（失败不阻断启动）
+    memories.cleanup_expired()  # PLAN 8.3：启动清理过期记忆（失败不阻断启动）
     packs.load_disabled_packs()  # PLAN 3.2 Q2：恢复禁用名单（须在 Agent 装配前）
     # 多用户文件分域（v0.17.7 评审）：旧版单目录 uploads/outputs 的存量文件
     # 迁入 shared/ 域，保证升级后旧文件仍可按 shared 寻址（不迁则分域后找不到）

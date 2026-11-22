@@ -312,3 +312,21 @@ async def delete_workspace_file(path: str) -> str:
     return approval.require_approval(
         "delete_workspace_file", {"path": path}, "删除",
         lambda: do_delete(path))
+
+
+def save_memory(content: str, category: str = "fact") -> str:
+    """保存用户偏好、项目事实等长期记忆，供后续会话召回使用。
+
+    适用场景：用户明确说「记住…」「以后…」等表达长期偏好或事实的指令。
+    category 可选：preference（偏好）/ fact（事实）/ project（项目）/ context（上下文）。
+    记忆按用户隔离，其他用户不可见；可在控制台「记忆管理」页签查看/编辑/删除。"""
+    from . import memories, usage
+    identity = usage.current_identity.get()
+    if identity is None:
+        return "记忆写入失败：无法识别当前用户身份"
+    try:
+        memory_id = memories.create(identity.username, content, category)
+        return f"已记住（ID: {memory_id}）"
+    except Exception as e:
+        logger.warning(f"[save_memory] 写入失败（{type(e).__name__}）")
+        return "记忆写入失败，不影响本次对话"

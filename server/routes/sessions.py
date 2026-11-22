@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from server import agent, approval, session_lock, sessions
+from server import agent, approval, audit, notifications, session_lock, sessions
 from server.webdeps import _acl_identity
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,18 @@ async def session_history(request: Request, session_id: str, limit: int = 0) -> 
             return JSONResponse({"error": "not found"}, status_code=404)
         if not _can_access_session(ident, session_id):
             return JSONResponse({"error": "forbidden"}, status_code=403)
+        # PLAN 8.4：admin 查看他人会话时创建通知 + 审计
+        if ident["role"] == "admin":
+            meta = sessions.get_meta(session_id)
+            if meta and meta["owner_id"] not in (ident["username"], "anonymous"):
+                notifications.create(
+                    session_id=session_id,
+                    owner_id=meta["owner_id"],
+                    admin_id=ident["username"],
+                    action="view"
+                )
+                audit.log(ident["username"], session_id,
+                          "admin_view_session", target=meta["owner_id"])
     return {"session_id": session_id, "messages": sessions.history(session_id, limit)}
 
 
@@ -111,3 +123,28 @@ async def session_delete(request: Request, session_id: str) -> Any:
         if not _can_access_session(ident, session_id):
             return JSONResponse({"error": "forbidden"}, status_code=403)
     return {"deleted": await _purge_session(session_id)}
+
+
+@router.get("/api/sessions/{session_id}/notifications")
+async def get_session_notifications(request: Request, session_id: str):
+    """查询会话未读通知（PLAN 8.4，仅归属用户可见）。"""
+    ident = _acl_identity(request)
+    if not ident:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    meta = sessions.get_meta(session_id)
+    if not meta or meta["owner_id"] != ident["username"]:
+        return JSONResponse({"error": "仅会话归属用户可见"}, status_code=403)
+    return notifications.list_unread(session_id, ident["username"])
+
+
+@router.post("/api/sessions/{session_id}/notifications/{notification_id}/read")
+async def mark_notification_read(request: Request, session_id: str,
+                                  notification_id: int):
+    """标记通知已读（PLAN 8.4）。"""
+    ident = _acl_identity(request)
+    if not ident:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    ok = notifications.mark_read(notification_id, ident["username"])
+    if not ok:
+        return JSONResponse({"error": "通知不存在或无权限"}, status_code=404)
+    return {"ok": True}

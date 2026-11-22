@@ -1,10 +1,16 @@
-# Private Agent POC — 私有化 Agent 开发运行框架
+# Private Agent Platform — 私有化 Agent 开发运行框架
 
-**版本：v0.19.0**（2026-11-21）
+**版本：v0.22.0**（2026-11-22）
+
+> 项目代号：PAP（Private Agent Platform）。中期产品化命名候选：FieldMind。
 
 最小可运行的私有化 Agent 框架：**vLLM（Qwen 27B）+ LangGraph（Agent 循环 + 多 Agent 编排）+ MCP（工具协议）+ Skills（技能系统）+ 对话式自定义工具 + 人工审批流 + 代码沙箱 + 知识库问答（RAG，五类文档入库 + 混合检索 + 出处标注与点击定位 + 部门专属库隔离与跨领域知识库共享）+ API 认证与多用户（部门/角色/专属域 + 管理控制台）+ 用量计量（token / 金额 / 健康度 / 部门报表）+ Langfuse 观测 + FastAPI（SSE 流式接口）+ 离线聊天前端**。
 
 ## 版本记录
+
+- **v0.20.0**：用户记忆沉淀与召回（PLAN 8.1，spec：docs/specs/8.1-user-memory.md）——对话中显式「记住…」指令写入用户记忆（偏好/事实/项目/上下文四类），按用户隔离存储（SQLite/Postgres 双后端）；新会话开场自动召回启用记忆注入系统提示（注入量控制 ≤2000 tokens，可经 `MEMORY_MAX_TOKENS` 调整）；控制台新增「记忆管理」页签，支持查看/编辑/删除，普通用户仅见本人、管理员见全量；记忆支持过期机制（默认 90 天）与启用/禁用开关；创建/编辑/删除操作全部记入审计（不含内容明文）。新增 8 个验收用例（AC1-AC8），全量 1231 个用例通过（28 skipped 语义不变）。
+- **v0.21.0**：记忆智能管理（PLAN 8.3，spec：docs/specs/8.3-memory-smart-management.md）——相似记忆自动检测（中文滑动窗口分词+英文空格切分，关键词重叠判定）；合并记忆 API（POST /api/memories/merge，保留指定 ID、删除其余，审计记录 memory_merge）；过期记忆启动自动清理（expires_at < now 物理删除，审计记录 memory_expire）；记忆注入按分类加权排序（preference > project > fact > context）；控制台「记忆管理」页签显示合并建议（相似记忆对列表，一键合并）。新增 5 个验收用例（AC1-AC5），全量 1237 个用例通过（28 skipped 语义不变）。
+- **v0.22.0**：admin 跨会话操作通知（PLAN 8.4，spec：docs/specs/8.4-admin-session-notification.md）——隐私合规增强：admin 查看/介入他人会话时，系统向归属用户发送会话内通知（顶部黄色横幅「管理员 {username} 于 {timestamp} 查看了此会话」）；通知持久化到 session_notifications 表（SQLite/Postgres 双后端），用户可标记已读（不可删除）；查询/标记端点（GET /api/sessions/{id}/notifications、POST /api/sessions/{id}/notifications/{nid}/read）仅归属用户可见；审计日志记录 admin_view_session（复用 6.3 框架）。新增 5 个验收用例（AC1-AC5），全量 1242 个用例通过（28 skipped 语义不变）。
 
 - **v0.19.0**：run ↔ 业务对象归因（PLAN 6.7）——每次流程执行把 `workflow_instances.instance_id` 写入模型调用计量行的 `task_id`，手动与自动触发的同一次实例内多次模型调用、多个 run 都归到同一业务对象；用量接口在既有用户/会话/运行视图外新增按流程实例聚合的 `by_task` 视图，可回答「这件事花了多少 token 与金额」。历史记录与普通对话保持空 `task_id`，不参与实例聚合；实例留存失败时继续执行且不虚构归因；SQLite 老库与 PostgreSQL 6.4 schema 均幂等补列/索引。
 

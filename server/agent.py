@@ -14,6 +14,7 @@ Mock 模式：MOCK_LLM=true 时不依赖任何 GPU/模型，用于验证全链�
 import asyncio
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -144,12 +145,16 @@ def _dynamic_prompt(state: dict) -> list:
     """动态系统提示词（v0.17.9）：静态部分 + 按当前请求身份注入的领域包片段
     （PLAN 1.2 包级 RBAC：按角色过滤受限包的 prompt.md）+ 专属技能索引与
     专属自定义工具索引（v0.17.12）。
+    v0.20.0：用户记忆召回注入（PLAN 8.1）——新会话开场时按当前用户 ID
+    查询启用记忆，筛选相关条目注入系统提示；注入量控制（默认 ≤2000 tokens，
+    不挤压上下文窗口）。
     prompt callable 与 str prompt 同约定：state["messages"] 已是 pre_model_hook
     裁剪后的模型视野，返回 [SystemMessage] + messages。每轮模型调用执行一次，
     只扫描本人专属目录（通用索引已随图重建缓存，无重复扫描成本）。"""
     from langchain_core.messages import SystemMessage
 
     from . import auth
+    from . import memories
 
     system = getattr(STATE, "system_prompt_static", "") or (
         config.SYSTEM_PROMPT + skills.skill_index_prompt()
@@ -164,6 +169,25 @@ def _dynamic_prompt(state: dict) -> list:
     tool_extra = custom_tools.personal_index_prompt()
     if tool_extra:
         system += tool_extra
+    # 用户记忆召回注入（PLAN 8.1）
+    identity = usage.current_identity.get()
+    if identity is not None:
+        try:
+            max_tokens = int(os.environ.get("MEMORY_MAX_TOKENS", "2000"))
+            items = memories.get_active(identity.username, limit_tokens=max_tokens)
+            if items:
+                # PLAN 8.3：按分类加权排序（preference > project > fact > context）
+                CATEGORY_PRIORITY = {"preference": 0, "project": 1,
+                                     "fact": 2, "context": 3}
+                items.sort(key=lambda m: CATEGORY_PRIORITY.get(m["category"], 99))
+                memory_lines = [f"- [{item['category']}] {item['content']}"
+                                for item in items]
+                system += f"\n\n---\n\n用户记忆（{len(items)} 条）：\n" + "\n".join(memory_lines)
+                if len(items) < len(memories.list_all(identity.username, enabled=1)):
+                    total = len(memories.list_all(identity.username, enabled=1))
+                    system += f"\n（共 {total} 条，仅显示最近 {len(items)} 条）"
+        except Exception as e:
+            logger.warning(f"[agent] 记忆召回失败（{type(e).__name__}），不影响对话")
     msgs = state.get("messages") or []
     return [SystemMessage(content=system)] + list(msgs)
 

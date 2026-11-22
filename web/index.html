@@ -298,6 +298,85 @@
     #loginBox { width: calc(100% - 32px); padding: 22px; }
     #userMenu { right: 12px; }
   }
+
+  /* PLAN 8.4：管理员通知横幅样式 */
+  .admin-notification-banner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: linear-gradient(135deg, #fff9e6 0%, #fff3d6 100%);
+    border: 1px solid #ffd966;
+    border-left: 4px solid #f0b429;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 12px 0;
+    box-shadow: 0 2px 8px rgba(240, 180, 41, 0.15);
+    animation: slideDown 0.3s ease-out;
+    max-width: 600px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  @keyframes slideDown {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .notification-icon {
+    font-size: 20px;
+    flex-shrink: 0;
+    opacity: 0.8;
+  }
+  .notification-content {
+    flex: 1;
+    min-width: 0;
+  }
+  .notification-title {
+    font-weight: 600;
+    font-size: 13px;
+    color: #8a6d1a;
+    margin-bottom: 4px;
+  }
+  .notification-text {
+    font-size: 13px;
+    color: #6b5a1f;
+    line-height: 1.5;
+  }
+  .notification-text strong {
+    color: #4a3f14;
+    font-weight: 600;
+  }
+  .notification-count {
+    color: #a08752;
+    font-size: 12px;
+  }
+  .notification-close {
+    flex-shrink: 0;
+    background: rgba(240, 180, 41, 0.15);
+    border: none;
+    border-radius: 4px;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: #8a6d1a;
+    font-size: 14px;
+    transition: all 0.2s;
+  }
+  .notification-close:hover {
+    background: rgba(240, 180, 41, 0.3);
+    color: #6b5a1f;
+  }
+  @media (max-width: 640px) {
+    .admin-notification-banner {
+      margin-left: 12px;
+      margin-right: 12px;
+      padding: 10px 12px;
+    }
+    .notification-icon { font-size: 18px; }
+    .notification-title { font-size: 12px; }
+    .notification-text { font-size: 12px; }
+  }
 </style>
 </head>
 <body>
@@ -586,9 +665,9 @@ async function checkHealth() {
       if (!loginMask.dataset.switch) hideLogin();
       userId = h.identity.username + '（' + h.identity.role + '）';
       renderUserBadge();
-      // 控制台入口仅 admin 可见（体验层；服务端 /api/admin/* 另有 403 防线）
+      // 控制台入口：admin 全量管理；user 也有「记忆管理」页签（v0.20.0，PLAN 8.1）
       document.getElementById('consoleBtn').style.display =
-        h.identity.role === 'admin' ? '' : 'none';
+        (h.identity.role === 'admin' || h.identity.role === 'user') ? '' : 'none';
     }
     serverOnline = true;
     // 状态灯与模型信息合并为一个徽章（方案 B）：正常=绿点+模型名/演示模式
@@ -1324,7 +1403,59 @@ async function loadHistory() {
     for (const m of msgs) addMsg(m.role === 'user' ? 'user' : 'assistant', m.content, m.citations);
   } catch (e) { renderWelcome(); /* 历史恢复失败不影响正常使用 */ }
 }
-loadHistory();
+loadHistory().then(() => loadSessionNotifications());
+
+// PLAN 8.4：加载会话通知（admin 查看/介入提示）
+async function loadSessionNotifications() {
+  if (!sessionId) return;
+  try {
+    const r = await fetch(`/api/sessions/${sessionId}/notifications`, {
+      cache: 'no-store', headers: authHdr()
+    });
+    if (!r.ok) return;  // 403/404 忽略（非归属用户或无通知）
+    const data = await r.json();
+    if (!data.length) return;
+    const latest = data[0];
+    const banner = document.createElement('div');
+    banner.className = 'admin-notification-banner';
+    const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
+    banner.innerHTML = `
+      <div class="notification-icon">🔔</div>
+      <div class="notification-content">
+        <div class="notification-title">管理员操作提醒</div>
+        <div class="notification-text">
+          <strong>${esc(latest.admin_id)}</strong> 于
+          ${new Date(latest.created_at * 1000).toLocaleString('zh-CN', {
+            month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit'
+          })}
+          ${latest.action === 'view' ? '查看' : '介入'}了此会话
+          ${data.length > 1 ? `<span class="notification-count">（等 ${data.length} 条）</span>` : ''}
+        </div>
+      </div>
+      <button class="notification-close" onclick="markNotificationRead(${latest.id})" aria-label="关闭通知">
+        ✕
+      </button>
+    `;
+    // 插入到对话底部（输入框上方）
+    const composer = document.querySelector('#composer');
+    if (composer) {
+      composer.parentNode.insertBefore(banner, composer);
+    } else {
+      const chatBox = document.querySelector('#chat') || document.body;
+      chatBox.appendChild(banner);
+    }
+  } catch (e) { console.error('通知加载失败:', e); }
+}
+async function markNotificationRead(notifId) {
+  try {
+    const r = await fetch(`/api/sessions/${sessionId}/notifications/${notifId}/read`, {
+      method: 'POST', headers: authHdr()
+    });
+    if (r.ok) {
+      document.querySelectorAll('.admin-notification-banner').forEach(el => el.remove());
+    }
+  } catch (e) { console.error('标记已读失败:', e); }
+}
 
 // 页面加载时检查是否有遗留的待审批（如刷新前未决议），有则在对话区提醒去面板处理
 async function checkPendingApprovals() {
@@ -1379,7 +1510,7 @@ function switchSession(id) {
   else localStorage.removeItem('poc_session');
   chat.innerHTML = '';
   panel.classList.remove('open');
-  if (id) loadHistory();
+  if (id) loadHistory().then(() => loadSessionNotifications());
   else renderWelcome();
   input.focus();
 }

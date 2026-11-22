@@ -28,7 +28,14 @@
   header h1 .h1-text { color: var(--text); }
   .badge { font-size: 12px; padding: 3px 10px; border-radius: 999px;
     border: 1px solid var(--border); color: var(--dim); background: #fff; }
-  .badge.role-admin { color: var(--accent); border-color: var(--border); background: var(--accent-bg); }
+  .badge.role-admin, .badge.role-user, .badge.role-approver {
+    border-radius: 4px; font-weight: 600; letter-spacing: 0.5px; padding: 3px 8px 3px 6px; }
+  .badge.role-admin { color: #0d5c34; border-color: #9fd3b4; background: #eafaf0; }
+  .badge.role-user { color: #3b3fa8; border-color: #b9bde8; background: #eef0fb; }
+  .badge.role-approver { color: #8a4b12; border-color: #e3c39a; background: #fbf3e8; }
+  .badge.role-admin::before { content: "◆ "; font-size: 9px; }
+  .badge.role-user::before { content: "● "; font-size: 9px; }
+  .badge.role-approver::before { content: "▲ "; font-size: 9px; }
   .badge.online { color: var(--success); border-color: var(--success-border); background: var(--success-bg); }
   .badge.online::before { content: "● "; }
   .badge.offline { color: var(--danger); border-color: var(--danger-border); background: var(--danger-bg); animation: pulse 1.2s infinite; }
@@ -207,7 +214,8 @@
       <span class="ctab active" data-view="view-users" data-admin-only="1" tabindex="0" role="button" aria-label="用户与 Key 管理">用户与 Key 管理</span>
       <span class="ctab" data-view="view-audit" data-admin-only="1" tabindex="0" role="button" aria-label="审计日志">审计日志</span>
       <span class="ctab" data-view="view-packs" data-admin-only="1" tabindex="0" role="button" aria-label="包管理">包管理</span>
-      <span class="ctab" data-view="view-approvals" tabindex="0" role="button" aria-label="审批">审批</span>
+      <span class="ctab" data-view="view-approvals" data-admin-only="1" tabindex="0" role="button" aria-label="审批">审批</span>
+      <span class="ctab" data-view="view-memories" tabindex="0" role="button" aria-label="记忆管理">记忆管理</span>
     </div>
     <div class="view active" id="view-users">
     <div class="page-head">
@@ -331,6 +339,42 @@
       </div>
       <div class="foot-note">审批为全局池：任何审批人/管理员可决议任何待审批单；批准后对应会话立即继续执行，决策动作记入审计。</div>
     </div><!-- /view-approvals -->
+
+    <!-- 记忆管理视图（v0.20.0，PLAN 8.1） -->
+    <div class="view" id="view-memories">
+      <div class="audit-filters">
+        <div class="af">
+          <label>启用状态</label>
+          <select id="memFilterEnabled">
+            <option value="">全部</option>
+            <option value="1">启用</option>
+            <option value="0">禁用</option>
+          </select>
+        </div>
+        <div class="af">
+          <label>类别</label>
+          <select id="memFilterCategory">
+            <option value="">全部</option>
+            <option value="preference">偏好</option>
+            <option value="fact">事实</option>
+            <option value="project">项目</option>
+            <option value="context">上下文</option>
+          </select>
+        </div>
+        <button class="btn" onclick="loadMemories()">查询</button>
+        <button class="btn primary" onclick="showMemoryCreate()">新建记忆</button>
+      </div>
+      <div class="table-wrap" tabindex="0" aria-label="记忆列表，可横向滚动">
+        <table>
+          <thead>
+            <tr><th>ID</th><th>用户</th><th>类别</th><th>内容</th><th>更新时间</th><th>状态</th><th>操作</th></tr>
+          </thead>
+          <tbody id="memoryRows"></tbody>
+        </table>
+      </div>
+      <div id="mergeHints" style="margin-top:16px;"></div>
+      <div class="foot-note">记忆按用户隔离：普通用户仅见本人；管理员见全量。对话中可说「记住…」显式写入。</div>
+    </div><!-- /view-memories -->
   </div>
 
   <div id="denyBox">
@@ -544,26 +588,21 @@ async function checkHealth() {
     me = h.identity || { username: 'anonymous', role: 'admin', department: '' };
     $('loginMask').classList.remove('open');
     $('userBadge').textContent = me.username;
-    if (me.role === 'user') {                   // user → 拒绝视图（口径不变）
-      $('mainView').style.display = 'none';
-      $('roleBadge').style.display = 'none';
-      $('denyBox').style.display = 'block';
-      $('denyMsg').textContent = `当前身份「${me.username}（${me.role}）」无权访问管理控制台，请联系管理员。`;
-      return;
-    }
-    // Q1 按角色渲染：admin 全部四页签；approver 仅「审批」页签
+    // Q1 按角色渲染：admin 全部页签；approver 仅「审批」；user 仅「记忆管理」（v0.20.0）
     const isAdmin = me.role === 'admin';
+    const isUser = me.role === 'user';
     $('denyBox').style.display = 'none';
-    $('roleBadge').className = isAdmin ? 'badge role-admin' : 'badge';
-    $('roleBadge').textContent = isAdmin ? '管理员' : '审批人';
+    $('roleBadge').className = isAdmin ? 'badge role-admin' : (isUser ? 'badge role-user' : 'badge role-approver');
+    $('roleBadge').textContent = isAdmin ? '管理员' : (isUser ? '用户' : '审批人');
     $('roleBadge').style.display = '';
     $('mainView').style.display = '';
     document.querySelectorAll('.ctab').forEach(t =>
-      t.style.display = (isAdmin || !t.dataset.adminOnly) ? '' : 'none');
+      t.style.display = (isAdmin || !t.dataset.adminOnly || (isUser && t.dataset.view === 'view-memories')) ? '' : 'none');
     const identityKey = me.username + ':' + me.role;   // 身份或角色变化都重建视图
     if (lastLoadedUser !== identityKey) {
       lastLoadedUser = identityKey;
       if (isAdmin) { switchTab('view-users'); loadUsers(); }
+      else if (isUser) { switchTab('view-memories'); loadMemories(); }
       else { switchTab('view-approvals'); loadApprovals(); }
     }
   } catch (e) {
@@ -634,6 +673,7 @@ function switchTab(view) {
   if (view === 'view-audit' && !$('auditRows').children.length) loadAudit();
   if (view === 'view-packs' && !$('packRows').children.length) loadPacks();
   if (view === 'view-approvals' && !$('approvalRows').children.length) loadApprovals();
+  if (view === 'view-memories' && !$('memoryRows').children.length) loadMemories();
 }
 document.querySelectorAll('.ctab').forEach(t => t.onclick = () => switchTab(t.dataset.view));
 document.querySelectorAll('[role="button"]').forEach(element =>
@@ -1008,6 +1048,133 @@ $('approvalRows').addEventListener('click', async e => {
   }
   toast(btn.dataset.approve === '1' ? '已批准，对应会话将继续执行' : '已拒绝，操作不会执行');
   loadApprovals();   // 决议后状态即时更新（AC6）
+});
+
+/* ================= 记忆管理（v0.20.0，PLAN 8.1） ================= */
+async function loadMemories() {
+  const enabled = $('memFilterEnabled').value;
+  const category = $('memFilterCategory').value;
+  let url = '/api/memories?';
+  if (enabled) url += `enabled=${enabled}&`;
+  if (category) url += `category=${category}&`;
+  const { ok, status, data } = await api(url.replace(/&$/, ''));
+  if (status === 401) { apiKey = ''; showLogin('凭据无效，请重新登录'); return; }
+  if (!ok) { toast('加载记忆列表失败'); return; }
+  renderMemories(data || []);
+}
+function renderMemories(rows) {
+  const tb = $('memoryRows');
+  tb.innerHTML = '';
+  for (const r of rows) {
+    const statusPill = r.enabled
+      ? '<span class="pill ok">启用</span>'
+      : '<span class="pill">禁用</span>';
+    const ops = `<button class="btn sm" data-mem-edit="${r.id}">编辑</button>` +
+                `<button class="btn sm danger-text" data-mem-del="${r.id}">删除</button>`;
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td>${r.id}</td>` +
+      `<td>${esc(r.user_id)}</td>` +
+      `<td>${esc(r.category)}</td>` +
+      `<td class="detail-cell" title="${esc(r.content)}">${esc(r.content.substring(0, 50))}${r.content.length > 50 ? '…' : ''}</td>` +
+      `<td class="nowrap">${fmtTime(r.updated)}</td>` +
+      `<td>${statusPill}</td>` +
+      `<td><div class="ops">${ops}</div></td>`;
+    tb.appendChild(tr);
+  }
+  renderMergeHints(rows);
+}
+function renderMergeHints(rows) {
+  // PLAN 8.3：检测相似记忆对（同用户同分类，关键词重叠）
+  const pairs = [];
+  const seen = new Set();
+  for (let i = 0; i < rows.length; i++) {
+    for (let j = i + 1; j < rows.length; j++) {
+      const a = rows[i], b = rows[j];
+      if (a.user_id !== b.user_id || a.category !== b.category) continue;
+      if (hasKeywordOverlap(a.content, b.content)) {
+        const key = `${a.id}-${b.id}`;
+        if (!seen.has(key)) {
+          pairs.push({ keep: b, drop: a });
+          seen.add(key);
+        }
+      }
+    }
+  }
+  const box = $('mergeHints');
+  if (!pairs.length) { box.innerHTML = ''; return; }
+  box.innerHTML = '<h3>💡 合并建议（' + pairs.length + ' 对）</h3>' +
+    pairs.map(p =>
+      `<div style="padding:8px;margin:6px 0;border:1px solid #d0d7de;border-radius:4px;background:#f6f8fa;">` +
+      `<strong>建议合并：</strong>${esc(p.keep.content.substring(0, 40))}… ` +
+      `<span style="color:#57606a;">（替换 ${esc(p.drop.content.substring(0, 40))}…）</span>` +
+      `<button class="btn sm primary" style="margin-left:8px;" ` +
+      `onclick="mergeMemory(${p.keep.id}, [${p.drop.id}])">合并</button>` +
+      `</div>`
+    ).join('');
+}
+function hasKeywordOverlap(a, b) {
+  // 轻量关键词重叠检测（中文滑动窗口 2-4 字 + 英文单词）
+  const extractKws = s => {
+    const kws = new Set();
+    const chineseMatches = s.match(/[一-龥]+/g) || [];
+    for (const text of chineseMatches) {
+      for (let i = 0; i < text.length; i++) {
+        for (const len of [2, 3, 4]) {
+          if (i + len <= text.length) kws.add(text.substr(i, len));
+        }
+      }
+    }
+    const enMatches = s.toLowerCase().match(/[a-z0-9]+/g) || [];
+    for (const w of enMatches) if (w.length >= 2) kws.add(w);
+    return kws;
+  };
+  const kwsA = extractKws(a), kwsB = extractKws(b);
+  for (const k of kwsA) if (kwsB.has(k)) return true;
+  return false;
+}
+async function mergeMemory(keepId, dropIds) {
+  if (!confirm(`确认合并？保留记忆 ${keepId}，删除 ${dropIds.length} 条。`)) return;
+  const { ok } = await api('/api/memories/merge', {
+    method: 'POST',
+    body: JSON.stringify({ keep_id: keepId, merge_from_ids: dropIds })
+  });
+  if (ok) { toast('已合并'); loadMemories(); }
+  else toast('合并失败');
+}
+function showMemoryCreate() {
+  const content = prompt('输入记忆内容（如「我喜欢中文回复」）：');
+  if (!content) return;
+  const category = prompt('输入类别（preference/fact/project/context，默认 fact）：') || 'fact';
+  api('/api/memories', {
+    method: 'POST',
+    body: JSON.stringify({ content, category })
+  }).then(({ ok }) => {
+    if (ok) { toast('已创建'); loadMemories(); }
+    else toast('创建失败');
+  });
+}
+$('memoryRows').addEventListener('click', async e => {
+  const editBtn = e.target.closest('button[data-mem-edit]');
+  const delBtn = e.target.closest('button[data-mem-del]');
+  if (editBtn) {
+    const id = editBtn.dataset.memEdit;
+    const newContent = prompt('编辑记忆内容：');
+    if (newContent) {
+      const { ok } = await api(`/api/memories/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ content: newContent })
+      });
+      if (ok) { toast('已更新'); loadMemories(); }
+      else toast('更新失败');
+    }
+  } else if (delBtn) {
+    if (!confirm('确认删除该记忆？')) return;
+    const id = delBtn.dataset.memDel;
+    const { ok } = await api(`/api/memories/${id}`, { method: 'DELETE' });
+    if (ok) { toast('已删除'); loadMemories(); }
+    else toast('删除失败');
+  }
 });
 
 checkHealth();
