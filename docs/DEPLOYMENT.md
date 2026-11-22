@@ -401,6 +401,8 @@ agent-poc/
 │   ├── skills.py          # Skills 注册中心（渐进式披露，多源合并）
 │   ├── weather.py         # 天气多数据源降级链（MCP 示例服务器共用）
 │   ├── approval.py        # 审批记录与等待
+│   ├── memories.py        # 用户记忆存储与智能管理（相似检测/合并/过期清理，v0.20.0）
+│   ├── notifications.py   # 管理操作会话通知（v0.22.0）
 │   ├── telemetry.py       # Langfuse 观测（降级安全）
 │   └── config.py          # 全部配置走环境变量
 ├── custom_tools/      # 对话式创建的自定义工具（.py 即工具，免重启；含示例 dice_roll）

@@ -122,7 +122,7 @@ ENABLED_PACKS=                   # 留空=全部；生产可显式白名单
 
 ## 六、上线后运维要点
 
-- **备份**：`data/` 目录（state.db 会话/审批/审计、usage.db 用量计量含金额/健康度）、PostgreSQL 数据卷、知识库索引（`kb/` 源文档 + 各库索引，重建即恢复）
+- **备份**：`data/` 目录（state.db 会话/审批/审计/用户记忆/会话通知、usage.db 用量计量含金额/健康度）、PostgreSQL 数据卷、知识库索引（`kb/` 源文档 + 各库索引，重建即恢复）
 - **密钥轮换**：更换 `PACK_SIGNING_KEY` 后必须 `tools/sign_pack.py --all` 重签全部包
 - **新增包流程**：代码审计 → 放入 `packs/` → `tools/sign_pack.py <包名>` → 对话中启用（挂审批）
 - **多副本扩展**（用户量增长时）：设置 `STATE_BACKEND=postgres`、

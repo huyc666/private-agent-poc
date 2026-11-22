@@ -26,3 +26,4 @@ custom_tools_personal/
 .screenshots/
 # 独立运行数据库与本地验证密钥
 .runtime/
+cookies.txt
