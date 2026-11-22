@@ -16,8 +16,8 @@ import logging
 from . import approval, custom_tools, packs, skills
 from .state import STATE
 from .tools_builtin import (delete_workspace_file, list_uploaded_docs,
-                            read_text_file, run_python_code, save_memory,
-                            save_output_file)
+                            merge_memory, read_text_file, run_python_code,
+                            save_memory, save_output_file)
 
 logger = logging.getLogger(__name__)
 
@@ -480,6 +480,7 @@ def list_trigger_attempts(schedule_id: str = "", limit: int = 20) -> str:
 
 BUILTIN_TOOLS = [read_text_file, list_uploaded_docs, save_output_file,
                  run_python_code, delete_workspace_file, save_memory,
+                 merge_memory,
                  list_skills_tool, load_skill, create_skill,
                  list_custom_tools, create_custom_tool, delete_custom_tool,
                  run_custom_tool,
@@ -512,6 +513,9 @@ def builtin_langchain_tools() -> list:
         StructuredTool.from_function(
             func=save_memory, name="save_memory",
             description=save_memory.__doc__),
+        StructuredTool.from_function(
+            func=merge_memory, name="merge_memory",
+            description=merge_memory.__doc__),
         StructuredTool.from_function(
             func=run_python_code, name="run_python_code",
             description=run_python_code.__doc__),

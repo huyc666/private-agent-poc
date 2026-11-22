@@ -1084,23 +1084,14 @@ function renderMemories(rows) {
   }
   renderMergeHints(rows);
 }
-function renderMergeHints(rows) {
-  // PLAN 8.3：检测相似记忆对（同用户同分类，关键词重叠）
-  const pairs = [];
-  const seen = new Set();
-  for (let i = 0; i < rows.length; i++) {
-    for (let j = i + 1; j < rows.length; j++) {
-      const a = rows[i], b = rows[j];
-      if (a.user_id !== b.user_id || a.category !== b.category) continue;
-      if (hasKeywordOverlap(a.content, b.content)) {
-        const key = `${a.id}-${b.id}`;
-        if (!seen.has(key)) {
-          pairs.push({ keep: b, drop: a });
-          seen.add(key);
-        }
-      }
-    }
-  }
+async function renderMergeHints(rows) {
+  // PLAN 8.5：合并建议改走服务端两级判重（关键词预过滤 → LLM 裁决），
+  // 仅展示 LLM 拿不准（uncertain）的对；确定重复的已在写入时自动合并。
+  let pairs = [];
+  try {
+    const resp = await api('/api/memories/similar');
+    if (resp.ok && Array.isArray(resp.data)) pairs = resp.data;
+  } catch (e) { console.warn('合并建议加载失败', e); }
   const box = $('mergeHints');
   if (!pairs.length) { box.innerHTML = ''; return; }
   box.innerHTML = '<h3>💡 合并建议（' + pairs.length + ' 对）</h3>' +
@@ -1112,26 +1103,6 @@ function renderMergeHints(rows) {
       `onclick="mergeMemory(${p.keep.id}, [${p.drop.id}])">合并</button>` +
       `</div>`
     ).join('');
-}
-function hasKeywordOverlap(a, b) {
-  // 轻量关键词重叠检测（中文滑动窗口 2-4 字 + 英文单词）
-  const extractKws = s => {
-    const kws = new Set();
-    const chineseMatches = s.match(/[一-龥]+/g) || [];
-    for (const text of chineseMatches) {
-      for (let i = 0; i < text.length; i++) {
-        for (const len of [2, 3, 4]) {
-          if (i + len <= text.length) kws.add(text.substr(i, len));
-        }
-      }
-    }
-    const enMatches = s.toLowerCase().match(/[a-z0-9]+/g) || [];
-    for (const w of enMatches) if (w.length >= 2) kws.add(w);
-    return kws;
-  };
-  const kwsA = extractKws(a), kwsB = extractKws(b);
-  for (const k of kwsA) if (kwsB.has(k)) return true;
-  return false;
 }
 async function mergeMemory(keepId, dropIds) {
   if (!confirm(`确认合并？保留记忆 ${keepId}，删除 ${dropIds.length} 条。`)) return;

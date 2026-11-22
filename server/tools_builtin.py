@@ -326,7 +326,59 @@ def save_memory(content: str, category: str = "fact") -> str:
         return "记忆写入失败：无法识别当前用户身份"
     try:
         memory_id = memories.create(identity.username, content, category)
-        return f"已记住（ID: {memory_id}）"
+        # PLAN 8.5：写入后两级判重（duplicate 自动合并 / uncertain 提示用户判断）
+        try:
+            similar = memories.find_similar_llm(
+                identity.username, content, category, exclude_id=memory_id)
+        except Exception as e:
+            logger.warning(f"[save_memory] 判重失败（{type(e).__name__}），跳过")
+            similar = {"duplicates": [], "uncertain": []}
+        msg = f"已记住（ID: {memory_id}）"
+        if similar["duplicates"]:
+            old_ids = [m["id"] for m in similar["duplicates"]]
+            memories.merge(memory_id, old_ids, identity.username)
+            from . import audit
+            audit.log("system", "", "memory_merge",
+                      target=str(memory_id),
+                      detail=f"merged_from={','.join(str(i) for i in old_ids)}")
+            msg += f"。检测到与已有记忆（ID: {', '.join(str(i) for i in old_ids)}）语义重复，已自动合并"
+        elif similar["uncertain"]:
+            hints = "；".join(
+                f"ID {m['id']}「{m['content'][:30]}」" for m in similar["uncertain"])
+            msg += (f"。检测到与已有记忆可能重复：{hints}。"
+                    f"如需合并请回复「合并」（可调用 merge_memory 工具，"
+                    f"keep_id={memory_id}）")
+        return msg
     except Exception as e:
         logger.warning(f"[save_memory] 写入失败（{type(e).__name__}）")
         return "记忆写入失败，不影响本次对话"
+
+
+def merge_memory(keep_id: int, merge_from_ids: list[int]) -> str:
+    """合并当前用户的重复记忆：保留 keep_id 条目，删除 merge_from_ids 条目。
+
+    适用场景：保存记忆时系统提示「与已有记忆可能重复」，用户确认合并后调用。
+    仅能操作当前用户本人的记忆；操作记入审计。"""
+    from . import memories, usage
+    identity = usage.current_identity.get()
+    if identity is None:
+        return "合并失败：无法识别当前用户身份"
+    try:
+        own = memories.list_all(identity.username)
+        own_ids = {m["id"] for m in own}
+        if keep_id not in own_ids:
+            return f"合并失败：记忆 {keep_id} 不存在或无权操作"
+        for mid in merge_from_ids:
+            if mid not in own_ids:
+                return f"合并失败：记忆 {mid} 不存在或无权操作"
+        ok = memories.merge(keep_id, merge_from_ids, identity.username)
+        if not ok:
+            return "合并失败，请稍后重试"
+        from . import audit
+        audit.log(identity.username, "", "memory_merge",
+                  target=str(keep_id),
+                  detail=f"merged_from={','.join(str(i) for i in merge_from_ids)}")
+        return f"已合并：保留记忆 {keep_id}，删除 {len(merge_from_ids)} 条重复记忆"
+    except Exception as e:
+        logger.warning(f"[merge_memory] 合并失败（{type(e).__name__}）")
+        return "合并失败，请稍后重试"

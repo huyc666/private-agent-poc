@@ -127,3 +127,18 @@ async def merge_memories(request: Request, body: dict):
               target=str(keep_id),
               detail=f"merged_from={','.join(str(i) for i in merge_from_ids)}")
     return {"ok": True}
+
+
+@router.get("/similar")
+async def similar_memories(request: Request):
+    """合并建议（PLAN 8.5）：返回 LLM 裁决为 uncertain 的相似记忆对。
+    user 只见本人；admin 见全量。"""
+    current = _current_user(request)
+    role = request.state.user["role"]
+    user_id = current if role == "user" else None
+    pairs = memories.find_similar_pairs_llm(user_id)
+    if role == "user":
+        pairs = [p for p in pairs
+                 if p["keep"]["user_id"] == current
+                 and p["drop"]["user_id"] == current]
+    return pairs

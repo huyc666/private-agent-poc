@@ -308,3 +308,11 @@ KB_QA_PROMPT = (
     "- 与用户交流时引用知识库条文使用【来源：文档名 · 章节】行提及，"
     "不要自行构造链接或路径。"
 )
+
+# ============ PLAN 8.5：记忆 LLM 判重 ============
+# 判重模型：默认复用主模型，可配更便宜的小模型
+MEMORY_DEDUP_MODEL = os.environ.get("MEMORY_DEDUP_MODEL", MODEL_NAME)
+# 单次检测候选对上限（超出截断，控制成本）
+MEMORY_LLM_DEDUP_MAX_PAIRS = int(os.environ.get("MEMORY_LLM_DEDUP_MAX_PAIRS", "10"))
+# 单次判定超时（秒），超时按 uncertain 处理
+MEMORY_DEDUP_TIMEOUT = float(os.environ.get("MEMORY_DEDUP_TIMEOUT", "10"))

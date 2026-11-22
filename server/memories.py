@@ -343,3 +343,106 @@ def merge(keep_id: int, merge_from_ids: list[int], user_id: str) -> bool:
             return True
         finally:
             conn.close()
+
+
+# ============ PLAN 8.5：记忆 LLM 判重 ============
+
+_JUDGE_PROMPT = """你是记忆判重助手。判断下面两条用户记忆的关系，只输出 JSON。
+
+记忆 A：{a}
+记忆 B：{b}
+
+判定规则：
+- duplicate：两条记忆语义重复（同一事实/偏好的不同表述，含缩写、换述）。
+  例：「项目数据库是 PostgreSQL」与「项目用 PG」→ duplicate
+- distinct：两条记忆语义不同或相反。
+  例：「我喜欢中文」与「我讨厌中文」→ distinct
+- uncertain：无法确定是否重复（表述含糊、需要更多上下文）。
+
+只输出一行 JSON，不要其他内容：
+{{"verdict": "duplicate" | "uncertain" | "distinct"}}"""
+
+
+def llm_judge_pair(content_a: str, content_b: str) -> str:
+    """LLM 语义判重：返回 "duplicate" / "uncertain" / "distinct"。
+    调用失败（超时/解析失败/未配置）按 "uncertain" 处理（fail-safe，
+    不确定时交人判断，绝不自动合并），仅打 WARNING 日志。"""
+    try:
+        from langchain_openai import ChatOpenAI
+        llm = ChatOpenAI(
+            model=config.MEMORY_DEDUP_MODEL,
+            base_url=config.LLM_BASE_URL,
+            api_key=config.LLM_API_KEY,
+            temperature=0,
+            timeout=config.MEMORY_DEDUP_TIMEOUT,
+            max_retries=0,
+        )
+        resp = llm.invoke(_JUDGE_PROMPT.format(a=content_a, b=content_b))
+        text = resp.content if hasattr(resp, "content") else str(resp)
+        import json as _json
+        import re as _re
+        match = _re.search(r"\{.*\}", text, _re.DOTALL)
+        verdict = _json.loads(match.group()).get("verdict", "") if match else ""
+        if verdict in ("duplicate", "uncertain", "distinct"):
+            return verdict
+        logger.warning(f"[memories] LLM 判重输出无法识别：{text[:100]!r}，按 uncertain 处理")
+        return "uncertain"
+    except Exception as e:
+        logger.warning(f"[memories] LLM 判重失败（{type(e).__name__}），按 uncertain 处理")
+        return "uncertain"
+
+
+def find_similar_llm(user_id: str, content: str, category: str,
+                     exclude_id: int | None = None) -> dict:
+    """两级判重：关键词预过滤 → 逐对 LLM 裁决。
+    返回 {"duplicates": [...], "uncertain": [...]}（候选记忆 dict 列表）。"""
+    candidates = find_similar(user_id, content, category)
+    if exclude_id is not None:
+        candidates = [m for m in candidates if m["id"] != exclude_id]
+    candidates = candidates[:config.MEMORY_LLM_DEDUP_MAX_PAIRS]
+    result = {"duplicates": [], "uncertain": []}
+    for mem in candidates:
+        try:
+            verdict = llm_judge_pair(mem["content"], content)
+        except Exception as e:
+            # fail-safe：判定失败按 uncertain 处理（交人判断，绝不自动合并）
+            logger.warning(f"[memories] LLM 判重异常（{type(e).__name__}），按 uncertain 处理")
+            verdict = "uncertain"
+        if verdict == "duplicate":
+            result["duplicates"].append(mem)
+        elif verdict == "uncertain":
+            result["uncertain"].append(mem)
+    return result
+
+
+def find_similar_pairs_llm(user_id: str | None) -> list[dict]:
+    """控制台合并建议：同用户同分类两两组合，关键词预过滤后 LLM 裁决。
+    仅返回 uncertain 对（duplicate 已在写入时自动合并）。
+    user_id 为 None 时覆盖全部用户（admin）。"""
+    init()
+    all_memories = list_all(user_id)
+    pairs = []
+    budget = config.MEMORY_LLM_DEDUP_MAX_PAIRS
+    judged = set()
+    # 候选对收集：同用户同分类两两组合；关键词重叠优先（预算不足时先判重叠对）
+    candidates = []
+    for i in range(len(all_memories)):
+        for j in range(i + 1, len(all_memories)):
+            a, b = all_memories[i], all_memories[j]
+            if a["user_id"] != b["user_id"] or a["category"] != b["category"]:
+                continue
+            overlap = bool(_extract_keywords(a["content"])
+                           & _extract_keywords(b["content"]))
+            candidates.append((not overlap, a, b))  # 重叠(False=0) 排前
+    candidates.sort(key=lambda t: t[0])
+    for _, a, b in candidates:
+        if budget <= 0:
+            break
+        key = (a["id"], b["id"])
+        if key in judged:
+            continue
+        judged.add(key)
+        budget -= 1
+        if llm_judge_pair(a["content"], b["content"]) == "uncertain":
+            pairs.append({"keep": b, "drop": a})
+    return pairs
